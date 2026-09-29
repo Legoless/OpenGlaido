@@ -1,7 +1,30 @@
 @import "tailwindcss";
 
+/* Aspekta by Ivo Dolenc, SIL OFL 1.1 (see assets/fonts/aspekta/OFL.txt) */
+@font-face {
+  font-family: "Aspekta";
+  font-style: normal;
+  font-weight: 400;
+  font-display: block;
+  src: url("./assets/fonts/aspekta/Aspekta-400.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Aspekta";
+  font-style: normal;
+  font-weight: 500;
+  font-display: block;
+  src: url("./assets/fonts/aspekta/Aspekta-500.woff2") format("woff2");
+}
+@font-face {
+  font-family: "Aspekta";
+  font-style: normal;
+  font-weight: 600;
+  font-display: block;
+  src: url("./assets/fonts/aspekta/Aspekta-600.woff2") format("woff2");
+}
+
 @theme {
-  --font-sans: "Geist Variable", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  --font-sans: "Aspekta", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   --font-mono: "Geist Mono Variable", ui-monospace, monospace;
 
   --color-background-primary: #0d0d0d;
@@ -23,7 +46,7 @@
   --color-border-accent: #bff549;
 
   --color-button-primary: #bff549;
-  --color-toggle-on: #8cc21f;
+  --color-toggle-on: #96c040;
 
   --color-transparent-primary: #ffffff08;
   --color-transparent-secondary: #ffffff0d;
@@ -58,7 +81,7 @@ body {
 /* ---- Glaido typography scale (from .glaido-screen docs CSS) ---- */
 .gs-text-tag {
   font-family: var(--font-mono);
-  letter-spacing: 0.01em;
+  letter-spacing: 0.03em;
   font-size: 12px;
   font-weight: 400;
   text-transform: uppercase;
@@ -107,23 +130,7 @@ body {
   line-height: 14px;
 }
 
-/* ---- Dictation bar waveform (from docs-all.css) ---- */
-@keyframes gs-wave {
-  0%,
-  100% {
-    height: 4px;
-  }
-  50% {
-    height: var(--gs-wave-h, 14px);
-  }
-}
-.gs-wave-bar {
-  background-color: currentColor;
-  border-radius: 9999px;
-  width: 3px;
-  height: 4px;
-  animation: gs-wave 1s ease-in-out infinite;
-}
+/* ---- Dictation bar processing shimmer (from docs-all.css) ---- */
 @keyframes gs-shimmer-sweep {
   0% {
     -webkit-mask-position: 250% 0;
@@ -141,10 +148,6 @@ body {
   -webkit-mask-size: 200% 100%;
   mask-size: 200% 100%;
 }
-.gs-waveform-processing .gs-wave-bar {
-  height: 4px;
-  animation: none;
-}
 
 /* Subtle lime keyboard focus ring */
 :focus-visible {
@@ -152,14 +155,18 @@ body {
   outline-offset: 1px;
 }
 
-/* Thin dark scrollbars */
+/* Slim scrollbars: 6px thumb inset 4px from the edge (14px gutter) */
 ::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
+  width: 14px;
+  height: 14px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #ffffff1a;
-  border-radius: 4px;
+  background: #ffffff08;
+  background-clip: padding-box;
+  border: 4px solid transparent;
+  border-top-width: 2px;
+  border-bottom-width: 2px;
+  border-radius: 9999px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;

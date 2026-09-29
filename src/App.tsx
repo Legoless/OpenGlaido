@@ -1,37 +1,47 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import {
   AudioLines,
+  AudioWaveform,
   BookOpen,
+  Captions,
   Check,
+  ChevronDown,
+  Clipboard,
   Command,
   Copy,
   Cpu,
+  Dock,
+  Ellipsis,
   Flame,
   Globe,
-  Home,
   KeyRound,
   Languages,
+  MapPin,
   Mic,
+  Music,
   Pause,
   Pencil,
   Play,
   Plus,
+  Power,
   RotateCw,
   Search,
   Settings,
-  SquareMenu,
-  SquareText,
+  ShieldCheck,
+  Settings2,
   Timer,
   Trash2,
-  Volume2,
+  TriangleAlert,
   X,
-  Zap,
+  createLucideIcon,
+  type LucideIcon,
 } from "lucide-react";
 
 // ------------------------------------------------------------------
-// Types (mirror src-tauri/src/lib.rs)
+// Types (mirror src-tauri/src/transcribe.rs / hotkeys.rs)
 // ------------------------------------------------------------------
 interface TranscriptionConfig {
   endpoint_url: string;
@@ -45,7 +55,21 @@ interface TranscriptionConfig {
   llm_model_name?: string | null;
   custom_formatting_prompt?: string | null;
   sound_feedback: boolean;
-  hotkey: string;
+  hotkey_hold: string;
+  hotkey_toggle: string;
+  enter_to_stop: boolean;
+  input_device?: string | null;
+  copy_to_clipboard: boolean;
+  bar_location: string;
+  launch_at_login: boolean;
+  show_in_menu_bar: boolean;
+  show_in_dock: boolean;
+}
+
+interface HotkeyStatus {
+  engine: "native" | "plugin";
+  permission_granted: boolean;
+  error: string | null;
 }
 
 interface HistoryItem {
@@ -70,8 +94,44 @@ interface SnippetItem {
 }
 
 type Page = "home" | "formatting" | "dictionary" | "snippets";
-type SettingsTab = "dictation" | "hotkeys" | "model";
-type IconType = React.ComponentType<{ className?: string; fill?: string }>;
+type SettingsTab = "dictation" | "hotkeys" | "general" | "model";
+type IconType = LucideIcon;
+/** Resolves to an error message (null on success); the caller shows it where the change was made. */
+type SaveConfig = (patch: Partial<TranscriptionConfig>) => Promise<string | null>;
+
+const IS_MAC = /Mac/i.test(navigator.userAgent);
+
+// Lucide-based nav glyphs closer to Glaido's. The outline comes first so the inner strokes paint
+// on top of it when the active icon is filled.
+const HouseDoor = createLucideIcon("house-door", [
+  [
+    "path",
+    {
+      d: "M3 10a2 2 0 0 1 .709-1.528l7-6a2 2 0 0 1 2.582 0l7 6A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z",
+      key: "outline",
+    },
+  ],
+  ["path", { d: "M14 21v-5a1 1 0 0 0-1-1h-2a1 1 0 0 0-1 1v5", key: "door" }],
+]);
+const BookSpine = createLucideIcon("book-spine", [
+  [
+    "path",
+    {
+      d: "M20.001 19A2 2 0 0022 17V5a2 2 0 00-1.999-2L16 3.002A5 5 0 0012 5a5 5 0 00-4-2H4a2 2 0 00-2 2v12a2 2 0 001.999 2H8a5 5 0 014 2 5 5 0 014-2z",
+      key: "outline",
+    },
+  ],
+  ["path", { d: "M12 5v16", key: "spine" }],
+]);
+// Angular bolt (lucide's pre-1.0 zap), closer to Glaido's stat icon than the rounded 1.x one.
+const Bolt = createLucideIcon("bolt-angular", [
+  ["polygon", { points: "13 2 3 14 12 14 11 22 21 10 12 10 13 2", key: "bolt" }],
+]);
+const SnippetIcon = createLucideIcon("snippet", [
+  ["rect", { width: "18", height: "18", x: "3", y: "3", rx: "2", key: "outline" }],
+  ["path", { d: "M8 10h7", key: "line-1" }],
+  ["path", { d: "M8 14h5", key: "line-2" }],
+]);
 
 // ------------------------------------------------------------------
 // Small shared primitives
@@ -106,19 +166,28 @@ function OutlineButton({
     <button
       type="button"
       onClick={onClick}
-      className="gs-text-body-md-medium inline-flex h-7 shrink-0 items-center gap-2 whitespace-nowrap rounded-[2px] border border-border-default px-2.5 text-text-subdued transition-colors hover:text-text-default"
+      className="gs-text-body-md-medium inline-flex h-7 shrink-0 items-center gap-2.5 whitespace-nowrap rounded-[2px] border border-border-default pr-2.5 pl-3 text-text-subdued transition-colors hover:text-text-default"
     >
       {children}
     </button>
   );
 }
 
-function LimeButton({ onClick, children }: { onClick: () => void; children: React.ReactNode }) {
+function LimeButton({
+  onClick,
+  children,
+  disabled = false,
+}: {
+  onClick: () => void;
+  children: React.ReactNode;
+  disabled?: boolean;
+}) {
   return (
     <button
       type="button"
       onClick={onClick}
-      className="gs-text-body-md-medium inline-flex h-8 shrink-0 items-center gap-2 whitespace-nowrap rounded-[4px] bg-button-primary px-3 text-text-dark transition-colors hover:bg-text-accent/85"
+      disabled={disabled}
+      className="gs-text-body-md-medium inline-flex h-7 shrink-0 items-center gap-2.5 whitespace-nowrap rounded-[2px] bg-button-primary px-2.5 text-text-dark transition-colors hover:bg-text-accent/85 disabled:opacity-40"
     >
       {children}
     </button>
@@ -160,13 +229,13 @@ function SearchField({
   placeholder: string;
 }) {
   return (
-    <div className="flex items-center gap-2 rounded-[4px] bg-transparent-primary px-3 py-1.5">
-      <Search className="size-3.5 shrink-0 text-text-disabled" />
+    <div className="flex h-[30px] w-[200px] shrink-0 items-center gap-2.5 rounded-[4px] bg-transparent-primary px-[13px]">
+      <Search className="size-3.5 shrink-0 text-text-subdued" />
       <input
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
-        className="gs-text-body-sm-regular min-w-[140px] bg-transparent text-text-default placeholder:text-text-disabled focus:outline-none"
+        className="gs-text-body-sm-regular w-full min-w-0 bg-transparent text-text-default placeholder:text-text-disabled focus:outline-none"
       />
     </div>
   );
@@ -183,13 +252,13 @@ function Modal({
 }) {
   return (
     <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/60"
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
     >
       <div
-        className={`${width} rounded-[12px] border border-border-default bg-background-card shadow-2xl`}
+        className={`${width} rounded-[12px] border border-border-default bg-[#232323]/85 shadow-2xl backdrop-blur-xl`}
       >
         {children}
       </div>
@@ -230,45 +299,139 @@ function TextInput({
   );
 }
 
+/** Outlined select (Glaido style) or, with `buttonLabel`, an outlined button that opens the same menu. */
+function Dropdown({
+  value,
+  options,
+  onChange,
+  className = "",
+  buttonLabel,
+}: {
+  value: string | null;
+  options: { value: string | null; label: string }[];
+  onChange: (v: string | null) => void;
+  className?: string;
+  buttonLabel?: string;
+}) {
+  // Portalled fixed-position menu: never clipped by the scrolling settings column, and not
+  // positioned relative to the modal (its backdrop-filter is a containing block for fixed children).
+  const [menu, setMenu] = useState<React.CSSProperties | null>(null);
+  const openMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    const r = e.currentTarget.getBoundingClientRect();
+    const right = window.innerWidth - r.right;
+    const openUp = r.bottom + 248 > window.innerHeight;
+    setMenu(
+      openUp
+        ? { right, bottom: window.innerHeight - r.top + 4, minWidth: r.width }
+        : { right, top: r.bottom + 4, minWidth: r.width },
+    );
+  };
+  const current = options.find((o) => o.value === value)?.label ?? value ?? "";
+  return (
+    <>
+      {buttonLabel ? (
+        <button
+          type="button"
+          onClick={openMenu}
+          className="gs-text-body-md-medium h-[29px] shrink-0 rounded-[2px] border border-border-default px-[9px] whitespace-nowrap text-text-subdued transition-colors hover:text-text-default"
+        >
+          {buttonLabel}
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={openMenu}
+          className={`gs-text-body-md-regular flex h-[29px] items-center justify-between gap-2 rounded-[4px] border border-border-default bg-background-input pr-2 pl-2.5 text-left text-text-default ${className}`}
+        >
+          <span className="truncate">{current}</span>
+          <ChevronDown className="size-3 shrink-0 text-text-subdued" />
+        </button>
+      )}
+      {menu &&
+        createPortal(
+          <>
+            <div className="fixed inset-0 z-[70]" onMouseDown={() => setMenu(null)} />
+            <div
+              style={menu}
+              className="fixed z-[71] flex max-h-[240px] flex-col overflow-y-auto rounded-[6px] border border-border-default bg-[#262626] p-1 shadow-2xl"
+            >
+              {options.map((o) => (
+                <button
+                  key={o.value ?? ""}
+                  type="button"
+                  onClick={() => {
+                    setMenu(null);
+                    if (o.value !== value) onChange(o.value);
+                  }}
+                  className="gs-text-body-md-regular flex h-8 shrink-0 items-center justify-between gap-4 rounded-[4px] px-2.5 text-left whitespace-nowrap text-text-default hover:bg-transparent-secondary"
+                >
+                  {o.label}
+                  {o.value === value && <Check className="size-3.5 text-text-accent" />}
+                </button>
+              ))}
+            </div>
+          </>,
+          document.body,
+        )}
+    </>
+  );
+}
+
 // ------------------------------------------------------------------
-// HUD dictation bar (/#hud)
+// HUD dictation bar (/#hud): always-visible pill in a 420x72 window
 // ------------------------------------------------------------------
-const WAVE_PEAKS = [8, 13, 17, 11, 16, 9, 15, 18, 12, 8];
-const WAVE_DURATIONS = [0.85, 0.97, 1.09];
+const BAR_COUNT = 10;
 
 function Hud({ isRecording, isProcessing }: { isRecording: boolean; isProcessing: boolean }) {
-  if (!isRecording && !isProcessing) return null;
-  const processing = isProcessing && !isRecording;
+  const [levels, setLevels] = useState<number[]>(() => Array(BAR_COUNT).fill(0));
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let timer: number | undefined;
+    const unlistenLevel = listen<number>("mic-level", (e) =>
+      setLevels((prev) => [...prev.slice(1), Math.min(1, Math.max(0, e.payload))]),
+    );
+    const unlistenError = listen<string>("dictation-error", (e) => {
+      setError(e.payload);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setError(null), 3000);
+    });
+    return () => {
+      window.clearTimeout(timer);
+      unlistenLevel.then((f) => f());
+      unlistenError.then((f) => f());
+    };
+  }, []);
+
+  useEffect(() => {
+    if (isRecording) setLevels(Array(BAR_COUNT).fill(0));
+  }, [isRecording]);
+
+  const state = error ? "error" : isRecording ? "recording" : isProcessing ? "processing" : "idle";
   return (
     <div className="flex h-screen w-screen items-center justify-center bg-transparent select-none">
-      <div
-        className="inline-flex h-[38px] items-center overflow-hidden rounded-[12px] text-text-accent"
-        style={{
-          backgroundColor: "rgba(13, 13, 13, 0.85)",
-          boxShadow:
-            "inset 0 0 0 1px rgba(255, 255, 255, 0.1), 0 4px 14px rgba(0, 0, 0, 0.18)",
-          backdropFilter: "blur(18px) saturate(160%)",
-        }}
-      >
+      <div className="flex h-[38px] max-w-[396px] items-center rounded-[12px] bg-background-primary px-3 text-text-accent shadow-[inset_0_0_0_1px_rgba(255,255,255,0.1),0_4px_14px_rgba(0,0,0,0.18)]">
         <div
-          className={`flex h-full items-center gap-2 pr-3 pl-3 ${processing ? "gs-waveform-processing" : ""}`}
+          className={`flex min-w-0 items-center gap-2 ${state === "processing" ? "gs-waveform-processing" : ""}`}
         >
           <AudioLines className="size-[18px] shrink-0" />
-          <div className="flex h-[18px] items-center gap-1">
-            {WAVE_PEAKS.map((h, i) => (
-              <span
-                key={i}
-                className="gs-wave-bar"
-                style={
-                  {
-                    "--gs-wave-h": `${h}px`,
-                    animationDelay: `${-0.13 * i}s`,
-                    animationDuration: `${WAVE_DURATIONS[i % 3]}s`,
-                  } as React.CSSProperties
-                }
-              />
-            ))}
-          </div>
+          {state === "error" ? (
+            <span className="gs-text-body-sm-regular truncate text-text-default">{error}</span>
+          ) : (
+            <div className="flex h-[18px] items-center gap-1">
+              {levels.map((v, i) => (
+                <span
+                  key={i}
+                  className={`w-[3px] rounded-full bg-current ${
+                    state === "idle" ? "h-[3px] opacity-30" : "transition-[height] duration-75 ease-out"
+                  }`}
+                  style={
+                    state === "recording" ? { height: 4 + v * 14 } : state === "processing" ? { height: 4 } : undefined
+                  }
+                />
+              ))}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -507,72 +670,297 @@ function SettingsRow({
   icon: Icon,
   title,
   description,
+  note,
   children,
 }: {
   icon: IconType;
   title: string;
   description: string;
+  /** Error / warning / hint shown under the row. */
+  note?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
-    <div className="flex items-center justify-between gap-4 rounded-lg px-3 py-3">
-      <div className="flex min-w-0 flex-1 items-center gap-4">
-        <div className="flex size-10 shrink-0 items-center justify-center rounded-[4px] bg-transparent-primary p-2.5 text-text-default">
-          <Icon className="size-5" />
+    <div className="flex flex-col">
+      {/* Wraps the control onto its own line when the window is too narrow. */}
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 px-3 py-4">
+        <div className="flex size-10 shrink-0 items-center justify-center rounded-[4px] bg-transparent-primary text-text-default">
+          <Icon className="size-[18px]" />
         </div>
-        <div className="flex min-w-0 flex-col gap-0.5">
+        <div className="flex min-w-[140px] flex-1 flex-col gap-1">
           <span className="gs-text-body-md-regular text-text-default">{title}</span>
           <span className="gs-text-body-sm-regular text-text-subdued">{description}</span>
         </div>
+        <div className="ml-auto flex max-w-full items-center justify-end">{children}</div>
       </div>
-      <div className="shrink-0">{children}</div>
+      {note && <div className="-mt-2 flex flex-col gap-1 pr-3 pb-2 pl-[68px]">{note}</div>}
     </div>
   );
 }
 
-function SettingsSection({ label, first }: { label: string; first?: boolean }) {
+function SettingsSection({ label }: { label: string }) {
+  return <span className="gs-text-tag px-3 pt-6 pb-2 text-text-subdued select-none">{label}</span>;
+}
+
+function NoteText({ tone, children }: { tone: "error" | "warning" | "hint"; children: React.ReactNode }) {
   return (
-    <span
-      className={`gs-text-tag px-3 pb-1 text-text-subdued select-none ${first ? "pt-0" : "pt-5"}`}
+    <p
+      className={`gs-text-body-sm-regular flex items-start gap-1.5 select-text ${
+        tone === "error" ? "text-text-error" : "text-text-subdued"
+      }`}
     >
-      {label}
-    </span>
+      {tone === "warning" && <TriangleAlert className="mt-px size-3.5 shrink-0 text-text-accent" />}
+      {children}
+    </p>
   );
 }
 
-const KEYCAP_LABELS: Record<string, string> = {
-  commandorcontrol: navigator.platform.toLowerCase().includes("mac") ? "⌘" : "Ctrl",
-  command: "⌘",
-  cmd: "⌘",
-  control: "Ctrl",
-  ctrl: "Ctrl",
-  shift: "⇧",
-  alt: "⌥",
-  option: "⌥",
-  space: "Space",
-  spacebar: "Space",
-  enter: "↵",
-  return: "↵",
+// Hotkey binding strings: see the doc comment in src-tauri/src/hotkeys.rs.
+const MODIFIER_CODES = [
+  "Fn",
+  "ControlLeft",
+  "ControlRight",
+  "AltLeft",
+  "AltRight",
+  "ShiftLeft",
+  "ShiftRight",
+  "MetaLeft",
+  "MetaRight",
+];
+
+const KEY_LABELS: Record<string, string> = {
+  Fn: "fn",
+  ControlLeft: "Left ^",
+  ControlRight: "Right ^",
+  AltLeft: "Left ⌥",
+  AltRight: "Right ⌥",
+  ShiftLeft: "Left ⇧",
+  ShiftRight: "Right ⇧",
+  MetaLeft: "Left ⌘",
+  MetaRight: "Right ⌘",
+  Control: IS_MAC ? "^" : "Ctrl",
+  Alt: IS_MAC ? "⌥" : "Alt",
+  Shift: "⇧",
+  Meta: IS_MAC ? "⌘" : "Win",
+  Space: "Spacebar",
+  Enter: "Enter",
 };
 
-function Keycaps({ hotkey }: { hotkey: string }) {
-  const parts = hotkey.split("+").filter(Boolean);
+function bindingLabels(binding: string): string[] {
+  return binding
+    .split("+")
+    .filter(Boolean)
+    .map((code) => KEY_LABELS[code] ?? code.replace(/^(Key|Digit)(?=.$)/, ""));
+}
+
+/** Canonical binding: modifiers in a fixed order, then at most one key. */
+function toBinding(codes: string[]): string {
+  const key = codes.find((c) => !MODIFIER_CODES.includes(c));
+  return [...MODIFIER_CODES.filter((m) => codes.includes(m)), ...(key ? [key] : [])].join("+");
+}
+
+function Keycaps({ labels }: { labels: string[] }) {
   return (
     <span className="flex items-center gap-1.5">
-      {parts.map((p, i) => {
-        const label = KEYCAP_LABELS[p.trim().toLowerCase()] ?? p.trim();
-        return (
-          <kbd
-            key={i}
-            className="inline-flex min-w-6 items-center justify-center rounded-[2px] bg-transparent-tertiary px-2 py-1 font-mono text-[12px] leading-4 text-text-subdued"
-          >
-            {label}
-          </kbd>
-        );
-      })}
+      {labels.map((label, i) => (
+        <kbd
+          key={i}
+          className="inline-flex h-6 min-w-6 items-center justify-center rounded-[2px] bg-transparent-tertiary px-[9px] font-mono text-[12px] leading-4 whitespace-nowrap text-text-subdued"
+        >
+          {label}
+        </kbd>
+      ))}
     </span>
   );
 }
+
+type CaptureResult = { binding: string; warning?: string | null; error?: string };
+
+// start/stop_hotkey_capture are async commands; keep them in call order (StrictMode runs the
+// recorder's effect twice in dev: start, stop, start).
+let captureQueue: Promise<unknown> = Promise.resolve();
+function captureCommand<T>(cmd: "start_hotkey_capture" | "stop_hotkey_capture"): Promise<T> {
+  const next = captureQueue.catch(() => {}).then(() => invoke<T>(cmd));
+  captureQueue = next;
+  return next;
+}
+
+/**
+ * Records a new binding. Native capture (macOS) streams "hotkey-capture" events; otherwise the
+ * webview's KeyboardEvent.code values are used. Esc alone cancels. Capture always stops on unmount.
+ */
+function HotkeyRecorder({
+  onSave,
+  onCancel,
+}: {
+  onSave: (binding: string) => Promise<string | null>;
+  onCancel: () => void;
+}) {
+  const [keys, setKeys] = useState("");
+  const [result, setResult] = useState<CaptureResult | null>(null);
+  const [saveError, setSaveError] = useState<string | null>(null);
+
+  // onCancel only closes the recorder (a state setter in the parent), so the first one is kept.
+  useEffect(() => {
+    let alive = true;
+    let native = false;
+    let latest = ""; // a slow check for an older chord must not become the saveable result
+    const progress = (binding: string) => {
+      latest = binding;
+      setKeys(binding);
+      setResult(null);
+      setSaveError(null);
+    };
+    const finish = (binding: string) => {
+      progress(binding);
+      const current = () => alive && latest === binding;
+      invoke<string | null>("check_hotkey", { binding })
+        .then((warning) => current() && setResult({ binding, warning }))
+        .catch((e) => current() && setResult({ binding, error: String(e) }));
+    };
+
+    // DOM fallback: chord = keys held when a non-modifier goes down, or the largest
+    // modifier-only set once everything is released.
+    const down = new Set<string>();
+    let combo: string[] = [];
+    let finished = false;
+    const onKeyDown = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (e.repeat) return;
+      if (e.code === "Escape" && down.size === 0) return onCancel();
+      if (native) return;
+      if (down.size === 0) {
+        combo = [];
+        finished = false;
+      }
+      if (!combo.includes(e.code)) combo.push(e.code);
+      if (MODIFIER_CODES.includes(e.code)) {
+        down.add(e.code);
+        if (!finished) progress(toBinding(combo));
+      } else {
+        // Key-ups are not delivered for keys pressed while ⌘ is held, so never track non-modifiers.
+        finished = true;
+        finish(toBinding([...down, e.code]));
+      }
+    };
+    const onKeyUp = (e: KeyboardEvent) => {
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      if (native) return;
+      down.delete(e.code);
+      if (down.size === 0 && !finished && combo.length > 0) {
+        finished = true;
+        finish(toBinding(combo));
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    window.addEventListener("keyup", onKeyUp, true);
+    // Leaving the window ends recording: the backend stops native capture on blur too.
+    window.addEventListener("blur", onCancel);
+
+    const unlisten = listen<{ keys: string; done: boolean }>("hotkey-capture", (e) => {
+      // The native engine reports Esc alone as an empty finished chord.
+      if (e.payload.done && !e.payload.keys) return onCancel();
+      if (e.payload.done) finish(e.payload.keys);
+      else progress(e.payload.keys);
+    });
+    captureCommand<boolean>("start_hotkey_capture")
+      .then((n) => {
+        native = n;
+      })
+      .catch((e) => alive && setSaveError(String(e)));
+
+    return () => {
+      alive = false;
+      window.removeEventListener("keydown", onKeyDown, true);
+      window.removeEventListener("keyup", onKeyUp, true);
+      window.removeEventListener("blur", onCancel);
+      unlisten.then((f) => f());
+      captureCommand("stop_hotkey_capture").catch(console.error);
+    };
+  }, []);
+
+  const save = async () => {
+    if (!result || result.error) return;
+    await captureCommand("stop_hotkey_capture").catch(console.error);
+    const err = await onSave(result.binding);
+    if (err) {
+      setSaveError(err);
+      captureCommand("start_hotkey_capture").catch(console.error);
+    }
+  };
+
+  return (
+    <div className="flex flex-col items-end gap-1.5">
+      <div className="flex items-center gap-2">
+        <div className="flex h-[29px] min-w-[132px] items-center rounded-[4px] border border-border-accent/60 bg-background-input px-[2px]">
+          {keys ? (
+            <Keycaps labels={bindingLabels(keys)} />
+          ) : (
+            <span className="gs-text-body-md-regular px-2 text-text-disabled">Press keys…</span>
+          )}
+        </div>
+        <OutlineButton onClick={onCancel}>Cancel</OutlineButton>
+        <LimeButton onClick={save} disabled={!result || !!result.error}>
+          Save
+        </LimeButton>
+      </div>
+      {result?.error && <NoteText tone="error">{result.error}</NoteText>}
+      {result?.warning && <NoteText tone="warning">{result.warning}</NoteText>}
+      {saveError && <NoteText tone="error">{saveError}</NoteText>}
+    </div>
+  );
+}
+
+const LANGUAGES: { value: string | null; label: string }[] = [
+  { value: null, label: "Auto-detect" },
+  { value: "en", label: "English" },
+  { value: "es", label: "Spanish" },
+  { value: "fr", label: "French" },
+  { value: "de", label: "German" },
+  { value: "it", label: "Italian" },
+  { value: "pt", label: "Portuguese" },
+  { value: "nl", label: "Dutch" },
+  { value: "pl", label: "Polish" },
+  { value: "cs", label: "Czech" },
+  { value: "sk", label: "Slovak" },
+  { value: "sl", label: "Slovenian" },
+  { value: "hr", label: "Croatian" },
+  { value: "sr", label: "Serbian" },
+  { value: "hu", label: "Hungarian" },
+  { value: "ro", label: "Romanian" },
+  { value: "bg", label: "Bulgarian" },
+  { value: "el", label: "Greek" },
+  { value: "ru", label: "Russian" },
+  { value: "uk", label: "Ukrainian" },
+  { value: "tr", label: "Turkish" },
+  { value: "sv", label: "Swedish" },
+  { value: "no", label: "Norwegian" },
+  { value: "da", label: "Danish" },
+  { value: "fi", label: "Finnish" },
+  { value: "ar", label: "Arabic" },
+  { value: "he", label: "Hebrew" },
+  { value: "hi", label: "Hindi" },
+  { value: "id", label: "Indonesian" },
+  { value: "vi", label: "Vietnamese" },
+  { value: "th", label: "Thai" },
+  { value: "zh", label: "Chinese" },
+  { value: "ja", label: "Japanese" },
+  { value: "ko", label: "Korean" },
+];
+
+const BAR_LOCATIONS = [
+  { value: "bottom", label: "Bottom" },
+  { value: "raised", label: "Raised" },
+  { value: "high", label: "High" },
+];
+
+// Active Glaido icons are filled lime with their inner strokes cut out in the background colour.
+const NAV_ICON_CUT = "[&>:not(:first-child)]:fill-[#151515] [&>:not(:first-child)]:stroke-[#151515]";
+const TAB_ICON_CUT = "[&>:not(:first-child)]:fill-[#282828] [&>:not(:first-child)]:stroke-[#282828]";
+
+type HotkeyField = "hotkey_hold" | "hotkey_toggle";
 
 function SettingsModal({
   config,
@@ -580,184 +968,401 @@ function SettingsModal({
   onClose,
 }: {
   config: TranscriptionConfig;
-  onSave: (patch: Partial<TranscriptionConfig>) => void;
+  onSave: SaveConfig;
   onClose: () => void;
 }) {
   const [tab, setTab] = useState<SettingsTab>("dictation");
-  const [language, setLanguage] = useState(config.language ?? "");
   const [endpointUrl, setEndpointUrl] = useState(config.endpoint_url);
   const [modelName, setModelName] = useState(config.model_name);
   const [apiKey, setApiKey] = useState(config.api_key);
-  const [editingHotkey, setEditingHotkey] = useState(false);
-  const [hotkeyDraft, setHotkeyDraft] = useState(config.hotkey);
+  const [errors, setErrors] = useState<Partial<Record<keyof TranscriptionConfig, string>>>({});
+  const [devices, setDevices] = useState<string[]>([]);
+  const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
+  const [hotkeyChecks, setHotkeyChecks] = useState<Partial<Record<HotkeyField, CaptureResult>>>({});
+  const [recording, setRecording] = useState<HotkeyField | null>(null);
 
-  const tabs: { id: SettingsTab; label: string; icon: IconType }[] = [
-    { id: "dictation", label: "Dictation", icon: SquareMenu },
+  useEffect(() => {
+    invoke<string[]>("list_input_devices").then(setDevices).catch(console.error);
+    invoke<HotkeyStatus>("get_hotkey_status").then(setHotkeyStatus).catch(console.error);
+    const unlisten = listen<HotkeyStatus>("hotkey-status", (e) => setHotkeyStatus(e.payload));
+    return () => {
+      unlisten.then((f) => f());
+    };
+  }, []);
+
+  // Conflict warnings / platform errors for the active bindings.
+  useEffect(() => {
+    let alive = true;
+    for (const field of ["hotkey_hold", "hotkey_toggle"] as const) {
+      const binding = config[field];
+      const set = (r: CaptureResult) => alive && setHotkeyChecks((prev) => ({ ...prev, [field]: r }));
+      if (!binding) {
+        set({ binding });
+        continue;
+      }
+      invoke<string | null>("check_hotkey", { binding })
+        .then((warning) => set({ binding, warning }))
+        .catch((e) => set({ binding, error: String(e) }));
+    }
+    return () => {
+      alive = false;
+    };
+  }, [config.hotkey_hold, config.hotkey_toggle]);
+
+  const save = async (patch: Partial<TranscriptionConfig>) => {
+    const err = await onSave(patch);
+    setErrors((prev) => {
+      const next = { ...prev };
+      for (const key of Object.keys(patch) as (keyof TranscriptionConfig)[]) {
+        if (err) next[key] = err;
+        else delete next[key];
+      }
+      return next;
+    });
+    return err;
+  };
+  const errorNote = (key: keyof TranscriptionConfig) =>
+    errors[key] && <NoteText tone="error">{errors[key]}</NoteText>;
+
+  const tabs: { id: SettingsTab; label: string; icon: IconType; filled?: boolean }[] = [
+    { id: "dictation", label: "Dictation", icon: Captions, filled: true },
     { id: "hotkeys", label: "Hotkeys", icon: Command },
+    { id: "general", label: "General", icon: Settings2 },
     { id: "model", label: "Model", icon: Cpu },
   ];
 
+  const deviceOptions = [
+    { value: null, label: "System default" },
+    ...devices.map((d) => ({ value: d, label: d })),
+  ];
+  if (config.input_device && !devices.includes(config.input_device)) {
+    deviceOptions.push({ value: config.input_device, label: `${config.input_device} (unavailable)` });
+  }
+
+  const hotkeyRow = (field: HotkeyField, icon: IconType, title: string, description: string) => {
+    const check = hotkeyChecks[field];
+    return (
+      <SettingsRow
+        icon={icon}
+        title={title}
+        description={description}
+        note={
+          recording !== field &&
+          (check?.error || check?.warning) && (
+            <>
+              {check?.error && <NoteText tone="error">{check.error}</NoteText>}
+              {check?.warning && <NoteText tone="warning">{check.warning}</NoteText>}
+            </>
+          )
+        }
+      >
+        {recording === field ? (
+          <HotkeyRecorder
+            onCancel={() => setRecording(null)}
+            onSave={async (binding) => {
+              const err = await save({ [field]: binding });
+              if (!err) setRecording(null);
+              return err;
+            }}
+          />
+        ) : (
+          <div className="flex items-center gap-2">
+            <IconButton onClick={() => setRecording(field)} title="Edit hotkey">
+              <Pencil className="size-5" />
+            </IconButton>
+            {config[field] ? (
+              <Keycaps labels={bindingLabels(config[field])} />
+            ) : (
+              <span className="gs-text-body-md-regular text-text-disabled">Disabled</span>
+            )}
+          </div>
+        )}
+      </SettingsRow>
+    );
+  };
+
+  const usesFn = [config.hotkey_hold, config.hotkey_toggle].some((b) => b.split("+").includes("Fn"));
+
   return (
-    <Modal onClose={onClose} width="w-[784px] max-w-[92vw]">
-      <div className="flex max-h-[82vh] flex-col">
-        {/* Header */}
-        <div className="flex items-center justify-between px-6 pt-5">
-          <h2 className="gs-text-heading-md text-text-default">Settings</h2>
-          <IconButton onClick={onClose} title="Close settings">
-            <X className="size-4" />
-          </IconButton>
+    <Modal
+      onClose={onClose}
+      width="flex h-[calc(100vh-122px)] min-h-[min(500px,calc(100vh-40px))] max-h-[900px] w-[calc(100vw-288px)] min-w-[min(720px,calc(100vw-40px))] max-w-[1200px] flex-col"
+    >
+      {/* Header */}
+      <div className="flex shrink-0 items-center justify-between px-6 pt-6">
+        <h2 className="text-[20px] leading-7 font-medium tracking-[0.01em] text-text-default">Settings</h2>
+        <IconButton onClick={onClose} title="Close settings">
+          <X className="size-3.5" strokeWidth={1.5} />
+        </IconButton>
+      </div>
+
+      {/* Body */}
+      <div className="flex min-h-0 flex-1 gap-12 pt-6 pl-6">
+        {/* Tab list */}
+        <div className="flex w-[244px] max-w-[22vw] shrink-0 flex-col gap-1">
+          {tabs.map((t) => {
+            const Icon = t.icon;
+            const active = tab === t.id;
+            return (
+              <button
+                key={t.id}
+                type="button"
+                onClick={() => setTab(t.id)}
+                className={`flex h-10 items-center gap-3 rounded-[4px] pl-2.5 transition-colors ${
+                  active
+                    ? "bg-transparent-primary text-text-default"
+                    : "text-text-subdued hover:bg-transparent-secondary hover:text-text-default"
+                }`}
+              >
+                <Icon
+                  className={`size-[18px] shrink-0 ${active ? "text-text-accent" : ""} ${active && t.filled ? TAB_ICON_CUT : ""}`}
+                  fill={active && t.filled ? "currentColor" : "none"}
+                />
+                <span className="gs-text-body-md-regular">{t.label}</span>
+              </button>
+            );
+          })}
         </div>
 
-        {/* Body */}
-        <div className="flex min-h-[420px] flex-1 gap-6 px-6 pt-4">
-          {/* Tab list */}
-          <div className="flex w-[220px] shrink-0 flex-col gap-1">
-            {tabs.map((t) => {
-              const Icon = t.icon;
-              const active = tab === t.id;
-              return (
-                <button
-                  key={t.id}
-                  type="button"
-                  onClick={() => setTab(t.id)}
-                  className={`flex h-9 items-center gap-3 rounded-[6px] px-3 transition-colors ${
-                    active
-                      ? "bg-transparent-primary text-text-default"
-                      : "text-text-subdued hover:bg-transparent-secondary hover:text-text-default"
-                  }`}
-                >
-                  <Icon className={`size-4 ${active ? "text-text-accent" : ""}`} />
-                  <span className="gs-text-body-md-medium">{t.label}</span>
-                </button>
-              );
-            })}
-          </div>
+        {/* Content */}
+        <div className="flex min-w-0 flex-1 flex-col overflow-y-auto pr-[44px] pb-6 [scrollbar-gutter:stable]">
+          <h3 className="gs-text-heading-md text-text-default">
+            {tabs.find((t) => t.id === tab)?.label}
+          </h3>
 
-          {/* Content */}
-          <div className="flex min-w-0 flex-1 flex-col gap-2 overflow-y-auto pb-2">
-            <h3 className="gs-text-heading-sm font-medium text-text-default px-3 capitalize">{tab}</h3>
-
-            {tab === "dictation" && (
-              <>
-                <SettingsSection label="Language" first />
-                <SettingsRow
-                  icon={Languages}
-                  title="Dictation language"
-                  description="The language you speak when dictating"
-                >
-                  <TextInput
-                    value={language}
-                    onChange={setLanguage}
-                    onCommit={() => onSave({ language: language.trim() || null })}
-                    placeholder="Auto"
-                    className="w-[140px]"
+          {tab === "dictation" && (
+            <>
+              <SettingsSection label="Input" />
+              <SettingsRow
+                icon={Mic}
+                title="Microphone"
+                description="Select your input device"
+                note={errorNote("input_device")}
+              >
+                <Dropdown
+                  value={config.input_device ?? null}
+                  options={deviceOptions}
+                  onChange={(v) => save({ input_device: v })}
+                  className="w-[346px] max-w-full"
+                />
+              </SettingsRow>
+              <SettingsSection label="Language" />
+              <SettingsRow
+                icon={Languages}
+                title="Dictation language"
+                description="The language you speak when dictating"
+                note={errorNote("language")}
+              >
+                <div className="flex min-w-0 items-center gap-3">
+                  <span className="gs-text-body-md-regular min-w-0 truncate text-text-subdued">
+                    {LANGUAGES.find((l) => l.value === (config.language || null))?.label ?? config.language}
+                  </span>
+                  <Dropdown
+                    value={config.language || null}
+                    options={LANGUAGES}
+                    onChange={(v) => save({ language: v })}
+                    buttonLabel="Change"
                   />
-                </SettingsRow>
-                <SettingsSection label="Behavior" />
-                <SettingsRow
-                  icon={Volume2}
-                  title="Interaction sounds"
-                  description="Play audio feedback when recording starts and stops"
-                >
-                  <Toggle
-                    on={config.sound_feedback}
-                    onChange={(v) => onSave({ sound_feedback: v })}
-                    label="Interaction sounds"
-                  />
-                </SettingsRow>
-              </>
-            )}
+                </div>
+              </SettingsRow>
+              <SettingsSection label="Behavior" />
+              <SettingsRow
+                icon={Clipboard}
+                title="Copy to clipboard"
+                description="Also copy transcribed text to the clipboard after pasting"
+                note={errorNote("copy_to_clipboard")}
+              >
+                <Toggle
+                  on={config.copy_to_clipboard}
+                  onChange={(v) => save({ copy_to_clipboard: v })}
+                  label="Copy to clipboard"
+                />
+              </SettingsRow>
+              <SettingsRow
+                icon={Music}
+                title="Interaction sounds"
+                description="Play audio feedback when recording starts and stops"
+                note={errorNote("sound_feedback")}
+              >
+                <Toggle
+                  on={config.sound_feedback}
+                  onChange={(v) => save({ sound_feedback: v })}
+                  label="Interaction sounds"
+                />
+              </SettingsRow>
+              <SettingsRow
+                icon={MapPin}
+                title="Dictation bar location"
+                description="Choose how high the dictation bar appears on screen"
+                note={errorNote("bar_location")}
+              >
+                <Dropdown
+                  value={config.bar_location}
+                  options={BAR_LOCATIONS}
+                  onChange={(v) => v && save({ bar_location: v })}
+                  className="w-[132px]"
+                />
+              </SettingsRow>
+            </>
+          )}
 
-            {tab === "hotkeys" && (
-              <>
-                <SettingsSection label="Dictation" first />
-                <SettingsRow
-                  icon={AudioLines}
-                  title="Dictation"
-                  description="Press to speak, press again to insert what you said."
-                >
-                  <div className="flex items-center gap-2">
-                    <IconButton
-                      onClick={() => {
-                        setHotkeyDraft(config.hotkey);
-                        setEditingHotkey((v) => !v);
-                      }}
-                      title="Edit hotkey"
-                    >
-                      <Pencil className="size-4" />
-                    </IconButton>
-                    {editingHotkey ? (
-                      <TextInput
-                        value={hotkeyDraft}
-                        onChange={setHotkeyDraft}
-                        onCommit={() => {
-                          if (hotkeyDraft.trim()) onSave({ hotkey: hotkeyDraft.trim() });
-                          setEditingHotkey(false);
-                        }}
-                        placeholder="CommandOrControl+Shift+Space"
-                        className="w-[220px] font-mono"
-                        autoFocus
-                      />
-                    ) : (
-                      <Keycaps hotkey={config.hotkey} />
+          {tab === "hotkeys" && (
+            <>
+              {hotkeyStatus && (!hotkeyStatus.permission_granted || hotkeyStatus.error) && (
+                <div className="mt-4 flex flex-wrap items-center gap-3 rounded-[6px] border border-border-default bg-transparent-primary px-3 py-2.5">
+                  <TriangleAlert className="size-4 shrink-0 text-text-accent" />
+                  <div className="flex min-w-[200px] flex-1 flex-col">
+                    {!hotkeyStatus.permission_granted && (
+                      <span className="gs-text-body-md-regular text-text-default">
+                        OpenGlaido needs Accessibility access to detect hotkeys.
+                      </span>
+                    )}
+                    {hotkeyStatus.error && (
+                      <span className="gs-text-body-sm-regular text-text-error select-text">
+                        {hotkeyStatus.error}
+                      </span>
                     )}
                   </div>
-                </SettingsRow>
-              </>
-            )}
+                  {!hotkeyStatus.permission_granted && (
+                    <OutlineButton
+                      onClick={() => invoke("open_accessibility_settings").catch(console.error)}
+                    >
+                      Open Accessibility settings
+                    </OutlineButton>
+                  )}
+                </div>
+              )}
+              <SettingsSection label="Dictation" />
+              {hotkeyRow("hotkey_hold", AudioLines, "Dictation", "Hold to speak. OpenGlaido inserts what you say.")}
+              {hotkeyRow(
+                "hotkey_toggle",
+                AudioWaveform,
+                "Hands-free dictation",
+                "Press once to dictate hands-free. Press again to stop.",
+              )}
+              {usesFn && (
+                <div className="pr-3 pb-2 pl-[68px]">
+                  <NoteText tone="hint">
+                    Set System Settings › Keyboard › “Press 🌐 key to” to “Do Nothing” so fn doesn't open
+                    the emoji picker.
+                  </NoteText>
+                </div>
+              )}
+              <SettingsSection label="App" />
+              <SettingsRow
+                icon={Command}
+                title="Enter to stop and paste"
+                description="While dictating hands-free, Enter stops the session and pastes the result"
+                note={errorNote("enter_to_stop")}
+              >
+                <Toggle
+                  on={config.enter_to_stop}
+                  onChange={(v) => save({ enter_to_stop: v })}
+                  label="Enter to stop and paste"
+                />
+              </SettingsRow>
+              <SettingsRow icon={Settings} title="Settings" description="Open this window">
+                <Keycaps labels={[IS_MAC ? "⌘" : "Ctrl", ","]} />
+              </SettingsRow>
+            </>
+          )}
 
-            {tab === "model" && (
-              <>
-                <SettingsSection label="Speech to text" first />
-                <SettingsRow
-                  icon={Globe}
-                  title="STT endpoint URL"
-                  description="OpenAI-compatible endpoint"
-                >
-                  <TextInput
-                    value={endpointUrl}
-                    onChange={setEndpointUrl}
-                    onCommit={() => onSave({ endpoint_url: endpointUrl.trim() })}
-                    placeholder="https://api.groq.com/openai/v1/audio/transcriptions"
-                    className="w-[200px] font-mono"
-                  />
-                </SettingsRow>
-                <SettingsRow
-                  icon={Cpu}
-                  title="Model name"
-                  description="Whisper model to request"
-                >
-                  <TextInput
-                    value={modelName}
-                    onChange={setModelName}
-                    onCommit={() => onSave({ model_name: modelName.trim() })}
-                    placeholder="whisper-large-v3-turbo"
-                    className="w-[180px] font-mono"
-                  />
-                </SettingsRow>
-                <SettingsRow
-                  icon={KeyRound}
-                  title="API key"
-                  description="Bearer token for the endpoint"
-                >
-                  <TextInput
-                    type="password"
-                    value={apiKey}
-                    onChange={setApiKey}
-                    onCommit={() => onSave({ api_key: apiKey.trim() })}
-                    placeholder="gsk_... or custom key"
-                    className="w-[200px] font-mono"
-                  />
-                </SettingsRow>
-              </>
-            )}
-          </div>
-        </div>
+          {tab === "general" && (
+            <>
+              <SettingsSection label="System" />
+              <SettingsRow
+                icon={Power}
+                title="Launch app at login"
+                description="Start OpenGlaido automatically when you log in"
+                note={errorNote("launch_at_login")}
+              >
+                <Toggle
+                  on={config.launch_at_login}
+                  onChange={(v) => save({ launch_at_login: v })}
+                  label="Launch app at login"
+                />
+              </SettingsRow>
+              <SettingsRow
+                icon={Ellipsis}
+                title="Show in Menu bar"
+                description="Display the OpenGlaido icon in the menu bar"
+                note={errorNote("show_in_menu_bar")}
+              >
+                <Toggle
+                  on={config.show_in_menu_bar}
+                  onChange={(v) => save({ show_in_menu_bar: v })}
+                  label="Show in Menu bar"
+                />
+              </SettingsRow>
+              <SettingsRow
+                icon={Dock}
+                title="Show in Dock"
+                description="Keep OpenGlaido visible in the Dock and app switcher"
+                note={errorNote("show_in_dock")}
+              >
+                <Toggle
+                  on={config.show_in_dock}
+                  onChange={(v) => save({ show_in_dock: v })}
+                  label="Show in Dock"
+                />
+              </SettingsRow>
+            </>
+          )}
 
-        {/* Footer */}
-        <div className="px-6 pt-2 pb-5">
-          <span className="gs-text-body-xs-regular text-text-disabled">Version 0.1.0</span>
+          {tab === "model" && (
+            <>
+              <SettingsSection label="Speech to text" />
+              <SettingsRow
+                icon={Globe}
+                title="STT endpoint URL"
+                description="OpenAI-compatible endpoint"
+                note={errorNote("endpoint_url")}
+              >
+                <TextInput
+                  value={endpointUrl}
+                  onChange={setEndpointUrl}
+                  onCommit={() => save({ endpoint_url: endpointUrl.trim() })}
+                  placeholder="https://api.groq.com/openai/v1/audio/transcriptions"
+                  className="w-[200px]"
+                />
+              </SettingsRow>
+              <SettingsRow
+                icon={Cpu}
+                title="Model name"
+                description="Whisper model to request"
+                note={errorNote("model_name")}
+              >
+                <TextInput
+                  value={modelName}
+                  onChange={setModelName}
+                  onCommit={() => save({ model_name: modelName.trim() })}
+                  placeholder="whisper-large-v3-turbo"
+                  className="w-[180px]"
+                />
+              </SettingsRow>
+              <SettingsRow
+                icon={KeyRound}
+                title="API key"
+                description="Bearer token for the endpoint"
+                note={errorNote("api_key")}
+              >
+                <TextInput
+                  type="password"
+                  value={apiKey}
+                  onChange={setApiKey}
+                  onCommit={() => save({ api_key: apiKey.trim() })}
+                  placeholder="gsk_... or custom key"
+                  className="w-[200px]"
+                />
+              </SettingsRow>
+            </>
+          )}
         </div>
+      </div>
+
+      {/* Footer */}
+      <div className="shrink-0 pt-[30px] pb-[22px] pl-[34px]">
+        <span className="gs-text-body-xs-regular text-text-disabled">Version 0.1.0</span>
       </div>
     </Modal>
   );
@@ -821,7 +1426,7 @@ function AddEntryModal({
         <div className="flex items-center justify-end gap-2 pt-1">
           <OutlineButton onClick={onClose}>Cancel</OutlineButton>
           <LimeButton onClick={onSubmit}>
-            <Plus className="size-3.5" />
+            <Plus className="size-3" />
             {submitLabel}
           </LimeButton>
         </div>
@@ -847,18 +1452,20 @@ function EmptyState({
   onAction: () => void;
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-3 py-8">
-      <div className="flex size-12 items-center justify-center rounded-[8px] bg-transparent-primary">
-        <Icon className="size-6 text-text-subdued" />
+    <div className="flex flex-1 flex-col items-center justify-center pt-6 pb-8">
+      <div className="flex size-12 items-center justify-center rounded-[6px] bg-transparent-primary">
+        <Icon className="size-5 text-text-subdued" strokeWidth={1.5} />
       </div>
-      <span className="gs-text-body-md-medium text-text-default">{title}</span>
-      <p className="gs-text-body-sm-regular max-w-[280px] text-center text-text-subdued">
+      <span className="gs-text-heading-md mt-[17px] text-text-default">{title}</span>
+      <p className="gs-text-body-md-regular mt-[7px] max-w-[320px] text-center text-text-subdued">
         {description}
       </p>
-      <LimeButton onClick={onAction}>
-        <Plus className="size-3.5" />
-        {actionLabel}
-      </LimeButton>
+      <div className="mt-5">
+        <LimeButton onClick={onAction}>
+          <Plus className="size-3" />
+          {actionLabel}
+        </LimeButton>
+      </div>
     </div>
   );
 }
@@ -868,9 +1475,9 @@ function EmptyState({
 // ------------------------------------------------------------------
 function HeaderCard({ title, description }: { title: string; description: string }) {
   return (
-    <div className="shrink-0 rounded-[8px] bg-background-card p-8">
+    <div className="flex shrink-0 flex-col gap-2 rounded-[8px] bg-background-card p-8">
       <h2 className="gs-text-heading-md text-text-default">{title}</h2>
-      <p className="gs-text-body-md-regular mt-1 text-text-subdued">{description}</p>
+      <p className="gs-text-body-md-regular text-text-subdued">{description}</p>
     </div>
   );
 }
@@ -905,6 +1512,9 @@ export default function App() {
   const [addSnippetOpen, setAddSnippetOpen] = useState(false);
   const [newTrigger, setNewTrigger] = useState("");
   const [newContent, setNewContent] = useState("");
+
+  const [formattingError, setFormattingError] = useState<string | null>(null);
+  const [toast, setToast] = useState<string | null>(null);
 
   // ---- data loaders ----
   const loadConfig = async () => {
@@ -957,6 +1567,21 @@ export default function App() {
     };
   }, [isHud]);
 
+  // ---- dictation errors -> toast (main window; the HUD shows its own error pill) ----
+  useEffect(() => {
+    if (isHud) return;
+    let timer: number | undefined;
+    const unlisten = listen<string>("dictation-error", (e) => {
+      setToast(e.payload);
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => setToast(null), 5000);
+    });
+    return () => {
+      window.clearTimeout(timer);
+      unlisten.then((f) => f());
+    };
+  }, [isHud]);
+
   // ---- keyboard shortcuts (main window) ----
   useEffect(() => {
     if (isHud) return;
@@ -977,14 +1602,18 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [isHud, addWordOpen, addSnippetOpen, openRecordId, settingsOpen]);
 
-  const saveConfig = async (patch: Partial<TranscriptionConfig>) => {
-    if (!config) return;
+  // Optimistic: show the change right away, then take the config the backend applied (or revert).
+  const saveConfig: SaveConfig = async (patch) => {
+    if (!config) return "Settings are not loaded yet";
     const newConfig = { ...config, ...patch };
+    setConfig(newConfig);
     try {
-      await invoke("save_config", { newConfig });
-      setConfig(newConfig);
+      setConfig(await invoke<TranscriptionConfig>("save_config", { newConfig }));
+      return null;
     } catch (e) {
       console.error(e);
+      setConfig(config);
+      return String(e);
     }
   };
 
@@ -1128,17 +1757,17 @@ export default function App() {
   }
 
   const navItems: { id: Page; label: string; icon: IconType }[] = [
-    { id: "home", label: "Home", icon: Home },
-    { id: "formatting", label: "Formatting", icon: SquareMenu },
-    { id: "dictionary", label: "Dictionary", icon: BookOpen },
-    { id: "snippets", label: "Snippets", icon: SquareText },
+    { id: "home", label: "Home", icon: HouseDoor },
+    { id: "formatting", label: "Formatting", icon: Captions },
+    { id: "dictionary", label: "Dictionary", icon: BookSpine },
+    { id: "snippets", label: "Snippets", icon: SnippetIcon },
   ];
 
   const openRecord = openRecordId ? history.find((h) => h.id === openRecordId) : undefined;
 
   const statCards = [
     { icon: Timer, label: "Time saved", value: stats.saved, subtitle: stats.savedSubtitle },
-    { icon: Zap, label: "Dictation speed", value: stats.wpm, subtitle: stats.wpmSubtitle },
+    { icon: Bolt, label: "Dictation speed", value: stats.wpm, subtitle: stats.wpmSubtitle },
     { icon: Flame, label: "Day streak", value: stats.streak, subtitle: stats.streakSubtitle },
   ];
 
@@ -1165,7 +1794,7 @@ export default function App() {
       <div className="flex min-h-0 flex-1 gap-8 px-4 pb-4 pt-5">
         {/* Sidebar */}
         <aside className="flex w-[224px] shrink-0 flex-col">
-          <nav className="flex flex-1 flex-col gap-1">
+          <nav className="flex flex-1 flex-col gap-0.5">
             {navItems.map((item) => {
               const Icon = item.icon;
               const active = page === item.id;
@@ -1174,17 +1803,19 @@ export default function App() {
                   key={item.id}
                   type="button"
                   onClick={() => setPage(item.id)}
-                  className={`flex h-10 w-full items-center gap-3 rounded-[6px] px-3 transition-colors ${
+                  className={`flex h-10 w-full shrink-0 items-center gap-2.5 rounded-[4px] px-2.5 transition-colors ${
+                    item.id === "home" ? "mb-3" : ""
+                  } ${
                     active
                       ? "bg-transparent-primary text-text-default"
                       : "text-text-subdued hover:bg-transparent-secondary hover:text-text-default"
                   }`}
                 >
                   <Icon
-                    className={`size-[18px] shrink-0 ${active ? "text-text-accent stroke-[#151515]" : ""}`}
+                    className={`size-5 shrink-0 ${active ? `text-text-accent ${NAV_ICON_CUT}` : ""}`}
                     fill={active ? "currentColor" : "none"}
                   />
-                  <span className="gs-text-body-md-medium">{item.label}</span>
+                  <span className="gs-text-body-md-regular">{item.label}</span>
                 </button>
               );
             })}
@@ -1192,17 +1823,10 @@ export default function App() {
           <button
             type="button"
             onClick={() => setSettingsOpen(true)}
-            className={`flex h-10 w-full items-center gap-3 rounded-[6px] px-3 transition-colors ${
-              settingsOpen
-                ? "bg-transparent-primary text-text-default"
-                : "text-text-subdued hover:bg-transparent-secondary hover:text-text-default"
-            }`}
+            className="flex h-10 w-full items-center gap-2.5 rounded-[4px] px-2.5 text-text-subdued transition-colors hover:bg-transparent-secondary hover:text-text-default"
           >
-            <Settings
-              className={`size-[18px] shrink-0 ${settingsOpen ? "text-text-accent stroke-[#151515]" : ""}`}
-              fill={settingsOpen ? "currentColor" : "none"}
-            />
-            <span className="gs-text-body-md-medium">Settings</span>
+            <Settings className="size-5 shrink-0" />
+            <span className="gs-text-body-md-regular">Settings</span>
           </button>
         </aside>
 
@@ -1217,11 +1841,11 @@ export default function App() {
                   return (
                     <div
                       key={card.label}
-                      className="flex h-[180px] flex-col rounded-[8px] bg-background-card p-8"
+                      className="flex h-[179px] flex-col rounded-[8px] bg-background-card p-[30px]"
                     >
-                      <div className="flex items-center gap-2">
-                        <Icon className="size-[18px] text-text-accent" />
-                        <span className="gs-text-tag text-text-subdued">{card.label}</span>
+                      <div className="flex items-center gap-[9px]">
+                        <Icon className={`size-5 text-text-accent ${card.icon === Timer ? "-scale-x-100" : ""}`} />
+                        <span className="gs-text-tag text-text-default">{card.label}</span>
                       </div>
                       <div className="mt-auto">
                         <div className="text-[34px] leading-[40px] font-medium text-text-default">
@@ -1238,8 +1862,9 @@ export default function App() {
 
               {/* Activity card */}
               <div className="flex min-h-0 flex-1 flex-col rounded-[8px] bg-background-card pt-8 pb-8 pl-8">
-                <div className="flex min-h-7 shrink-0 items-center gap-1.5 pr-8">
+                <div className="flex min-h-7 shrink-0 items-center gap-2 pr-8">
                   <span className="gs-text-tag text-text-default">Activity</span>
+                  <ShieldCheck className="size-3.5 text-text-disabled" />
                   <div className="flex-1" />
                   <SearchField
                     value={historyQuery}
@@ -1247,7 +1872,7 @@ export default function App() {
                     placeholder="Search transcriptions..."
                   />
                 </div>
-                <div className="mt-5 flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pr-8">
+                <div className="mt-5 flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pr-[18px] [scrollbar-gutter:stable]">
                   {historyGroups.length === 0 ? (
                     <EmptyState
                       icon={Mic}
@@ -1258,7 +1883,7 @@ export default function App() {
                     />
                   ) : (
                     historyGroups.map((group) => (
-                      <div key={group.label} className="flex shrink-0 flex-col gap-2">
+                      <div key={group.label} className="flex shrink-0 flex-col gap-6">
                         <div className="flex items-center gap-2 px-3 py-2">
                           <span className="gs-text-heading-sm text-text-default">{group.label}</span>
                           <span className="gs-text-heading-sm text-text-subdued">{group.date}</span>
@@ -1269,20 +1894,20 @@ export default function App() {
                               key={item.id}
                               type="button"
                               onClick={() => setOpenRecordId(item.id)}
-                              className="flex w-full items-center gap-4 rounded-[4px] px-3 py-4 text-left transition-colors hover:bg-transparent-primary"
+                              className="flex w-full items-center gap-5 rounded-[4px] px-3 py-4 text-left transition-colors hover:bg-transparent-primary"
                             >
-                              <div className="flex size-10 shrink-0 items-center justify-center rounded-[8px] bg-transparent-tertiary">
+                              <div className="flex size-9 shrink-0 items-center justify-center rounded-[8px] bg-transparent-tertiary">
                                 <Mic className="size-5 text-text-subdued" />
                               </div>
                               <div className="min-w-0 flex-1">
-                                <p className="gs-text-body-md-regular max-w-[52ch] truncate text-text-default">
+                                <p className="gs-text-body-md-regular max-w-[436px] truncate text-text-default">
                                   {item.text}
                                 </p>
-                                <p className="gs-text-body-md-regular max-w-[52ch] truncate text-text-subdued">
+                                <p className="gs-text-body-md-regular max-w-[436px] truncate text-text-subdued">
                                   {formatDuration(item.duration_ms)}
                                 </p>
                               </div>
-                              <span className="gs-text-body-sm-regular flex h-10 shrink-0 items-center whitespace-nowrap text-text-subdued tabular-nums">
+                              <span className="gs-text-body-sm-regular flex h-10 shrink-0 items-center whitespace-nowrap text-text-subdued">
                                 {formatTime(new Date(item.created_at))}
                               </span>
                             </button>
@@ -1307,25 +1932,30 @@ export default function App() {
                 <div className="flex min-h-7 shrink-0 items-center gap-1.5">
                   <span className="gs-text-tag text-text-default">Formatting</span>
                 </div>
-                <div className="mt-4 flex flex-col">
+                <div className="mt-5 flex flex-col">
                   {modes.map((m) => (
                     <div
                       key={m.id}
-                      className="flex items-center justify-between gap-4 rounded-lg px-3 py-3"
+                      className="flex min-h-[60px] items-center justify-between gap-4 rounded-[4px] px-3 py-2.5"
                     >
-                      <div className="flex min-w-0 flex-col gap-0.5">
+                      <div className="flex min-w-0 flex-col">
                         <span className="gs-text-body-md-regular text-text-default">{m.title}</span>
-                        <span className="gs-text-body-sm-regular text-text-subdued">{m.desc}</span>
+                        <span className="gs-text-body-md-regular truncate text-text-subdued">{m.desc}</span>
                       </div>
                       <Toggle
                         on={config.mode === m.id}
-                        onChange={(v) => {
-                          if (v) saveConfig({ mode: m.id });
+                        onChange={async (v) => {
+                          if (v) setFormattingError(await saveConfig({ mode: m.id }));
                         }}
                         label={m.title}
                       />
                     </div>
                   ))}
+                  {formattingError && (
+                    <p className="gs-text-body-sm-regular px-3 pt-2 text-text-error select-text">
+                      {formattingError}
+                    </p>
+                  )}
                 </div>
               </div>
             </>
@@ -1348,11 +1978,11 @@ export default function App() {
                     placeholder="Search words..."
                   />
                   <OutlineButton onClick={() => setAddWordOpen(true)}>
-                    <Plus className="size-3.5" />
+                    <Plus className="size-3" />
                     Add word
                   </OutlineButton>
                 </div>
-                <div className="mt-5 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-8">
+                <div className="mt-5 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-[18px] [scrollbar-gutter:stable]">
                   {filteredDictionary.length === 0 ? (
                     <EmptyState
                       icon={BookOpen}
@@ -1368,7 +1998,7 @@ export default function App() {
                       return (
                         <div
                           key={item.id}
-                          className="group flex items-center justify-between gap-4 rounded-[4px] px-3 py-2.5 transition-colors hover:bg-transparent-primary"
+                          className="group flex items-center justify-between gap-4 rounded-[4px] px-3 py-[14px] transition-colors hover:bg-transparent-primary"
                         >
                           <div className="flex min-w-0 flex-col gap-0.5">
                             <span className="gs-text-body-md-regular truncate text-text-default">
@@ -1409,14 +2039,14 @@ export default function App() {
                   <span className="gs-text-tag text-text-default">Snippets</span>
                   <div className="flex-1" />
                   <OutlineButton onClick={() => setAddSnippetOpen(true)}>
-                    <Plus className="size-3.5" />
+                    <Plus className="size-3" />
                     Add snippet
                   </OutlineButton>
                 </div>
-                <div className="mt-5 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-8">
+                <div className="mt-5 flex min-h-0 flex-1 flex-col gap-0.5 overflow-y-auto pr-[18px] [scrollbar-gutter:stable]">
                   {snippets.length === 0 ? (
                     <EmptyState
-                      icon={SquareText}
+                      icon={SnippetIcon}
                       title="No snippets added"
                       description="Add your first snippet to create a shortcut for phrases you use often."
                       actionLabel="Add snippet"
@@ -1426,7 +2056,7 @@ export default function App() {
                     snippets.map((snip) => (
                       <div
                         key={snip.id}
-                        className="group flex items-center justify-between gap-4 rounded-[4px] px-3 py-2.5 transition-colors hover:bg-transparent-primary"
+                        className="group flex items-center justify-between gap-4 rounded-[4px] px-3 py-[14px] transition-colors hover:bg-transparent-primary"
                       >
                         <div className="flex min-w-0 flex-1 items-center gap-3">
                           <span className="gs-text-body-md-medium shrink-0 truncate text-text-default">
@@ -1517,6 +2147,23 @@ export default function App() {
           onSubmit={addSnippet}
           onClose={() => setAddSnippetOpen(false)}
         />
+      )}
+
+      {toast && (
+        <div className="fixed right-4 bottom-4 z-[80] flex w-[360px] max-w-[calc(100vw-32px)] items-start gap-3 rounded-[8px] border border-border-default bg-background-card p-4 shadow-2xl">
+          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-text-error" />
+          <p className="gs-text-body-md-regular min-w-0 flex-1 break-words text-text-default select-text">
+            {toast}
+          </p>
+          <button
+            type="button"
+            onClick={() => setToast(null)}
+            title="Dismiss"
+            className="shrink-0 text-text-disabled transition-colors hover:text-text-default"
+          >
+            <X className="size-3.5" />
+          </button>
+        </div>
       )}
     </div>
   );

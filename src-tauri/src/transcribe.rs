@@ -1,9 +1,12 @@
+use crate::hotkeys;
 use reqwest::multipart::{Form, Part};
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+// Persisted as <app_data_dir>/config.json; missing fields fall back to Default.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(default)]
 pub struct TranscriptionConfig {
     pub endpoint_url: String,       // e.g. "https://api.groq.com/openai/v1/audio/transcriptions" or custom URL
     pub api_key: String,
@@ -16,7 +19,15 @@ pub struct TranscriptionConfig {
     pub llm_model_name: Option<String>,
     pub custom_formatting_prompt: Option<String>,
     pub sound_feedback: bool,       // play audio chimes on start/stop
-    pub hotkey: String,             // default: "CommandOrControl+Shift+Space"
+    pub hotkey_hold: String,        // push-to-talk binding, see hotkeys.rs ("" = disabled)
+    pub hotkey_toggle: String,      // hands-free binding
+    pub enter_to_stop: bool,        // Enter stops & pastes while dictating hands-free
+    pub input_device: Option<String>, // cpal device name; None = system default
+    pub copy_to_clipboard: bool,    // false = restore the previous clipboard text after pasting
+    pub bar_location: String,       // "bottom" | "raised" | "high"
+    pub launch_at_login: bool,
+    pub show_in_menu_bar: bool,
+    pub show_in_dock: bool,
 }
 
 impl Default for TranscriptionConfig {
@@ -33,7 +44,15 @@ impl Default for TranscriptionConfig {
             llm_model_name: Some("llama-3.3-70b-versatile".to_string()),
             custom_formatting_prompt: Some("You are a voice dictation text cleanup assistant. Clean up this raw transcription: fix capitalization and punctuation, and remove conversational filler sounds (um, uh). Keep exact words and meaning. Return ONLY the cleaned text with no introductory or meta commentary.".to_string()),
             sound_feedback: true,
-            hotkey: "CommandOrControl+Shift+Space".to_string(),
+            hotkey_hold: hotkeys::default_hold().to_string(),
+            hotkey_toggle: hotkeys::default_toggle().to_string(),
+            enter_to_stop: false,
+            input_device: None,
+            copy_to_clipboard: false,
+            bar_location: "bottom".to_string(),
+            launch_at_login: false,
+            show_in_menu_bar: true,
+            show_in_dock: true,
         }
     }
 }
@@ -106,10 +125,11 @@ pub async fn transcribe_audio(
         request = request.header("Authorization", format!("Bearer {}", config.api_key.trim()));
     }
 
-    let response = request
-        .send()
-        .await
-        .map_err(|e| format!("Network request failed: {}", e))?;
+    // Errors below are user-facing (shown in the dictation bar); details go to the log.
+    let response = request.send().await.map_err(|e| {
+        eprintln!("STT request failed: {}", e);
+        "Transcription failed: couldn't reach the speech-to-text endpoint".to_string()
+    })?;
 
     if !response.status().is_success() {
         let status = response.status();
@@ -117,13 +137,18 @@ pub async fn transcribe_audio(
             .text()
             .await
             .unwrap_or_else(|_| "Unknown error".to_string());
-        return Err(format!("STT API returned error {}: {}", status, body));
+        eprintln!("STT API returned error {}: {}", status, body);
+        return Err(match status.as_u16() {
+            401 | 403 => "Transcription failed: check the API key in Settings › Model".to_string(),
+            404 => "Transcription failed: check the endpoint URL in Settings › Model".to_string(),
+            _ => format!("Transcription failed: the server returned {}", status),
+        });
     }
 
-    let whisper_res: WhisperResponse = response
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse STT response JSON: {}", e))?;
+    let whisper_res: WhisperResponse = response.json().await.map_err(|e| {
+        eprintln!("Failed to parse STT response JSON: {}", e);
+        "Transcription failed: unexpected response from the speech-to-text endpoint".to_string()
+    })?;
 
     let raw_text = whisper_res.text.trim().to_string();
 
@@ -203,4 +228,32 @@ async fn format_transcript_with_llm(
     }
 
     Ok(raw_text.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn config_json_round_trip() {
+        let cfg = TranscriptionConfig {
+            input_device: Some("USB Mic".into()),
+            bar_location: "high".into(),
+            ..Default::default()
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert_eq!(serde_json::from_str::<TranscriptionConfig>(&json).unwrap(), cfg);
+    }
+
+    #[test]
+    fn missing_fields_use_defaults_and_old_hotkey_is_ignored() {
+        let cfg: TranscriptionConfig =
+            serde_json::from_str(r#"{"api_key":"k","hotkey":"CommandOrControl+Shift+Space"}"#).unwrap();
+        assert_eq!(cfg.api_key, "k");
+        assert_eq!(cfg.hotkey_hold, hotkeys::default_hold());
+        assert_eq!(cfg.hotkey_toggle, hotkeys::default_toggle());
+        assert_eq!(cfg.bar_location, "bottom");
+        assert!(cfg.show_in_menu_bar && cfg.show_in_dock && !cfg.copy_to_clipboard);
+        assert_eq!(serde_json::from_str::<TranscriptionConfig>("{}").unwrap(), TranscriptionConfig::default());
+    }
 }

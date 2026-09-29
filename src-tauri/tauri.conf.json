@@ -30,7 +30,7 @@
       {
         "label": "hud",
         "title": "OpenGlaido HUD",
-        "width": 200,
+        "width": 420,
         "height": 72,
         "resizable": false,
         "decorations": false,
