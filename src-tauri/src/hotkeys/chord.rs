@@ -18,6 +18,22 @@ pub enum HotkeyEvent {
     Cancel,
     /// Enter pressed while armed via `set_submit_enabled(true)`.
     Submit,
+    // Commands hotkeys: hold/toggle drive the same recording state machine; Enter/Esc/Copy go to
+    // `commands::handle_hotkey`.
+    /// Commands hold binding became fully pressed.
+    CommandHoldPressed,
+    /// Commands hold binding released normally.
+    CommandHoldReleased,
+    /// Another key/modifier joined the commands hold chord: cancel.
+    CommandHoldAborted,
+    /// Commands hands-free binding pressed.
+    CommandTogglePressed,
+    /// Enter while armed via `set_command_keys(open = true, ..)`.
+    CommandEnter,
+    /// Esc while armed via `set_command_keys(open = true, ..)`.
+    CommandEscape,
+    /// ⌘C / Ctrl+C while armed via `set_command_keys(.., answer_ready = true)`.
+    CommandCopy,
 }
 
 // One bit per physical modifier key (Fn has no side).
@@ -157,6 +173,9 @@ pub fn validate_for(platform_is_mac: bool, s: &str) -> Result<Option<Binding>, S
         return Err("fn can't be used on Windows".into());
     } else if b.key.is_none() {
         return Err("Add a key — only modifier keys are supported alone on macOS".into());
+    } else if (b.exact | b.any) & GROUPS[0] != 0 && (b.exact | b.any) & GROUPS[1] != 0 && (b.exact | b.any) & GROUPS[3] == 0 {
+        // AltGr arrives as Ctrl+Alt: such a hotkey would eat characters like ć, @ or & on many layouts.
+        return Err("Ctrl+Alt is AltGr on many keyboards — add Win or choose another combination".into());
     }
     // A typing key without ⌃/⌥/⌘/fn would be swallowed in every app (Shift alone still types).
     if let Some(key) = b.key {
@@ -166,6 +185,11 @@ pub fn validate_for(platform_is_mac: bool, s: &str) -> Result<Option<Binding>, S
         }
     }
     Ok(Some(b))
+}
+
+/// True when some physical modifier set triggers both bindings (same key or both modifier-only).
+pub fn overlaps(a: &Binding, b: &Binding) -> bool {
+    a.key == b.key && (0u16..512).any(|held| a.matches(held) && b.matches(held))
 }
 
 /// Short, side-less label for messages: "⌃⇧Space" on macOS, "Ctrl+Shift+Space" elsewhere.
@@ -187,6 +211,8 @@ pub enum Input {
     KeyUp(&'static str),
     /// A modifier bit went down (true) or up (false).
     Modifier(u16, bool),
+    /// A mouse button or scroll: like a key for modifier-only holds and taps (never swallowed).
+    Pointer,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,26 +222,60 @@ pub enum Output {
     Capture { keys: String, done: bool },
 }
 
+/// One hold/hands-free binding pair plus its press tracking.
 #[derive(Default)]
-pub struct State {
+pub struct Pair {
     pub hold: Option<Binding>,
     pub toggle: Option<Binding>,
+    /// The hold "pressed" event was emitted and "released"/"aborted" not yet.
+    hold_active: bool,
+    /// Modifier-only toggle: exactly its modifiers are held and nothing else was touched.
+    tap_armed: bool,
+    /// Another key/modifier joined since the first modifier went down: no tap this time.
+    tap_spoiled: bool,
+}
+
+impl Pair {
+    fn set(&mut self, hold: Option<Binding>, toggle: Option<Binding>) {
+        self.hold = hold;
+        self.toggle = toggle;
+        self.reset();
+    }
+
+    fn reset(&mut self) {
+        self.hold_active = false;
+        self.tap_armed = false;
+    }
+}
+
+/// Events of pair 0 (dictation) and pair 1 (commands): hold pressed/released/aborted, toggle.
+const PAIR_EVENTS: [[HotkeyEvent; 4]; 2] = [
+    [HoldPressed, HoldReleased, HoldAborted, TogglePressed],
+    [CommandHoldPressed, CommandHoldReleased, CommandHoldAborted, CommandTogglePressed],
+];
+
+#[derive(Default)]
+pub struct State {
+    /// [dictation, commands]
+    pub pairs: [Pair; 2],
     /// Esc → Cancel while set.
     pub recording: bool,
     /// Enter → Submit while set.
     pub submit: bool,
+    /// Command window open: Esc → CommandEscape (dictation arming wins).
+    pub command_esc: bool,
+    /// Answer ready or approval pending: Enter → CommandEnter.
+    pub command_enter: bool,
+    /// Command answer ready: ⌘C (macOS) / Ctrl+C → CommandCopy.
+    pub command_copy: bool,
+    /// Which modifier group copies (Meta on macOS, Control elsewhere).
+    pub copy_group: u16,
     capturing: bool,
     capture_max: u16,
     mods: u16,
     keys_down: Vec<&'static str>,
     /// Keys whose keydown we swallowed: their repeats and keyup are swallowed too.
     consumed: Vec<&'static str>,
-    /// HoldPressed was emitted and HoldReleased/HoldAborted not yet.
-    hold_active: bool,
-    /// Modifier-only toggle: exactly its modifiers are held and nothing else was touched.
-    tap_armed: bool,
-    /// Another key/modifier joined since the first modifier went down: no tap this time.
-    tap_spoiled: bool,
 }
 
 impl State {
@@ -228,17 +288,53 @@ impl State {
     }
 
     pub fn set_bindings(&mut self, hold: Option<Binding>, toggle: Option<Binding>) {
-        self.hold = hold;
-        self.toggle = toggle;
-        self.hold_active = false;
-        self.tap_armed = false;
+        self.pairs[0].set(hold, toggle);
+    }
+
+    pub fn set_command_bindings(&mut self, hold: Option<Binding>, toggle: Option<Binding>) {
+        self.pairs[1].set(hold, toggle);
     }
 
     pub fn set_capture(&mut self, on: bool) {
         self.capturing = on;
         self.capture_max = 0;
-        self.hold_active = false;
-        self.tap_armed = false;
+        self.pairs.iter_mut().for_each(Pair::reset);
+    }
+
+    /// Ends every active hold (their "aborted" events), e.g. before bindings change or capture
+    /// starts, so a recording can't stay stuck waiting for a release that will never come.
+    pub fn abort_active(&mut self) -> Vec<Output> {
+        let mut out = Vec::new();
+        for (pair, events) in self.pairs.iter_mut().zip(PAIR_EVENTS) {
+            if pair.hold_active {
+                pair.hold_active = false;
+                out.push(Output::Event(events[2]));
+            }
+        }
+        out
+    }
+
+    /// Modifiers that belong to an active hold (allowed alongside Esc, e.g. Fn-hold + Esc).
+    fn hold_mods(&self) -> u16 {
+        self.pairs
+            .iter()
+            .filter(|p| p.hold_active)
+            .filter_map(|p| p.hold.as_ref())
+            .fold(0, |m, b| m | b.exact | b.any)
+    }
+
+    /// Aborts active modifier-only holds and spoils taps (another key or a click joined).
+    /// A click leaves a Fn-only hold alone: fn-click means nothing, ⌥-click and ⌘-click do.
+    fn interrupt(&mut self, except: Option<usize>, click: bool, out: &mut Vec<Output>) {
+        for (i, (pair, events)) in self.pairs.iter_mut().zip(PAIR_EVENTS).enumerate() {
+            pair.tap_spoiled = true;
+            pair.tap_armed = false;
+            let aborts = pair.hold.as_ref().is_some_and(|h| h.key.is_none() && !(click && h.exact | h.any == FN));
+            if Some(i) != except && pair.hold_active && aborts {
+                pair.hold_active = false;
+                out.push(Output::Event(events[2]));
+            }
+        }
     }
 
     /// Drops keys that are no longer physically down (a keyup we never saw).
@@ -256,6 +352,12 @@ impl State {
             }
             Input::KeyDown(code, repeat) => self.key_down(code, repeat, &mut out),
             Input::KeyUp(code) => self.key_up(code, &mut out),
+            Input::Pointer => {
+                if !self.capturing {
+                    self.interrupt(None, true, &mut out);
+                }
+                false
+            }
         };
         (out, consume)
     }
@@ -276,29 +378,32 @@ impl State {
             }
             return;
         }
-        if let Some(hold) = self.hold.as_ref().filter(|h| h.key.is_none()) {
-            if self.hold_active && !hold.matches(self.mods) {
-                self.hold_active = false;
-                out.push(Output::Event(if down { HoldAborted } else { HoldReleased }));
-            } else if !self.hold_active && down && self.keys_down.is_empty() && hold.matches(self.mods) {
-                self.hold_active = true;
-                out.push(Output::Event(HoldPressed));
+        let (mods, keys_idle) = (self.mods, self.keys_down.is_empty());
+        for (pair, [pressed, released, aborted, toggled]) in self.pairs.iter_mut().zip(PAIR_EVENTS) {
+            if let Some(hold) = pair.hold.as_ref().filter(|h| h.key.is_none()) {
+                if pair.hold_active && !hold.matches(mods) {
+                    pair.hold_active = false;
+                    out.push(Output::Event(if down { aborted } else { released }));
+                } else if !pair.hold_active && down && keys_idle && hold.matches(mods) {
+                    pair.hold_active = true;
+                    out.push(Output::Event(pressed));
+                }
             }
-        }
-        if let Some(toggle) = self.toggle.as_ref().filter(|t| t.key.is_none()) {
-            if down {
-                if before == 0 {
-                    self.tap_spoiled = !self.keys_down.is_empty();
+            if let Some(toggle) = pair.toggle.as_ref().filter(|t| t.key.is_none()) {
+                if down {
+                    if before == 0 {
+                        pair.tap_spoiled = !keys_idle;
+                    }
+                    if mods & !(toggle.exact | toggle.any) != 0 {
+                        pair.tap_spoiled = true;
+                    }
+                    pair.tap_armed = !pair.tap_spoiled && toggle.matches(mods);
+                } else {
+                    if pair.tap_armed {
+                        out.push(Output::Event(toggled));
+                    }
+                    pair.tap_armed = false;
                 }
-                if self.mods & !(toggle.exact | toggle.any) != 0 {
-                    self.tap_spoiled = true;
-                }
-                self.tap_armed = !self.tap_spoiled && toggle.matches(self.mods);
-            } else {
-                if self.tap_armed {
-                    out.push(Output::Event(TogglePressed));
-                }
-                self.tap_armed = false;
             }
         }
     }
@@ -319,36 +424,52 @@ impl State {
             // preventDefaults it), and a capture left on by mistake can't eat typing elsewhere.
             return false;
         }
-        self.tap_spoiled = true;
-        self.tap_armed = false;
         let mods = self.mods;
         let hits = |b: &Option<Binding>| b.as_ref().is_some_and(|b| b.key == Some(code) && b.matches(mods));
-        let event = if hits(&self.toggle) {
-            TogglePressed
-        } else if hits(&self.hold) {
-            self.hold_active = true;
-            HoldPressed
-        } else if code == "Escape" && self.recording {
-            self.hold_active = false;
+        // ⌘C / Ctrl+C with nothing else held.
+        let bare = |group: u16| mods != 0 && mods & !group == 0;
+        // Esc/Enter only count with no other modifiers (⇧Enter, ⌥⌘Esc stay the app's), except
+        // those of an active hold (Fn-hold + Esc cancels).
+        let plain = mods & !self.hold_mods() == 0;
+        let event = if let Some(i) = (0..2).find(|&i| hits(&self.pairs[i].toggle)) {
+            // The other pair's modifier-only hold (a prefix of this chord) doesn't also fire.
+            self.interrupt(Some(i), false, out);
+            PAIR_EVENTS[i][3]
+        } else if let Some(i) = (0..2).find(|&i| hits(&self.pairs[i].hold)) {
+            self.interrupt(Some(i), false, out);
+            self.pairs[i].hold_active = true;
+            PAIR_EVENTS[i][0]
+        } else if code == "Escape" && self.recording && plain {
+            self.pairs[0].hold_active = false;
+            self.pairs[1].hold_active = false;
             Cancel
-        } else if code == "Enter" && self.submit {
+        } else if code == "Enter" && self.submit && plain {
             Submit
+        } else if code == "Escape" && self.command_esc && mods == 0 {
+            CommandEscape
+        } else if code == "Enter" && self.command_enter && mods == 0 {
+            CommandEnter
+        } else if code == "KeyC" && self.command_copy && bare(self.copy_group) {
+            CommandCopy
         } else {
-            if self.hold_active && self.hold.as_ref().is_some_and(|h| h.key.is_none()) {
-                self.hold_active = false;
-                out.push(Output::Event(HoldAborted));
-            }
+            self.interrupt(None, false, out);
             return false;
         };
+        for pair in &mut self.pairs {
+            pair.tap_spoiled = true;
+            pair.tap_armed = false;
+        }
         out.push(Output::Event(event));
         self.consume(code)
     }
 
     fn key_up(&mut self, code: &'static str, out: &mut Vec<Output>) -> bool {
         self.keys_down.retain(|k| *k != code);
-        if self.hold_active && self.hold.as_ref().is_some_and(|h| h.key == Some(code)) {
-            self.hold_active = false;
-            out.push(Output::Event(HoldReleased));
+        for (pair, events) in self.pairs.iter_mut().zip(PAIR_EVENTS) {
+            if pair.hold_active && pair.hold.as_ref().is_some_and(|h| h.key == Some(code)) {
+                pair.hold_active = false;
+                out.push(Output::Event(events[1]));
+            }
         }
         let consumed = self.consumed.contains(&code);
         self.consumed.retain(|k| *k != code);
@@ -442,6 +563,44 @@ mod tests {
     }
 
     #[test]
+    fn overlapping_bindings() {
+        let b = |s: &str| parse(s).unwrap().unwrap();
+        assert!(overlaps(&b("Alt+Space"), &b("AltRight+Space")));
+        assert!(!overlaps(&b("AltLeft+Space"), &b("AltRight+Space")));
+        assert!(!overlaps(&b("Fn"), &b("Fn+Space")));
+        assert!(overlaps(&b("Fn"), &b("Fn")));
+    }
+
+    #[test]
+    fn pointer_and_modifier_rules() {
+        let mut st = state("Fn", "Fn+Space");
+        st.set_command_bindings(parse("AltRight").unwrap(), parse("AltRight+Space").unwrap());
+        // ⌥-click aborts the Right-⌥ hold.
+        assert_eq!(run(&mut st, vec![down(ALT_RIGHT), Input::Pointer, up(ALT_RIGHT)]).0, vec![CommandHoldPressed, CommandHoldAborted]);
+        // A click while holding Fn keeps dictating.
+        assert_eq!(run(&mut st, vec![down(FN), Input::Pointer, up(FN)]).0, vec![HoldPressed, HoldReleased]);
+        // Armed Enter/Esc ignore modified presses (⇧Enter, ⌥⌘Esc) but Fn-hold + Esc cancels.
+        st.command_esc = true;
+        st.command_enter = true;
+        assert_eq!(run(&mut st, vec![down(SHIFT_LEFT), kd("Enter")]), (vec![], false));
+        run(&mut st, vec![ku("Enter"), up(SHIFT_LEFT)]);
+        st.recording = true;
+        assert_eq!(run(&mut st, vec![down(ALT_LEFT), down(META_LEFT), kd("Escape")]), (vec![], false));
+        run(&mut st, vec![ku("Escape"), up(META_LEFT), up(ALT_LEFT)]);
+        assert_eq!(run(&mut st, vec![down(FN), kd("Escape")]).0, vec![HoldPressed, Cancel]);
+        run(&mut st, vec![ku("Escape"), up(FN)]);
+        // A chord of one pair aborts the other pair's modifier-only prefix hold.
+        let mut st = state("Fn", "");
+        st.set_command_bindings(None, parse("Fn+KeyK").unwrap());
+        assert_eq!(run(&mut st, vec![down(FN), kd("KeyK")]).0, vec![HoldPressed, HoldAborted, CommandTogglePressed]);
+        // abort_active ends a hold so the recording can't stay stuck.
+        let mut st = state("Fn", "");
+        run(&mut st, vec![down(FN)]);
+        assert_eq!(st.abort_active(), vec![Output::Event(HoldAborted)]);
+        assert_eq!(run(&mut st, vec![up(FN)]).0, vec![]);
+    }
+
+    #[test]
     fn platform_validation() {
         // macOS: modifier-only and Fn are fine.
         for s in ["", "Fn", "Fn+Space", "AltLeft+ControlLeft", "AltRight", "Control+Shift+Space"] {
@@ -449,9 +608,14 @@ mod tests {
         }
         assert_eq!(validate_for(true, "Control+Pause").unwrap_err(), "Pause doesn't exist on Mac keyboards");
         // Windows: needs a key, no Fn; sides are accepted (registered as generic).
-        for s in ["", "Control+Shift+Space", "Control+Shift+Alt+Space", "ControlLeft+KeyK", "Control+Pause", "F5"] {
+        for s in ["", "Control+Shift+Space", "Control+Shift+Meta+Space", "ControlLeft+KeyK", "Control+Pause", "F5", "Control+Alt+Meta+KeyC"] {
             assert!(validate_for(false, s).is_ok(), "{s}");
         }
+        // Ctrl+Alt without Win is AltGr on many layouts (ć, @, &): refused on Windows only.
+        for s in ["Control+Alt+KeyC", "ControlLeft+AltRight+Shift+Space"] {
+            assert!(validate_for(false, s).unwrap_err().contains("AltGr"), "{s}");
+        }
+        assert!(validate_for(true, "Control+Alt+KeyC").is_ok());
         assert_eq!(validate_for(false, "Fn").unwrap_err(), "fn can't be used on Windows");
         assert_eq!(validate_for(false, "Fn+Space").unwrap_err(), "fn can't be used on Windows");
         assert_eq!(validate_for(false, "AltLeft+ControlLeft").unwrap_err(), "Add a key — only modifier keys are supported alone on macOS");
@@ -588,6 +752,57 @@ mod tests {
         assert_eq!(run(&mut st, vec![ku("Enter")]), (vec![], true));
         // Esc during a modifier hold cancels without a later HoldReleased.
         assert_eq!(run(&mut st, vec![down(FN), kd("Escape"), ku("Escape"), up(FN)]).0, vec![HoldPressed, Cancel]);
+    }
+
+    #[test]
+    fn command_pair_mirrors_dictation() {
+        let mut st = state("Fn", "Fn+Space");
+        st.set_command_bindings(parse("AltRight").unwrap(), parse("AltRight+Space").unwrap());
+        // Right ⌥ hold / release, and the prefix → hands-free upgrade.
+        assert_eq!(run(&mut st, vec![down(ALT_RIGHT), up(ALT_RIGHT)]).0, vec![CommandHoldPressed, CommandHoldReleased]);
+        assert_eq!(
+            run(&mut st, vec![down(ALT_RIGHT), kd("Space")]),
+            (vec![CommandHoldPressed, CommandTogglePressed], true)
+        );
+        assert_eq!(run(&mut st, vec![ku("Space"), up(ALT_RIGHT)]), (vec![CommandHoldReleased], false));
+        // Typing ⌥-characters with Right ⌥ aborts the hold and passes the key through.
+        assert_eq!(run(&mut st, vec![down(ALT_RIGHT), kd("KeyE")]), (vec![CommandHoldPressed, CommandHoldAborted], false));
+        run(&mut st, vec![ku("KeyE"), up(ALT_RIGHT)]);
+        // Left ⌥ is a different key: nothing.
+        assert_eq!(run(&mut st, vec![down(ALT_LEFT), up(ALT_LEFT)]).0, vec![]);
+        // Dictation still works alongside.
+        assert_eq!(run(&mut st, vec![down(FN), up(FN)]).0, vec![HoldPressed, HoldReleased]);
+    }
+
+    #[test]
+    fn command_window_keys_only_while_armed() {
+        let mut st = state("Fn", "Fn+Space");
+        st.copy_group = GROUPS[3];
+        assert_eq!(run(&mut st, vec![kd("Enter")]), (vec![], false));
+        run(&mut st, vec![ku("Enter")]);
+        st.command_esc = true;
+        // Enter only while there is something to paste or approve.
+        assert_eq!(run(&mut st, vec![kd("Enter")]), (vec![], false));
+        run(&mut st, vec![ku("Enter")]);
+        st.command_enter = true;
+        assert_eq!(run(&mut st, vec![kd("Enter")]), (vec![CommandEnter], true));
+        assert_eq!(run(&mut st, vec![ku("Enter")]), (vec![], true));
+        assert_eq!(run(&mut st, vec![kd("Escape")]), (vec![CommandEscape], true));
+        run(&mut st, vec![ku("Escape")]);
+        // ⌘C only once an answer is ready, and only as plain ⌘C.
+        assert_eq!(run(&mut st, vec![down(META_LEFT), kd("KeyC")]), (vec![], false));
+        run(&mut st, vec![ku("KeyC"), up(META_LEFT)]);
+        st.command_copy = true;
+        assert_eq!(run(&mut st, vec![down(META_LEFT), kd("KeyC")]), (vec![CommandCopy], true));
+        run(&mut st, vec![ku("KeyC"), up(META_LEFT)]);
+        assert_eq!(run(&mut st, vec![down(META_LEFT), down(SHIFT_LEFT), kd("KeyC")]), (vec![], false));
+        run(&mut st, vec![ku("KeyC"), up(SHIFT_LEFT), up(META_LEFT)]);
+        // Dictation Esc/Enter arming wins while recording.
+        st.recording = true;
+        st.submit = true;
+        assert_eq!(run(&mut st, vec![kd("Escape")]).0, vec![Cancel]);
+        run(&mut st, vec![ku("Escape")]);
+        assert_eq!(run(&mut st, vec![kd("Enter")]).0, vec![Submit]);
     }
 
     fn capture_run(st: &mut State, inputs: Vec<Input>) -> (Vec<(String, bool)>, bool) {

@@ -55,6 +55,14 @@
   --color-badge-text: #bff549;
   --color-badge-surface: #bff54926;
 
+  --color-modal-surface: #232323d9;
+  --color-menu-surface: #262626;
+  --color-scrollbar: #ffffff08;
+  /* Cut-outs of filled active icons = the surface they sit on. */
+  --color-toggle-off: #333333;
+  --color-icon-cut-nav: #151515;
+  --color-icon-cut-tab: #282828;
+
   --radius-sm: 2px;
   --radius-md: 4px;
   --radius-lg: 6px;
@@ -66,6 +74,46 @@ html,
 body,
 #root {
   background-color: transparent;
+}
+
+/* Light theme (Settings › General › Theme; "system" follows the OS). The dictation bar and the
+   command window stay dark: they never set data-theme. ponytail: derived from the dark tokens,
+   Glaido's light palette isn't public; calibrate against a Glaido light screenshot if needed. */
+:root[data-theme="light"] {
+  --color-background-primary: #f3f3f1;
+  --color-background-secondary: #ffffff;
+  --color-background-card: #ffffff;
+  --color-background-tertiary: #e4e4e1;
+  --color-background-menu: #ffffff;
+  --color-background-input: #0000000a;
+  --color-background-modal: #00000008;
+
+  --color-text-default: #0d0d0d;
+  --color-text-subdued: #000000a6;
+  --color-text-disabled: #00000059;
+  --color-text-accent: #4d7c0f;
+  --color-text-dark: #000000;
+  --color-text-error: #d61f2c;
+
+  --color-border-default: #0000001a;
+  --color-border-accent: #7ab800;
+
+  --color-button-primary: #bff549;
+  --color-toggle-on: #8cc21f;
+
+  --color-transparent-primary: #0000000a;
+  --color-transparent-secondary: #0000000d;
+  --color-transparent-tertiary: #0000001a;
+
+  --color-badge-text: #4d7c0f;
+  --color-badge-surface: #bff54966;
+
+  --color-modal-surface: #ffffffeb;
+  --color-menu-surface: #ffffff;
+  --color-scrollbar: #0000001f;
+  --color-toggle-off: #c4c4bf;
+  --color-icon-cut-nav: #e9e9e6;
+  --color-icon-cut-tab: #ececea;
 }
 
 body {
@@ -161,7 +209,7 @@ body {
   height: 14px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #ffffff08;
+  background: var(--color-scrollbar);
   background-clip: padding-box;
   border: 4px solid transparent;
   border-top-width: 2px;

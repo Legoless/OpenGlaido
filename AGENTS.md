@@ -15,21 +15,18 @@ OpenGlaido is an open-source, cross-platform (macOS & Windows 11) voice-layer ap
   * System tray integration via Tauri 2 TrayIconBuilder
 * **Frontend:** React 19 + TypeScript + Tailwind CSS v4 + Vite
   * Floating HUD overlay window (`/#hud`) for non-activating recording state with live waveform animation
-  * Settings & activity dashboard for custom voice models, writing styles/modes, snippets, and dictionary
+  * Settings & activity dashboard for custom voice models, formatting rules, commands, snippets, and dictionary
+  * Command window overlay (`/#command`) for command answers and tool approvals
 
 ## Implemented Feature Set
-1. **Push-to-Talk & Hotkeys:** Global shortcut (`CommandOrControl+Shift+Space`) listens system-wide to toggle/push-to-talk dictation.
-2. **Audio Feedback:** Subtle harmonic audio tones (via `rodio`) indicating when listening starts and stops.
-3. **Custom Voice Model (STT):** Point to any remote or self-hosted OpenAI-compatible endpoint (Groq Whisper, faster-whisper-server, RunPod, Speaches, etc.).
-4. **Writing Styles & Modes:**
-   - *Default:* Cleans up filler sounds and applies standard capitalization/punctuation.
-   - *Email:* Professional tone, paragraphs, polite phrasing.
-   - *Chat:* Fast, punchy, concise messaging for Slack/Discord.
-   - *Code:* Translates spoken programming terminology.
-   - *Raw:* Verbatim output from Whisper without LLM changes.
-5. **Voice Snippets:** Spoken triggers (e.g., "my email") automatically expand to canned text.
-6. **Custom Dictionary & Jargon:** Terminology and brand replacements stored in local SQLite.
-7. **Audio History & Retranscription:** Audio clips are preserved in `audio/<id>.wav` with in-app audio playback and one-click re-transcription.
+1. **Hotkeys:** Native macOS keyboard listener (`src-tauri/src/hotkeys/`, CGEventTap, needs Accessibility) with Glaido-style bindings: hold-to-talk (default `fn`) and hands-free (default `fn+Space`), modifier-only and left/right-specific keys, Esc to cancel, optional Enter to stop, plus Commands hotkeys (default Right ⌥ / Right ⌥+Space). Windows uses `tauri-plugin-global-shortcut` (key combos only). Bindings are recorded in Settings › Hotkeys and re-registered on save.
+2. **Dictation bar:** Always-visible idle pill (optional), live mic-level waveform, processing shimmer, error pill; Bottom/Raised/High position; never takes focus.
+3. **Custom voice model (STT) + LLM:** Any OpenAI-compatible transcription and chat endpoint (Groq, OpenAI, faster-whisper-server, Ollama, …). API keys live in the OS keychain.
+4. **Formatting (Glaido model):** *All apps* style (Standard / Casual / Lowercase, Raw text, custom prompt ≤ 500 chars), the built-in *Email* rule (Gmail, Outlook) and custom rules per app or website, resolved from the frontmost app / browser URL at dictation start.
+5. **Commands:** Spoken instructions answered in a floating command window (streamed markdown, selection as context, refine, Enter to paste, ⌘C to copy, background runs with notifications), 8 built-in commands (web search, read a page, YouTube, deep research, math & dates, files & apps, history search, docs search) and custom tools as local MCP servers (`mcp.json`, import folder, new-server scaffold, per-tool approval). Voice activation: start a dictation with "Glaido, …".
+6. **Snippets & Dictionary:** Spoken triggers expand to canned text; vocabulary and replacements bias and correct transcripts.
+7. **History:** Audio kept in `audio/<id>.wav`, target app icon + name per row, playback, retry that replaces the transcript, failed transcriptions kept with Retry, command answers with sources, ⌘K palette search.
+8. **App:** Dark / Light / System theme, 14 UI languages (`src/i18n.ts`, `src/locales/*.json`, checked by `bun run check:locales`), launch at login, menu bar / Dock toggles, mute background while recording, noise reduction and silence detection before upload.
 
 ## Getting Started
 

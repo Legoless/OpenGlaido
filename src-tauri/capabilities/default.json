@@ -2,11 +2,13 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "Default capability for OpenGlaido windows",
-  "windows": ["*"],
+  "windows": ["main", "hud", "command"],
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
     "opener:default",
+    "dialog:default",
+    "notification:default",
     "global-shortcut:default"
   ]
 }

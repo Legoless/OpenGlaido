@@ -17,6 +17,9 @@ Turn it on in System Settings › Privacy & Security › Accessibility.";
 const KEY_DOWN: u32 = 10;
 const KEY_UP: u32 = 11;
 const FLAGS_CHANGED: u32 = 12;
+/// Clicks and scrolls abort modifier-only holds (⌥-drag must not start a command).
+// Left/right/other mouse down. Not scrolling: trackpad momentum keeps scrolling after the fingers lift.
+const POINTER_EVENTS: [u32; 3] = [1, 3, 25];
 const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 const FIELD_AUTOREPEAT: u32 = 8;
@@ -121,7 +124,7 @@ pub fn spawn(
             }
         }
         let ctx = Box::into_raw(Box::new(Ctx { state, send: Box::new(send), tap: null_mut() }));
-        let mask = (1 << KEY_DOWN) | (1 << KEY_UP) | (1 << FLAGS_CHANGED);
+        let mask = POINTER_EVENTS.iter().fold((1u64 << KEY_DOWN) | (1 << KEY_UP) | (1 << FLAGS_CHANGED), |m, t| m | (1 << t));
         unsafe {
             // Session tap, head insert, active (can swallow events).
             let tap = CGEventTapCreate(1, 0, 0, mask, callback, ctx.cast());
@@ -144,6 +147,26 @@ extern "C" fn callback(_proxy: Ref, ty: u32, event: Ref, ctx: *mut c_void) -> Re
     let ctx = unsafe { &*(ctx as *const Ctx) };
     if ty == TAP_DISABLED_BY_TIMEOUT || ty == TAP_DISABLED_BY_USER_INPUT {
         unsafe { CGEventTapEnable(ctx.tap, true) };
+        // A modifier released while the tap was off would leave its hold recording.
+        let mut outputs = Vec::new();
+        {
+            let mut st = ctx.state.lock().unwrap_or_else(|e| e.into_inner());
+            for (key, bit) in MODIFIER_KEYS {
+                if st.mods() & bit != 0 && !unsafe { CGEventSourceKeyState(0, key as u16) } {
+                    outputs.extend(st.handle(Input::Modifier(bit, false)).0);
+                }
+            }
+        }
+        for output in outputs {
+            (ctx.send)(output);
+        }
+        return event;
+    }
+    if POINTER_EVENTS.contains(&ty) {
+        let outputs = ctx.state.lock().unwrap_or_else(|e| e.into_inner()).handle(Input::Pointer).0;
+        for output in outputs {
+            (ctx.send)(output);
+        }
         return event;
     }
     let (keycode, flags, repeat, pid) = unsafe {

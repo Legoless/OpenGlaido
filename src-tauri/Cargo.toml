@@ -20,7 +20,7 @@ tauri-plugin-autostart = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
-reqwest = { version = "0.12", features = ["json", "multipart"] }
+reqwest = { version = "0.12", features = ["json", "multipart", "stream"] }
 cpal = "0.15"
 hound = "3.5"
 base64 = "0.22"
@@ -30,6 +30,17 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 rodio = "0.19"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["serde"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-notification = "2"
+nnnoiseless = { version = "0.5.2", default-features = false }
+keyring = { version = "3", features = ["apple-native", "windows-native"] }
+futures-util = "0.3.34"
+evalexpr = "13.1.0"
+chrono-tz = "0.10.4"
+
+# Noise reduction is too slow unoptimized (~0.6x real time); optimize it even in dev builds.
+[profile.dev.package.nnnoiseless]
+opt-level = 3
 
 [profile.release]
 codegen-units = 1
@@ -37,3 +48,11 @@ lto = true
 opt-level = 3
 panic = "abort"
 strip = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = "0.3"
+objc2-foundation = "0.3"
+
+[target."cfg(windows)".dependencies]
+windows = { version = "0.61", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }

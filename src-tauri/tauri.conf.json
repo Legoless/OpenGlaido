@@ -15,8 +15,8 @@
       {
         "label": "main",
         "title": "OpenGlaido",
-        "width": 920,
-        "height": 680,
+        "width": 1280,
+        "height": 820,
         "minWidth": 760,
         "minHeight": 540,
         "resizable": true,
@@ -44,6 +44,24 @@
         "center": false,
         "visible": false,
         "url": "/#hud"
+      },
+      {
+        "label": "command",
+        "title": "OpenGlaido Command",
+        "width": 560,
+        "height": 380,
+        "resizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "focus": false,
+        "focusable": false,
+        "alwaysOnTop": true,
+        "visibleOnAllWorkspaces": true,
+        "skipTaskbar": true,
+        "center": false,
+        "visible": false,
+        "url": "/#command"
       }
     ],
     "security": {

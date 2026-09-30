@@ -4,5 +4,8 @@
 <dict>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>OpenGlaido listens to your microphone while you dictate so it can transcribe what you say.</string>
+	<!-- Classic window chrome (12 px traffic lights, like Glaido) instead of the macOS 26 redesign. -->
+	<key>UIDesignRequiresCompatibility</key>
+	<true/>
 </dict>
 </plist>
