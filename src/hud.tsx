@@ -14,6 +14,10 @@ export type BarMessage = { message: string; level: "error" | "warning"; vars?: R
 // ------------------------------------------------------------------
 const BAR_COUNT = 10;
 const MESSAGE_MS = { warning: 3500, error: 4500 };
+// Pull toward the band level, keep a little of last frame's speed. Loud peaks arrive in a few
+// frames; the release tail is already in the levels coming from the microphone.
+const SPRING_PULL = 0.5;
+const SPRING_KEEP = 0.42;
 type View = "recording" | "processing" | BarMessage["level"];
 
 // Tint + 1px ring over the pill (tokens in index.css).
@@ -29,7 +33,11 @@ const ICON_OFF = "scale-50 opacity-0 blur-[2px]";
 export function Hud() {
   const [isRecording, setIsRecording] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [levels, setLevels] = useState<number[]>(() => Array(BAR_COUNT).fill(0));
+  const recordingRef = useRef(false);
+  const targets = useRef<number[]>(Array(BAR_COUNT).fill(0));
+  const pos = useRef<number[]>(Array(BAR_COUNT).fill(0));
+  const vel = useRef<number[]>(Array(BAR_COUNT).fill(0));
+  const barEls = useRef<Array<HTMLSpanElement | null>>(Array(BAR_COUNT).fill(null));
   // The last message stays rendered while the pill animates out; `messageOn` says it's current.
   const [message, setMessage] = useState<BarMessage | null>(null);
   const [messageOn, setMessageOn] = useState(false);
@@ -48,6 +56,7 @@ export function Hud() {
     const unlistenConfig = listen<TranscriptionConfig>("config-changed", (e) => applyConfig(e.payload));
     const unlistenVisibility = listen<boolean>("hud-visibility", (e) => setVisible(e.payload));
     const unlistenRec = listen<boolean>("recording-status", (e) => {
+      recordingRef.current = e.payload;
       setIsRecording(e.payload);
       if (e.payload) setVisible(true);
     });
@@ -55,7 +64,12 @@ export function Hud() {
       setIsProcessing(e.payload);
       if (e.payload) setVisible(true);
     });
-    invoke<boolean>("get_recording_state").then(setIsRecording).catch(console.error);
+    invoke<boolean>("get_recording_state")
+      .then((recording) => {
+        recordingRef.current = recording;
+        setIsRecording(recording);
+      })
+      .catch(console.error);
     return () => {
       unlistenConfig.then((f) => f());
       unlistenVisibility.then((f) => f());
@@ -66,9 +80,9 @@ export function Hud() {
 
   useEffect(() => {
     let timer: number | undefined;
-    const unlistenLevel = listen<number>("mic-level", (e) =>
-      setLevels((prev) => [...prev.slice(1), Math.min(1, Math.max(0, e.payload))]),
-    );
+    const unlistenLevel = listen<number[]>("mic-level", (e) => {
+      if (e.payload.length === BAR_COUNT) targets.current = e.payload;
+    });
     const unlistenError = listen<BarMessage>("dictation-error", (e) => {
       setMessage(e.payload);
       setMessageOn(true);
@@ -83,9 +97,38 @@ export function Hud() {
     };
   }, []);
 
+  // Springs the ten bars toward the latest band levels. Heights are written on the elements so a
+  // 60 Hz update doesn't re-render the pill, and React doesn't reset them.
   useEffect(() => {
-    if (isRecording) setLevels(Array(BAR_COUNT).fill(0));
-  }, [isRecording]);
+    let raf = 0;
+    const tick = () => {
+      const recording = recordingRef.current;
+      for (let i = 0; i < BAR_COUNT; i++) {
+        const el = barEls.current[i];
+        if (!el) continue;
+        if (!recording) {
+          targets.current[i] = 0;
+          pos.current[i] = 0;
+          vel.current[i] = 0;
+          el.style.height = "4px";
+          continue;
+        }
+        const v = vel.current[i] * SPRING_KEEP + (targets.current[i] - pos.current[i]) * SPRING_PULL;
+        let next = pos.current[i] + v;
+        let speed = v;
+        if (next < 0 || next > 1) {
+          next = Math.min(1, Math.max(0, next));
+          speed = 0;
+        }
+        vel.current[i] = speed;
+        pos.current[i] = next;
+        el.style.height = `${4 + next * 14}px`;
+      }
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
+  }, []);
 
   // The pill's width/height follow its content (set here, not in render, so they can transition).
   useEffect(() => {
@@ -143,11 +186,13 @@ export function Hud() {
                   isMessage ? "scale-x-0 opacity-0 duration-150" : "delay-100 duration-200"
                 }`}
               >
-                {levels.map((v, i) => (
+                {Array.from({ length: BAR_COUNT }, (_, i) => (
                   <span
                     key={i}
-                    className="w-[3px] rounded-full bg-text-accent transition-[height] duration-75 ease-out"
-                    style={{ height: view === "recording" ? 4 + v * 14 : 4 }}
+                    ref={(el) => {
+                      barEls.current[i] = el;
+                    }}
+                    className="h-1 w-[3px] rounded-full bg-text-accent"
                   />
                 ))}
               </div>

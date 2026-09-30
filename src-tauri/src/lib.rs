@@ -572,22 +572,14 @@ fn apply_ui_settings(app: &AppHandle, config: &TranscriptionConfig, old: Option<
     }
 }
 
-/// Maps a linear peak (0..1) to a perceptual bar level: -50 dBFS → 0, 0 dBFS → 1.
-fn level_to_ui(peak: f32) -> f32 {
-    if peak <= 0.0 {
-        return 0.0;
-    }
-    ((20.0 * peak.log10() + 50.0) / 50.0).clamp(0.0, 1.0)
-}
-
-// Emits "mic-level" to the HUD at ~30 Hz until the recording that started at `started` ends.
+// Emits "mic-level" (ten bar levels, 0..1) to the HUD at ~60 Hz until that recording ends.
 fn spawn_level_meter(app: &AppHandle, started: Instant) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         while *state.recording_start.lock().unwrap() == Some(started) {
-            let _ = app.emit_to("hud", "mic-level", level_to_ui(state.recorder.level()));
-            tokio::time::sleep(Duration::from_millis(33)).await;
+            let _ = app.emit_to("hud", "mic-level", state.recorder.bars());
+            tokio::time::sleep(Duration::from_millis(16)).await;
         }
     });
 }
@@ -1611,17 +1603,6 @@ mod tests {
         assert!(submit_enabled(Mode::HandsFreeHoldDown, &on));
         assert!(!submit_enabled(Mode::Hold, &on));
         assert!(!submit_enabled(Mode::HandsFree, &TranscriptionConfig::default()));
-    }
-
-    #[test]
-    fn level_mapping() {
-        assert_eq!(level_to_ui(0.0), 0.0);
-        assert_eq!(level_to_ui(-1.0), 0.0);
-        assert_eq!(level_to_ui(1.0), 1.0);
-        assert_eq!(level_to_ui(2.0), 1.0);
-        assert_eq!(level_to_ui(0.001), 0.0); // -60 dBFS
-        assert!((level_to_ui(0.1) - 0.6).abs() < 1e-5); // -20 dBFS
-        assert!((level_to_ui(0.01) - 0.2).abs() < 1e-5); // -40 dBFS
     }
 
     #[test]
