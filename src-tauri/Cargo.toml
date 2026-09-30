@@ -37,6 +37,8 @@ keyring = { version = "3", features = ["apple-native", "windows-native"] }
 futures-util = "0.3.34"
 evalexpr = "13.1.0"
 chrono-tz = "0.10.4"
+sha2 = "0.10"
+hex = "0.4"
 
 # Noise reduction is too slow unoptimized (~0.6x real time); optimize it even in dev builds.
 [profile.dev.package.nnnoiseless]
@@ -53,6 +55,14 @@ strip = true
 objc2 = "0.6"
 objc2-app-kit = "0.3"
 objc2-foundation = "0.3"
+block2 = "0.6"
+# Local models (macOS only). whisper.cpp links its ggml statically; llama.cpp must be dynamic (two static ggml
+# copies crash), and build.rs stages its dylibs for bundle.macOS.frameworks.
+whisper-rs = { version = "0.16", features = ["metal"] }
+llama-cpp-2 = { version = "0.1.157", default-features = false, features = ["metal", "dynamic-link"] }
+# Not used in code. As a direct dependency, Cargo runs llama.cpp's build script before build.rs and passes DEP_LLAMA_GGML_CMAKE_DIR.
+llama-cpp-sys-2 = "=0.1.157"
+encoding_rs = "0.8"
 
 [target."cfg(windows)".dependencies]
 windows = { version = "0.61", features = ["Win32_Media_Audio", "Win32_Media_Audio_Endpoints", "Win32_System_Com", "Win32_UI_WindowsAndMessaging", "Win32_System_Threading", "Win32_Foundation", "Win32_System_ProcessStatus", "Win32_System_Com_StructuredStorage", "Win32_System_Variant"] }

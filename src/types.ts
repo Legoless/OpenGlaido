@@ -1,4 +1,4 @@
-// Mirrors of the backend IPC types (src-tauri/src/transcribe.rs, db.rs, hotkeys/, commands/,
+// Mirrors of the backend IPC types (src-tauri/src/transcribe.rs, db.rs, hotkeys/, commands/, models/,
 // frontmost.rs) and event payloads, snake_case like the Rust side.
 import type { ReactNode } from "react";
 import type { LucideIcon } from "lucide-react";
@@ -39,6 +39,17 @@ export interface TranscriptionConfig {
   temperature?: number | null;
   llm_endpoint_url?: string | null;
   llm_model_name?: string | null;
+  // Settings › Model. The fields above are the cloud settings; "local" runs a downloaded model.
+  stt_source: "cloud" | "local";
+  /** Cloud preset id (src/providers.ts) or "custom". */
+  stt_provider: string;
+  /** LocalModel id. */
+  local_stt_model: string;
+  llm_source: "off" | "cloud" | "local";
+  llm_provider: string;
+  local_llm_model: string;
+  /** Lives in the OS keychain, like api_key. */
+  llm_api_key: string;
   sound_feedback: boolean;
   hotkey_hold: string;
   hotkey_toggle: string;
@@ -59,7 +70,6 @@ export interface TranscriptionConfig {
   /** Whisper ISO-639-1 codes: [] = auto-detect, exactly 1 = pinned, 2+ = auto-detect. */
   languages: string[];
   mute_background: boolean;
-  show_bar_when_idle: boolean;
   theme: "dark" | "light" | "system";
   /** "system" or one of the UI locales ("en", "de", "sr-Latn", "zh-Hans", ...). */
   app_language: string;
@@ -76,10 +86,54 @@ export interface TranscriptionConfig {
   mcp_servers: Record<string, McpServerPrefs>;
 }
 
+// ------------------------------------------------------------------
+// Local models (list_local_models, "model-download" event)
+// ------------------------------------------------------------------
+export interface DownloadProgress {
+  id: string;
+  received: number;
+  total: number;
+  state: "downloading" | "verifying" | "done" | "failed" | "cancelled";
+  error: string | null;
+}
+
+export interface LocalModel {
+  id: string;
+  kind: "stt" | "llm";
+  name: string;
+  notes: string;
+  file: string;
+  url: string;
+  size_bytes: number;
+  sha256: string;
+  english_only: boolean;
+  /** 1–5, relative on Apple Silicon. */
+  speed: number;
+  accuracy: number;
+  recommended: boolean;
+  license: string;
+  downloaded: boolean;
+  /** Bytes of an unfinished download kept for resuming (0 = none). */
+  partial_bytes: number;
+  /** In-flight download, if any. */
+  download: DownloadProgress | null;
+}
+
 export interface HotkeyStatus {
   engine: "native" | "plugin";
   permission_granted: boolean;
   error: string | null;
+}
+
+/** Something that keeps dictation from working (error) or degrades it (warning); get_setup_issues. */
+export interface SetupIssue {
+  id: string;
+  level: "error" | "warning";
+  /** English; shown with t(title, vars). */
+  title: string;
+  detail: string;
+  vars: Record<string, string>;
+  action: "open_accessibility" | "open_microphone" | "request_microphone" | "open_model" | "open_hotkeys" | null;
 }
 
 // ------------------------------------------------------------------

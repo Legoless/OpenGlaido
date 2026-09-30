@@ -41,6 +41,7 @@
   --color-text-accent: #bff549;
   --color-text-dark: #000000;
   --color-text-error: #ff2b3a;
+  --color-text-warning: #ffb224;
 
   --color-border-default: #ffffff1a;
   --color-border-accent: #bff549;
@@ -54,6 +55,12 @@
 
   --color-badge-text: #bff549;
   --color-badge-surface: #bff54926;
+
+  /* Warning / error tints for the dictation bar, toasts and setup rows (translucent: they sit on any surface). */
+  --color-warning-surface: #ffb2241a;
+  --color-warning-border: #ffb22452;
+  --color-error-surface: #ff2b3a1a;
+  --color-error-border: #ff2b3a52;
 
   --color-modal-surface: #232323d9;
   --color-menu-surface: #262626;
@@ -94,6 +101,7 @@ body,
   --color-text-accent: #4d7c0f;
   --color-text-dark: #000000;
   --color-text-error: #d61f2c;
+  --color-text-warning: #b45309;
 
   --color-border-default: #0000001a;
   --color-border-accent: #7ab800;
@@ -107,6 +115,11 @@ body,
 
   --color-badge-text: #4d7c0f;
   --color-badge-surface: #bff54966;
+
+  --color-warning-surface: #f59e0b1f;
+  --color-warning-border: #d9770666;
+  --color-error-surface: #d61f2c14;
+  --color-error-border: #d61f2c4d;
 
   --color-modal-surface: #ffffffeb;
   --color-menu-surface: #ffffff;
@@ -195,6 +208,27 @@ body {
   mask-image: linear-gradient(90deg, #0000004d 0 35%, #000 50%, #0000004d 65% 100%);
   -webkit-mask-size: 200% 100%;
   mask-size: 200% 100%;
+}
+
+/* Dictation bar: a new message fades in while the pill widens (hud.tsx). */
+@keyframes hud-message-in {
+  from {
+    opacity: 0;
+    translate: -6px 0;
+  }
+}
+.hud-message-in {
+  animation: hud-message-in 240ms 70ms ease-out backwards;
+}
+/* Reduced motion: the bar only fades (no resizing spring, scaling, sliding or blur). */
+@media (prefers-reduced-motion: reduce) {
+  .hud-pill,
+  .hud-pill * {
+    transition-property: opacity, background-color, box-shadow !important;
+    scale: none !important;
+    translate: none !important;
+    filter: none !important;
+  }
 }
 
 /* Subtle lime keyboard focus ring */

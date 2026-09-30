@@ -525,7 +525,7 @@ fn spawn_deep_research(app: AppHandle, config: TranscriptionConfig, question: St
         };
         let _ = state.db.insert_history(&row);
         crate::history_updated(&app);
-        let result = research(&config, &question).await;
+        let result = research(&app, &config, &question).await;
         match result {
             Ok((report, sources)) => {
                 row.status = "ok".into();
@@ -543,7 +543,7 @@ fn spawn_deep_research(app: AppHandle, config: TranscriptionConfig, question: St
     });
 }
 
-async fn research(config: &TranscriptionConfig, question: &str) -> Result<(String, Vec<Source>), String> {
+async fn research(app: &AppHandle, config: &TranscriptionConfig, question: &str) -> Result<(String, Vec<Source>), String> {
     let mut hits = search(config, question, 8).await?;
     let more = search(config, &format!("{question} analysis"), 6).await.unwrap_or_default();
     for h in more {
@@ -562,7 +562,7 @@ async fn research(config: &TranscriptionConfig, question: &str) -> Result<(Strin
     if sources.is_empty() {
         return Err("Couldn't read any sources".into());
     }
-    let llm = super::llm_from(config)?;
+    let llm = super::llm_from(app, config)?;
     let messages = vec![
         json!({"role":"system","content":"You write thorough, well-structured research reports in markdown. Cite sources inline as [n] using the numbered sources provided. End with a Sources list."}),
         json!({"role":"user","content": format!("Question: {question}\n\nSources:\n{notes}")}),

@@ -77,6 +77,18 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "frameworks": [
+        "libs/libllama.0.dylib",
+        "libs/libllama-common.0.dylib",
+        "libs/libggml.0.dylib",
+        "libs/libggml-base.0.dylib",
+        "libs/libggml-cpu.0.dylib",
+        "libs/libggml-metal.0.dylib"
+      ],
+      "entitlements": "Entitlements.plist"
+    }
   }
 }

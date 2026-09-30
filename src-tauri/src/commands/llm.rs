@@ -1,8 +1,10 @@
-//! OpenAI-compatible chat completions with streaming and tool calls (Groq, OpenAI, Ollama, …).
+//! OpenAI-compatible chat completions with streaming and tool calls (Groq, OpenAI, Ollama, …),
+//! or the local llama.cpp model (text only).
 
 use futures_util::StreamExt;
 use serde_json::{json, Value};
 use std::time::Duration;
+use tauri::AppHandle;
 
 /// One tool call the model asked for (arguments are a JSON string, as the API sends them).
 #[derive(Debug, Clone, PartialEq, Default)]
@@ -135,13 +137,26 @@ impl Assembler {
     }
 }
 
-pub struct Llm {
-    pub url: String,
-    pub model: String,
-    pub api_key: String,
+pub enum Llm {
+    Remote { url: String, model: String, api_key: String, temperature: f64 },
+    /// A downloaded catalog model: no tool calls.
+    Local { app: AppHandle, model_id: String, temperature: f64, max_tokens: u32 },
 }
 
 impl Llm {
+    pub fn is_local(&self) -> bool {
+        matches!(self, Llm::Local { .. })
+    }
+
+    /// Sampling temperature and (local only; cloud models stop on their own) the answer's token limit.
+    pub fn tuned(mut self, temp: f64, max: u32) -> Self {
+        match &mut self {
+            Llm::Remote { temperature, .. } => *temperature = temp,
+            Llm::Local { temperature, max_tokens, .. } => (*temperature, *max_tokens) = (temp, max),
+        }
+        self
+    }
+
     /// Streams one completion; `on_text` gets every text delta as it arrives.
     pub async fn stream(
         &self,
@@ -149,18 +164,35 @@ impl Llm {
         tools: &[Value],
         mut on_text: impl FnMut(&str),
     ) -> Result<Completion, String> {
+        let (url, api_key, body) = match self {
+            Llm::Remote { url, model, api_key, temperature } => (url, api_key, request_body(model, messages, tools, *temperature)),
+            Llm::Local { app, model_id, temperature, max_tokens } => {
+                // The runtime wants a Send + 'static callback: pieces come back over a channel.
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                let chat = crate::models::llama::chat(app, model_id, local_messages(messages), *temperature as f32, *max_tokens, move |piece| {
+                    let _ = tx.send(piece.to_string());
+                });
+                tokio::pin!(chat);
+                let text = loop {
+                    tokio::select! {
+                        result = &mut chat => break result?,
+                        Some(piece) = rx.recv() => on_text(&piece),
+                    }
+                };
+                while let Ok(piece) = rx.try_recv() {
+                    on_text(&piece);
+                }
+                return Ok(Completion { text, tool_calls: Vec::new() });
+            }
+        };
         let client = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(180))
             .build()
             .map_err(|e| e.to_string())?;
-        let mut body = json!({ "model": self.model, "messages": messages, "stream": true, "temperature": 0.3 });
-        if !tools.is_empty() {
-            body["tools"] = Value::Array(tools.to_vec());
-        }
-        let mut request = client.post(&self.url).json(&body);
-        if !self.api_key.trim().is_empty() {
-            request = request.bearer_auth(self.api_key.trim());
+        let mut request = client.post(url).json(&body);
+        if !api_key.trim().is_empty() {
+            request = request.bearer_auth(api_key.trim());
         }
         let response = request.send().await.map_err(|e| {
             eprintln!("LLM request failed: {e}");
@@ -187,6 +219,35 @@ impl Llm {
         }
         assembler.finish()
     }
+}
+
+fn request_body(model: &str, messages: &[Value], tools: &[Value], temperature: f64) -> Value {
+    let mut body = json!({ "model": model, "messages": messages, "stream": true, "temperature": temperature });
+    if !tools.is_empty() {
+        body["tools"] = Value::Array(tools.to_vec());
+    }
+    // gpt-oss reasons at medium effort by default: slow for dictation cleanup and short answers.
+    if model.contains("gpt-oss") {
+        body["reasoning_effort"] = json!("low");
+    }
+    // OpenAI's GPT-6 Luna/Sol reject temperature and tools unless reasoning is off.
+    let bare = model.strip_prefix("openai/").unwrap_or(model);
+    if bare.starts_with("gpt-6-luna") || bare.starts_with("gpt-6-sol") {
+        body["reasoning_effort"] = json!("none");
+    }
+    body
+}
+
+/// OpenAI-style messages as (role, text) for the local model: tool calls and tool results are dropped.
+fn local_messages(messages: &[Value]) -> Vec<(String, String)> {
+    messages
+        .iter()
+        .filter_map(|m| {
+            let role = m.get("role").and_then(Value::as_str)?;
+            let content = m.get("content").and_then(Value::as_str)?;
+            ["system", "user", "assistant"].contains(&role).then(|| (role.to_string(), content.to_string()))
+        })
+        .collect()
 }
 
 /// The assistant message that records the tool calls (sent back with the tool results).
@@ -268,6 +329,37 @@ mod tests {
         }
         let calls = a.finish().unwrap().tool_calls;
         assert_eq!(calls.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), ["web_search", "math_dates"]);
+    }
+
+    #[test]
+    fn local_messages_keep_text_only() {
+        let completion = Completion {
+            text: String::new(),
+            tool_calls: vec![ToolCall { id: "c1".into(), name: "web_search".into(), arguments: "{}".into() }],
+        };
+        let messages = [
+            json!({"role": "system", "content": "Be brief."}),
+            json!({"role": "user", "content": "Weather?"}),
+            assistant_tool_message(&completion),
+            json!({"role": "tool", "tool_call_id": "c1", "content": "Sunny"}),
+            json!({"role": "assistant", "content": "It's sunny."}),
+        ];
+        let pair = |r: &str, c: &str| (r.to_string(), c.to_string());
+        assert_eq!(local_messages(&messages), [pair("system", "Be brief."), pair("user", "Weather?"), pair("assistant", "It's sunny.")]);
+    }
+
+    #[test]
+    fn request_bodies() {
+        let messages = [json!({"role": "user", "content": "Hi"})];
+        let body = request_body("openai/gpt-oss-20b", &messages, &[], 0.1);
+        assert_eq!((body["reasoning_effort"].as_str(), body["temperature"].as_f64()), (Some("low"), Some(0.1)));
+        assert!(body.get("tools").is_none() && body["stream"] == true);
+        let body = request_body("gpt-5.4-mini", &messages, &[json!({"type": "function"})], 0.3);
+        assert!(body.get("reasoning_effort").is_none() && body["tools"].as_array().unwrap().len() == 1);
+        // GPT-6 Luna/Sol only take temperature and tools with reasoning off.
+        for model in ["gpt-6-luna", "openai/gpt-6-sol-2026-08"] {
+            assert_eq!(request_body(model, &messages, &[], 0.3)["reasoning_effort"], "none", "{model}");
+        }
     }
 
     #[test]

@@ -1,0 +1,8 @@
+# Found by cargo from the repo root and from src-tauri (the Tauri CLI), since cargo searches parent dirs.
+[env]
+# llama.cpp's common lib would otherwise link Homebrew's OpenSSL (/opt/homebrew/opt/openssl@3), which users don't have.
+CMAKE_DISABLE_FIND_PACKAGE_OpenSSL = "TRUE"
+# Build llama.cpp/whisper.cpp for the app's minimum macOS (= bundle.macOS.minimumSystemVersion). Same flags in every
+# profile, so src-tauri/libs is the same whichever profile wrote it.
+CMAKE_OSX_DEPLOYMENT_TARGET = "11.0"
+LLAMA_LIB_PROFILE = "Release"

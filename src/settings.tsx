@@ -4,9 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import {
   AudioLines,
   AudioWaveform,
-  Bot,
   Check,
-  Eye,
   FlaskConical,
   Search,
   SunMoon,
@@ -17,8 +15,6 @@ import {
   Cpu,
   Dock,
   Ellipsis,
-  Globe,
-  KeyRound,
   Languages,
   MapPin,
   Mic,
@@ -32,6 +28,7 @@ import {
 } from "lucide-react";
 import { CommandsHotkeySection } from "./commands-hotkeys";
 import { LOCALES, locale, t } from "./i18n";
+import { ModelSettings } from "./model-settings";
 import type {
   HotkeyField,
   HotkeyRow,
@@ -53,7 +50,6 @@ import {
   OutlineButton,
   SettingsRow,
   SettingsSection,
-  TextInput,
   Toggle,
   bindingLabels,
   toBinding,
@@ -328,17 +324,14 @@ export function SettingsModal({
   config,
   onSave,
   onClose,
+  initialTab = "dictation",
 }: {
   config: TranscriptionConfig;
   onSave: SaveConfig;
   onClose: () => void;
+  initialTab?: SettingsTab;
 }) {
-  const [tab, setTab] = useState<SettingsTab>("dictation");
-  const [endpointUrl, setEndpointUrl] = useState(config.endpoint_url);
-  const [modelName, setModelName] = useState(config.model_name);
-  const [apiKey, setApiKey] = useState(config.api_key);
-  const [llmUrl, setLlmUrl] = useState(config.llm_endpoint_url ?? "");
-  const [llmModel, setLlmModel] = useState(config.llm_model_name ?? "");
+  const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [languagesOpen, setLanguagesOpen] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<keyof TranscriptionConfig, string>>>({});
   const [devices, setDevices] = useState<string[]>([]);
@@ -558,18 +551,6 @@ export function SettingsModal({
                 />
               </SettingsRow>
               <SettingsRow
-                icon={Eye}
-                title={t("Show dictation bar when idle")}
-                description={t("Keep the small bar on screen between dictations")}
-                note={errorNote("show_bar_when_idle")}
-              >
-                <Toggle
-                  on={config.show_bar_when_idle}
-                  onChange={(v) => save({ show_bar_when_idle: v })}
-                  label={t("Show dictation bar when idle")}
-                />
-              </SettingsRow>
-              <SettingsRow
                 icon={MapPin}
                 title={t("Dictation bar location")}
                 description={t("Choose how high the dictation bar appears on screen")}
@@ -725,78 +706,7 @@ export function SettingsModal({
             </>
           )}
 
-          {tab === "model" && (
-            <>
-              <SettingsSection label={t("Speech to text")} />
-              <SettingsRow
-                icon={Globe}
-                title={t("STT endpoint URL")}
-                description={t("OpenAI-compatible endpoint")}
-                note={errorNote("endpoint_url")}
-              >
-                <TextInput
-                  value={endpointUrl}
-                  onChange={setEndpointUrl}
-                  onCommit={() => save({ endpoint_url: endpointUrl.trim() })}
-                  placeholder="https://api.groq.com/openai/v1/audio/transcriptions"
-                  className="w-[200px]"
-                />
-              </SettingsRow>
-              <SettingsRow
-                icon={Cpu}
-                title={t("Model name")}
-                description={t("Whisper model to request")}
-                note={errorNote("model_name")}
-              >
-                <TextInput
-                  value={modelName}
-                  onChange={setModelName}
-                  onCommit={() => save({ model_name: modelName.trim() })}
-                  placeholder="whisper-large-v3-turbo"
-                  className="w-[180px]"
-                />
-              </SettingsRow>
-              <SettingsRow
-                icon={KeyRound}
-                title={t("API key")}
-                description={t("Bearer token for the endpoint")}
-                note={errorNote("api_key")}
-              >
-                <TextInput
-                  type="password"
-                  value={apiKey}
-                  onChange={setApiKey}
-                  onCommit={() => save({ api_key: apiKey.trim() })}
-                  placeholder="gsk_... or custom key"
-                  className="w-[200px]"
-                />
-              </SettingsRow>
-              <SettingsSection label={t("Language model")} />
-              <SettingsRow
-                icon={Globe}
-                title={t("LLM endpoint URL")}
-                description={t("OpenAI-compatible chat completions, for formatting and commands")}
-                note={errorNote("llm_endpoint_url")}
-              >
-                <TextInput
-                  value={llmUrl}
-                  onChange={setLlmUrl}
-                  onCommit={() => save({ llm_endpoint_url: llmUrl.trim() || null })}
-                  placeholder="https://api.groq.com/openai/v1/chat/completions"
-                  className="w-[200px]"
-                />
-              </SettingsRow>
-              <SettingsRow icon={Bot} title={t("LLM model")} description={t("Uses the API key above")} note={errorNote("llm_model_name")}>
-                <TextInput
-                  value={llmModel}
-                  onChange={setLlmModel}
-                  onCommit={() => save({ llm_model_name: llmModel.trim() || null })}
-                  placeholder="llama-3.3-70b-versatile"
-                  className="w-[180px]"
-                />
-              </SettingsRow>
-            </>
-          )}
+          {tab === "model" && <ModelSettings config={config} save={save} errorNote={errorNote} />}
         </div>
       </div>
 

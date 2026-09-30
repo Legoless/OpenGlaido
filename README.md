@@ -14,12 +14,14 @@ Press your shortcut, speak naturally, and messy speech is converted to clean, fo
   - Groq Whisper (ultra-fast ~200ms latency)
   - Self-hosted [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)
   - Speaches, vLLM, RunPod, Modal, or OpenAI
+  - Or on your Mac, offline: download a Whisper model in Settings › Model (whisper.cpp with Metal)
 - 🎯 **App Styles & Writing Modes** (VoiceInk Power Modes / Glaido Styles):
   - **Standard Clean-up:** Removes filler words (*um*, *uh*), fixes punctuation and capitalization.
   - **Email Mode:** Formats professional email prose with polite phrasing.
   - **Chat Mode:** Fast, concise messaging for Slack, Discord, and Teams.
   - **Code Mode:** Understands programming syntax and developer jargon.
   - **Raw Mode:** Raw verbatim output directly from Whisper without AI edits.
+  - The clean-up runs on a cloud LLM or, on a Mac, on a downloaded local model (llama.cpp, e.g. Gemma 4 E2B).
 - ⚡ **Voice Snippets**: Short spoken trigger phrases (e.g., *"my email"*) expand into long canned templates.
 - 🎯 **Floating HUD Pill**: Non-intrusive transparent overlay indicator with animated waveform during dictation.
 - 📝 **Custom Dictionary**: Teach OpenGlaido proper nouns, tech jargon, and custom spelling replacements.
@@ -31,7 +33,7 @@ Press your shortcut, speak naturally, and messy speech is converted to clean, fo
 ## Tech Stack
 
 - **Framework:** [Tauri v2](https://v2.tauri.app)
-- **Backend:** Rust (`cpal` for microphone input, `hound` for WAV, `rodio` for audio tones, `arboard` for clipboard, `enigo` for keystrokes, `rusqlite` for database)
+- **Backend:** Rust (`cpal` for microphone input, `hound` for WAV, `rodio` for audio tones, `arboard` for clipboard, `enigo` for keystrokes, `rusqlite` for database, `whisper-rs` and `llama-cpp-2` for local models on macOS)
 - **Frontend:** React 19, TypeScript, Tailwind CSS v4, Vite, Lucide Icons
 
 ---
@@ -39,8 +41,9 @@ Press your shortcut, speak naturally, and messy speech is converted to clean, fo
 ## Development Setup
 
 ### Prerequisites
-- [Rust](https://rustup.rs/) (1.78+)
+- [Rust](https://rustup.rs/) (1.91+)
 - [Bun](https://bun.sh/) (or Node.js / pnpm)
+- On macOS: [CMake](https://cmake.org/) (`brew install cmake`), which builds whisper.cpp and llama.cpp
 
 ### Running Locally
 ```bash

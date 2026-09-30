@@ -34,7 +34,7 @@ impl Recording {
 pub const OUTPUT_RATE: u32 = 16_000;
 
 /// Resamples mono audio (linear interpolation; ponytail: fine for speech, not for music).
-fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
+pub(crate) fn resample(samples: &[f32], from: u32, to: u32) -> Vec<f32> {
     if from == to || samples.is_empty() {
         return samples.to_vec();
     }
@@ -97,6 +97,11 @@ pub fn list_input_devices() -> Vec<String> {
         .input_devices()
         .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
         .unwrap_or_default()
+}
+
+/// Whether there is a microphone to record from (listing the devices takes 150+ ms on macOS).
+pub fn has_input_device() -> bool {
+    cpal::default_host().default_input_device().is_some()
 }
 
 // Downmixes one callback chunk to mono, appends it and updates the decaying peak level.

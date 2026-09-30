@@ -1,5 +1,5 @@
 //! API keys live in the OS keychain (macOS Keychain / Windows Credential Manager), never in
-//! config.json. Accounts: "api_key", "search_api_key".
+//! config.json. Accounts: "api_key", "llm_api_key", "search_api_key".
 
 const SERVICE: &str = "com.openglaido.app";
 

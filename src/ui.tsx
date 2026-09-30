@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Plus, Search, TriangleAlert, createLucideIcon } from "lucide-react";
 import type { IconType } from "./types";
@@ -69,14 +69,17 @@ export function Toggle({ on, onChange, label }: { on: boolean; onChange: (v: boo
 export function OutlineButton({
   onClick,
   children,
+  autoFocus,
 }: {
   onClick: () => void;
   children: React.ReactNode;
+  autoFocus?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      autoFocus={autoFocus}
       className="gs-text-body-md-medium inline-flex h-7 shrink-0 items-center gap-2.5 whitespace-nowrap rounded-[2px] border border-border-default pr-2.5 pl-3 text-text-subdued transition-colors hover:text-text-default"
     >
       {children}
@@ -257,17 +260,34 @@ export function Dropdown({
   onChange,
   className = "",
   buttonLabel,
+  search,
 }: {
   value: string | null;
   options: { value: string | null; label: string }[];
   onChange: (v: string | null) => void;
   className?: string;
   buttonLabel?: string;
+  /** Placeholder of a filter field on top of the menu, shown when it lists more than 12 options. */
+  search?: string;
 }) {
   // Portalled fixed-position menu: never clipped by the scrolling settings column, and not
   // positioned relative to the modal (its backdrop-filter is a containing block for fixed children).
   const [menu, setMenu] = useState<React.CSSProperties | null>(null);
+  const [query, setQuery] = useState("");
+  const [active, setActive] = useState(0);
+  useEscape(() => setMenu(null), !!menu);
+  const filtering = !!search && options.length > 12;
+  // Stable, so re-renders (download progress) don't scroll the list back to the active item.
+  const scrollActive = useCallback((el: HTMLButtonElement | null) => el?.scrollIntoView({ block: "nearest" }), []);
+  const q = query.trim().toLowerCase();
+  const shown = filtering && q ? options.filter((o) => o.label.toLowerCase().includes(q)) : options;
+  const pick = (o: { value: string | null }) => {
+    setMenu(null);
+    if (o.value !== value) onChange(o.value);
+  };
   const openMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    setQuery("");
+    setActive(0);
     const r = e.currentTarget.getBoundingClientRect();
     const right = window.innerWidth - r.right;
     const openUp = r.bottom + 248 > window.innerHeight;
@@ -304,17 +324,47 @@ export function Dropdown({
             <div className="fixed inset-0 z-[70]" onMouseDown={() => setMenu(null)} />
             <div
               style={menu}
-              className="fixed z-[71] flex max-h-[240px] flex-col overflow-y-auto rounded-[6px] border border-border-default bg-menu-surface p-1 shadow-2xl"
+              className={`fixed z-[71] flex max-h-[240px] flex-col overflow-y-auto rounded-[6px] border border-border-default bg-menu-surface p-1 shadow-2xl ${
+                filtering ? "scroll-pt-[38px]" : ""
+              }`}
             >
-              {options.map((o) => (
+              {filtering && (
+                <div className="sticky top-0 z-10 -mx-1 -mt-1 mb-1 shrink-0 bg-menu-surface p-1">
+                  <div className="flex h-[30px] items-center gap-2.5 rounded-[4px] bg-transparent-primary px-[13px]">
+                    <Search className="size-3.5 shrink-0 text-text-subdued" />
+                    <input
+                      autoFocus
+                      value={query}
+                      onChange={(e) => {
+                        setQuery(e.target.value);
+                        setActive(0);
+                      }}
+                      onKeyDown={(e) => {
+                        if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+                          e.preventDefault();
+                          const step = e.key === "ArrowDown" ? 1 : -1;
+                          setActive((i) => Math.min(Math.max(i + step, 0), shown.length - 1));
+                        } else if (isPlainEnter(e) && shown[active]) {
+                          e.preventDefault();
+                          pick(shown[active]);
+                        }
+                      }}
+                      placeholder={search}
+                      aria-label={search}
+                      className="gs-text-body-sm-regular w-full min-w-0 bg-transparent text-text-default placeholder:text-text-disabled focus:outline-none"
+                    />
+                  </div>
+                </div>
+              )}
+              {shown.map((o, i) => (
                 <button
-                  key={o.value ?? ""}
+                  key={o.value ?? "\u0000other"}
+                  ref={filtering && i === active ? scrollActive : undefined}
                   type="button"
-                  onClick={() => {
-                    setMenu(null);
-                    if (o.value !== value) onChange(o.value);
-                  }}
-                  className="gs-text-body-md-regular flex h-8 shrink-0 items-center justify-between gap-4 rounded-[4px] px-2.5 text-left whitespace-nowrap text-text-default hover:bg-transparent-secondary"
+                  onClick={() => pick(o)}
+                  className={`gs-text-body-md-regular flex h-8 shrink-0 items-center justify-between gap-4 rounded-[4px] px-2.5 text-left whitespace-nowrap text-text-default hover:bg-transparent-secondary ${
+                    filtering && i === active ? "bg-transparent-secondary" : ""
+                  }`}
                 >
                   {o.label}
                   {o.value === value && <Check className="size-3.5 text-text-accent" />}

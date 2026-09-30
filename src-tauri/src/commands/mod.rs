@@ -81,11 +81,23 @@ pub struct Commands {
     pub mcp: mcp::Manager,
 }
 
-pub fn llm_from(config: &TranscriptionConfig) -> Result<Llm, String> {
-    match (&config.llm_endpoint_url, &config.llm_model_name) {
-        (Some(url), Some(model)) if !url.trim().is_empty() && !model.trim().is_empty() => {
-            Ok(Llm { url: url.trim().into(), model: model.trim().into(), api_key: config.api_key.clone() })
-        }
+/// The language model from Settings › Model (commands defaults: temperature 0.3, 1024 tokens).
+pub fn llm_from(app: &AppHandle, config: &TranscriptionConfig) -> Result<Llm, String> {
+    if config.llm_source == "local" {
+        crate::models::path_if_downloaded(app, &config.local_llm_model).ok_or("Download the language model in Settings › Model")?;
+        return Ok(Llm::Local { app: app.clone(), model_id: config.local_llm_model.clone(), temperature: 0.3, max_tokens: 1024 });
+    }
+    cloud_llm(config)
+}
+
+fn cloud_llm(config: &TranscriptionConfig) -> Result<Llm, String> {
+    match (config.llm_source.as_str(), &config.llm_endpoint_url, &config.llm_model_name) {
+        ("cloud", Some(url), Some(model)) if !url.trim().is_empty() && !model.trim().is_empty() => Ok(Llm::Remote {
+            url: url.trim().into(),
+            model: model.trim().into(),
+            api_key: config.llm_api_key.clone(),
+            temperature: 0.3,
+        }),
         _ => Err("Set up a language model in Settings › Model to use commands".into()),
     }
 }
@@ -125,15 +137,20 @@ pub fn wake_command(text: &str) -> Option<String> {
     })
 }
 
-fn system_prompt(context: Option<&AppContext>) -> String {
+/// `tools` = false for a local model, which gets none.
+fn system_prompt(context: Option<&AppContext>, tools: bool) -> String {
     let now = chrono::Local::now();
     let app = context.map_or(String::new(), |c| format!(" The user is in {}.", c.name));
+    let tools = if tools {
+        "Use tools when they help (exact maths and dates, the web, the open page, files, the user's own dictation history, OpenGlaido's documentation)."
+    } else {
+        "You have no tools (no web, files or history): answer from what you know, and say so when a request needs them."
+    };
     format!(
         "You are OpenGlaido's command assistant. The user spoke an instruction (speech recognition may contain small errors).{app} \
          If a <selection> is given, it is the text they had selected, and instructions like \"make this shorter\" refer to it. \
          When the instruction writes or transforms text, reply with ONLY the resulting text, ready to paste: no preamble, no quotes, no explanation. \
-         When it's a question, answer concisely; markdown is fine. Use tools when they help (exact maths and dates, the web, the open page, files, \
-         the user's own dictation history, OpenGlaido's documentation). Today is {}.",
+         When it's a question, answer concisely; markdown is fine. {tools} Today is {}.",
         now.format("%A %Y-%m-%d %H:%M (%:z)")
     )
 }
@@ -290,7 +307,7 @@ pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i6
             let generation = c.run.lock().unwrap().generation;
             update(&app, generation, |r| r.error = Some("No speech detected".into()));
         } else {
-            report_error(&app, "No speech detected");
+            crate::report_warning(&app, "No speech detected");
         }
         return;
     }
@@ -305,7 +322,7 @@ pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i6
     show_window(&app);
 
     let config = app.state::<AppState>().config.lock().unwrap().clone();
-    let instruction = match transcribe_raw(wav, &config, None).await {
+    let instruction = match transcribe_raw(&app, wav, &config, None).await {
         Ok(t) if t.chars().any(char::is_alphanumeric) => t,
         Ok(_) => return update(&app, generation, |r| fail(r, "No speech detected")),
         Err(e) => return update(&app, generation, |r| fail(r, &e)),
@@ -395,7 +412,7 @@ async fn run_command(
         if run.generation == generation { (run.messages.clone(), run.urls.clone()) } else { Default::default() }
     };
     if messages.is_empty() {
-        messages.push(json!({"role":"system","content": system_prompt(context.as_ref())}));
+        messages.push(json!({"role":"system","content": system_prompt(context.as_ref(), config.llm_source != "local")}));
     }
     let content = match &selection {
         Some(sel) => format!("{instruction}\n\n<selection>\n{sel}\n</selection>"),
@@ -460,10 +477,14 @@ async fn agent_loop(
     ctx: &tools::ToolContext,
     messages: &mut Vec<Value>,
 ) -> Result<(String, Vec<Source>), String> {
-    let llm = llm_from(config)?;
+    let llm = llm_from(app, config)?;
     let mcp = &commands(app).mcp;
-    let mut schemas = tools::schemas(config);
-    schemas.extend(mcp.schemas(&config.mcp_servers));
+    // A local model can't call tools; system_prompt told it so.
+    let mut schemas = Vec::new();
+    if !llm.is_local() {
+        schemas = tools::schemas(config);
+        schemas.extend(mcp.schemas(&config.mcp_servers));
+    }
     let mut sources = Vec::new();
     let mut last_emit = Instant::now();
     for step in 0..MAX_STEPS {
@@ -809,17 +830,24 @@ mod tests {
     }
 
     #[test]
-    fn llm_needs_endpoint_and_model() {
-        let mut cfg = TranscriptionConfig::default();
-        assert!(llm_from(&cfg).is_ok());
+    fn cloud_llm_needs_source_endpoint_and_model() {
+        let mut cfg = TranscriptionConfig { api_key: "stt".into(), llm_api_key: "chat".into(), ..Default::default() };
+        match cloud_llm(&cfg) {
+            Ok(Llm::Remote { api_key, temperature, .. }) => assert_eq!((api_key.as_str(), temperature), ("chat", 0.3)),
+            _ => panic!("expected a cloud model"),
+        }
+        cfg.llm_source = "off".into();
+        assert!(matches!(cloud_llm(&cfg), Err(e) if e.starts_with("Set up a language model")));
+        cfg.llm_source = "cloud".into();
         cfg.llm_model_name = Some(" ".into());
-        assert!(llm_from(&cfg).is_err());
+        assert!(cloud_llm(&cfg).is_err());
     }
 
     #[test]
     fn prompt_mentions_app_and_date() {
         let ctx = AppContext { bundle_id: "com.apple.mail".into(), name: "Mail".into(), url: None };
-        let p = system_prompt(Some(&ctx));
+        let p = system_prompt(Some(&ctx), true);
         assert!(p.contains("in Mail") && p.contains(&chrono::Local::now().format("%Y-%m-%d").to_string()));
+        assert!(p.contains("Use tools") && system_prompt(None, false).contains("You have no tools"));
     }
 }

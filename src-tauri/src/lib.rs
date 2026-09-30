@@ -3,9 +3,11 @@ pub mod commands;
 pub mod db;
 pub mod frontmost;
 pub mod hotkeys;
+pub mod models;
 pub mod output;
 pub mod paste;
 pub mod secrets;
+pub mod setup;
 pub mod sound;
 pub mod transcribe;
 
@@ -15,14 +17,14 @@ use frontmost::{AppContext, AppInfo};
 use hotkeys::{HotkeyEngine, HotkeyEvent, HotkeyStatus};
 use transcribe::{apply_formatting, transcribe_raw, TranscriptionConfig};
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
-use tauri::menu::{Menu, MenuItem};
-use tauri::Wry;
+use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem, Submenu};
 use tauri::tray::TrayIconBuilder;
 use tauri::{
     AppHandle, Emitter, Manager, PhysicalPosition, PhysicalRect, PhysicalSize, State, WindowEvent,
@@ -96,8 +98,9 @@ pub struct AppState {
     pub events: Sender<(HotkeyEvent, Instant)>,
     /// Transcriptions in flight: the bar shows "processing" while > 0.
     pub jobs: AtomicUsize,
-    /// The dictation bar stays visible until then to show an error (when idle-hiding is on).
+    /// The dictation bar stays visible until then to show a message.
     pub error_until: Mutex<Option<Instant>>,
+    pub hud: Mutex<HudVisibility>,
     /// Serializes settings changes (save_config vs backend update_config).
     pub config_write: Mutex<()>,
     /// A hold whose delayed start hasn't fired yet (token of that press).
@@ -130,26 +133,100 @@ pub struct Session {
     pub chime: bool,
 }
 
-/// Tray menu items, kept so their labels can be localized.
-pub struct TrayItems(pub [MenuItem<Wry>; 3]);
+/// Tray menu labels (Microphone, System Default, Show OpenGlaido, Quit); the frontend sends translations.
+pub struct TrayLabels(Mutex<[String; 4]>);
+
+/// Glaido's menu bar menu: Microphone ▸ (System Default, the input devices), Show OpenGlaido, Quit.
+/// Rebuilt when the pointer reaches the icon, so the device list is current.
+fn refresh_tray(app: &AppHandle) {
+    let result = (|| -> tauri::Result<()> {
+        let Some(tray) = app.tray_by_id(TRAY_ID) else { return Ok(()) };
+        let [microphone, system_default, show, quit] = app.state::<TrayLabels>().0.lock().unwrap().clone();
+        let selected = app.state::<AppState>().config.lock().unwrap().input_device.clone();
+        let mics = Submenu::with_id(app, "mic", &microphone, true)?;
+        mics.append(&CheckMenuItem::with_id(app, "mic-default", &system_default, true, selected.is_none(), None::<&str>)?)?;
+        mics.append(&PredefinedMenuItem::separator(app)?)?;
+        for name in audio::list_input_devices() {
+            let checked = selected.as_deref() == Some(name.as_str());
+            mics.append(&CheckMenuItem::with_id(app, format!("mic:{name}"), &name, true, checked, None::<&str>)?)?;
+        }
+        let menu = Menu::with_items(
+            app,
+            &[
+                &mics,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "show", &show, true, None::<&str>)?,
+                &PredefinedMenuItem::separator(app)?,
+                &MenuItem::with_id(app, "quit", &quit, true, None::<&str>)?,
+            ],
+        )?;
+        tray.set_menu(Some(menu))
+    })();
+    if let Err(e) = result {
+        eprintln!("Failed to build the menu bar menu: {e}");
+    }
+}
 
 const CHIME_TRIM_MS: u32 = 150;
 
-/// Logs `msg` and shows it in the dictation bar.
+/// A bar/toast message. `message` stays an English translation key; `vars` fills `{placeholders}`.
+struct Notice {
+    message: String,
+    level: &'static str,
+    vars: BTreeMap<String, String>,
+}
+
+impl Notice {
+    fn error(message: impl Into<String>) -> Self {
+        Self { message: message.into(), level: "error", vars: BTreeMap::new() }
+    }
+
+    /// Blockers are errors on the bar even when the Home card shows the same issue as a warning.
+    fn from_issue(issue: setup::SetupIssue) -> Self {
+        Self { message: issue.title, level: "error", vars: issue.vars }
+    }
+
+    fn filled(&self) -> String {
+        fill(&self.message, &self.vars)
+    }
+}
+
+fn fill(msg: &str, vars: &BTreeMap<String, String>) -> String {
+    vars.iter().fold(msg.to_string(), |text, (k, v)| text.replace(&format!("{{{k}}}"), v))
+}
+
+/// Logs `msg` and shows it in the dictation bar as an error.
 pub fn report_error(app: &AppHandle, msg: impl AsRef<str>) {
-    let msg = msg.as_ref();
-    eprintln!("{}", msg);
+    report(app, msg.as_ref(), "error", Duration::from_millis(4500), &BTreeMap::new());
+}
+
+/// Like `report_error`, for something that worked, but not quite as asked.
+pub fn report_warning(app: &AppHandle, msg: impl AsRef<str>) {
+    report(app, msg.as_ref(), "warning", Duration::from_millis(3500), &BTreeMap::new());
+}
+
+fn report_notice(app: &AppHandle, notice: &Notice) {
+    let duration = if notice.level == "warning" { 3500 } else { 4500 };
+    report(app, &notice.message, notice.level, Duration::from_millis(duration), &notice.vars);
+}
+
+fn report(app: &AppHandle, msg: &str, level: &str, duration: Duration, vars: &BTreeMap<String, String>) {
+    eprintln!("{}", fill(msg, vars));
+    // Before the bar appears, so it appears with the message. `message` is the translation key.
+    if let Err(e) = app.emit(
+        "dictation-error",
+        serde_json::json!({ "message": msg, "level": level, "vars": vars }),
+    ) {
+        eprintln!("Failed to emit dictation-error: {}", e);
+    }
     if let Some(state) = app.try_state::<AppState>() {
-        *state.error_until.lock().unwrap() = Some(Instant::now() + Duration::from_millis(3500));
+        *state.error_until.lock().unwrap() = Some(Instant::now() + duration);
         update_hud(app);
         let app = app.clone();
         std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(3600));
+            std::thread::sleep(duration + Duration::from_millis(100));
             update_hud(&app);
         });
-    }
-    if let Err(e) = app.emit("dictation-error", msg) {
-        eprintln!("Failed to emit dictation-error: {}", e);
     }
 }
 
@@ -173,15 +250,59 @@ pub fn show_passive(window: &tauri::WebviewWindow) -> Result<(), String> {
     window.show().map_err(|e| e.to_string())
 }
 
-/// Shows the dictation bar while idle only when `show_bar_when_idle`; always while busy.
+/// How long the HUD has to animate out between "hud-visibility" false and the window hiding.
+const HUD_HIDE_DELAY: Duration = Duration::from_millis(220);
+
+/// The dictation bar's last "hud-visibility" and whether its window is hidden; `changes` tells a
+/// delayed hide whether the bar was shown again meanwhile.
+pub struct HudVisibility {
+    shown: bool,
+    hidden: bool,
+    changes: u64,
+}
+
+/// Shows the dictation bar only while recording, processing or showing a message (like Glaido), on
+/// the display with the pointer when it appears. "hud-visibility" goes out before it shows and
+/// HUD_HIDE_DELAY before it hides.
 pub fn update_hud(app: &AppHandle) {
     let (Some(state), Some(hud)) = (app.try_state::<AppState>(), app.get_webview_window("hud")) else { return };
     let showing_error = state.error_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
     let busy = state.recording.load(Ordering::SeqCst) || state.jobs.load(Ordering::SeqCst) > 0;
-    let show = busy || showing_error || state.config.lock().unwrap().show_bar_when_idle;
-    let result = if show { show_passive(&hud) } else { hud.hide().map_err(|e| e.to_string()) };
-    if let Err(e) = result {
-        eprintln!("Failed to update the dictation bar: {}", e);
+    let show = busy || showing_error;
+    let mut bar = state.hud.lock().unwrap();
+    let changed = bar.shown != show;
+    if changed {
+        bar.shown = show;
+        bar.changes += 1;
+        // Under the lock, so the HUD hears the changes in order.
+        let _ = app.emit("hud-visibility", show);
+    }
+    if show {
+        let appear = std::mem::take(&mut bar.hidden);
+        drop(bar);
+        if appear {
+            let location = state.config.lock().unwrap().bar_location.clone();
+            position_hud(app, &location);
+        }
+        if let Err(e) = show_passive(&hud) {
+            eprintln!("Failed to show the dictation bar: {}", e);
+        }
+    } else if changed {
+        let change = bar.changes;
+        drop(bar);
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(HUD_HIDE_DELAY);
+            let state = app.state::<AppState>();
+            // Under the lock, so a show can't slip in between.
+            let mut bar = state.hud.lock().unwrap();
+            if bar.changes == change {
+                bar.hidden = true;
+                if let Err(e) = hud.hide() {
+                    eprintln!("Failed to hide the dictation bar: {}", e);
+                }
+            }
+        });
     }
 }
 
@@ -209,6 +330,9 @@ pub fn history_updated(app: &AppHandle) {
 // fields from older versions are migrated.
 fn load_config(path: &Path) -> TranscriptionConfig {
     let mut config = read_config(path);
+    // Written before the model settings, when api_key served both endpoints.
+    let shared_key = fs::read_to_string(path)
+        .is_ok_and(|json| serde_json::from_str::<serde_json::Value>(&json).is_ok_and(|v| v.get("llm_source").is_none()));
     // A hotkey an older version accepted but this platform now rejects (Windows Ctrl+Alt = AltGr)
     // falls back to its default instead of leaving dictation without a hotkey.
     let mut migrated = false;
@@ -225,13 +349,25 @@ fn load_config(path: &Path) -> TranscriptionConfig {
         }
     }
     // Keys live in the keychain. A plaintext key from an older config.json moves there once.
-    let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty();
-    for (account, value) in [("api_key", &mut config.api_key), ("search_api_key", &mut config.search_api_key)] {
+    let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty() || !config.llm_api_key.is_empty();
+    for (account, value) in [
+        ("api_key", &mut config.api_key),
+        ("search_api_key", &mut config.search_api_key),
+        ("llm_api_key", &mut config.llm_api_key),
+    ] {
         if value.is_empty() {
             *value = secrets::get(account);
         } else if let Err(e) = secrets::set(account, value) {
             eprintln!("{e}");
         }
+    }
+    // Such a config gives the language model its own copy of api_key, once: clearing it later sticks.
+    if shared_key && config.llm_api_key.is_empty() && config.llm_source == "cloud" && !config.api_key.is_empty() {
+        config.llm_api_key = config.api_key.clone();
+        if let Err(e) = secrets::set("llm_api_key", &config.llm_api_key) {
+            eprintln!("{e}");
+        }
+        migrated = true;
     }
     // config_json keeps the keys on disk if the keychain failed, so this never loses one.
     if plaintext || migrated {
@@ -259,7 +395,7 @@ fn read_config(path: &Path) -> TranscriptionConfig {
 /// keychain is unusable, in which case dropping them would lose them.
 fn config_json(config: &TranscriptionConfig) -> Result<String, String> {
     let on_disk = if secrets::available() {
-        TranscriptionConfig { api_key: String::new(), search_api_key: String::new(), ..config.clone() }
+        TranscriptionConfig { api_key: String::new(), search_api_key: String::new(), llm_api_key: String::new(), ..config.clone() }
     } else {
         config.clone()
     };
@@ -285,6 +421,32 @@ pub fn update_config(app: &AppHandle, f: impl FnOnce(&mut TranscriptionConfig)) 
     write_config(&state.db.app_dir.join(CONFIG_FILE), &updated)?;
     let _ = app.emit("config-changed", &updated);
     Ok(())
+}
+
+/// Loads the local models the settings now use in the background, and frees the ones they left
+/// (`old` None = startup or a finished download). Never blocks: a transcription may be holding the model.
+pub(crate) fn load_local_models(app: &AppHandle, config: &TranscriptionConfig, old: Option<&TranscriptionConfig>) {
+    let selected = |c: &TranscriptionConfig| {
+        let local = |source: &str, id: &String| (source == "local").then(|| id.clone());
+        (local(&c.stt_source, &c.local_stt_model), local(&c.llm_source, &c.local_llm_model))
+    };
+    let (stt, llm) = selected(config);
+    let (old_stt, old_llm) = old.map(selected).unzip();
+    let app = app.clone();
+    std::thread::spawn(move || {
+        if old_stt.as_ref() != Some(&stt) {
+            match stt {
+                Some(id) => models::whisper::preload(&app, &id),
+                None => models::whisper::unload(),
+            }
+        }
+        if old_llm.as_ref() != Some(&llm) {
+            match llm {
+                Some(id) => models::llama::preload(&app, &id),
+                None => models::llama::unload(),
+            }
+        }
+    });
 }
 
 fn set_launch_at_login(app: &AppHandle, enabled: bool) -> Result<(), String> {
@@ -317,18 +479,75 @@ pub(crate) fn hud_origin(
     )
 }
 
-// ponytail: primary monitor only, placed at startup/save; follow the cursor's monitor or
-// re-place on display changes if multi-display users ask.
+/// The thread that runs `.setup`. Monitor queries wait on it and deadlock if called there.
+static MAIN_THREAD: OnceLock<std::thread::ThreadId> = OnceLock::new();
+
+fn on_main_thread() -> bool {
+    MAIN_THREAD.get().is_none_or(|id| *id == std::thread::current().id())
+}
+
+/// Pointer in the space `monitor_from_point` uses: points, origin at the top-left of the main
+/// display, y down. Tauri's cursor position flips y with the pixel height, which misses every
+/// display on a Retina screen.
+#[cfg(target_os = "macos")]
+fn display_point_under_cursor() -> Option<(f64, f64)> {
+    use objc2_app_kit::NSEvent;
+    #[repr(C)]
+    struct CGPoint {
+        x: f64,
+        y: f64,
+    }
+    #[repr(C)]
+    struct CGSize {
+        width: f64,
+        height: f64,
+    }
+    #[repr(C)]
+    struct CGRect {
+        origin: CGPoint,
+        size: CGSize,
+    }
+    #[link(name = "CoreGraphics", kind = "framework")]
+    extern "C" {
+        fn CGMainDisplayID() -> u32;
+        fn CGDisplayBounds(display: u32) -> CGRect;
+    }
+    let mouse = NSEvent::mouseLocation();
+    let bounds = unsafe { CGDisplayBounds(CGMainDisplayID()) };
+    Some((mouse.x, bounds.size.height - mouse.y))
+}
+
+/// Places the dictation bar on the display under the pointer (else the primary one).
 fn position_hud(app: &AppHandle, bar_location: &str) {
+    // Don't wait: setup is the main thread, and the event loop answers only after it returns.
+    if on_main_thread() {
+        let app = app.clone();
+        let bar_location = bar_location.to_string();
+        std::thread::spawn(move || position_hud_now(&app, &bar_location));
+    } else {
+        position_hud_now(app, bar_location);
+    }
+}
+
+fn position_hud_now(app: &AppHandle, bar_location: &str) {
     let Some(hud) = app.get_webview_window("hud") else { return };
-    match (hud.primary_monitor(), hud.outer_size()) {
-        (Ok(Some(monitor)), Ok(size)) => {
-            let origin = hud_origin(monitor.work_area(), size, monitor.scale_factor(), bar_location);
-            if let Err(e) = hud.set_position(origin) {
-                eprintln!("Failed to position the dictation bar: {}", e);
-            }
-        }
-        _ => eprintln!("Failed to position the dictation bar: no primary monitor"),
+    let primary = app.primary_monitor().ok().flatten();
+    #[cfg(target_os = "macos")]
+    let pointer = display_point_under_cursor();
+    #[cfg(not(target_os = "macos"))]
+    let pointer = app.cursor_position().ok().map(|p| (p.x, p.y));
+    let monitor = pointer.and_then(|(x, y)| app.monitor_from_point(x, y).ok().flatten()).or(primary);
+    let (Some(monitor), Ok(size), Ok(scale)) = (monitor, hud.outer_size(), hud.scale_factor()) else {
+        return eprintln!("Failed to position the dictation bar: no display");
+    };
+    // Each display measures in its own pixels, so the bar's size is converted to the target display's.
+    let size = size.to_logical::<f64>(scale).to_physical(monitor.scale_factor());
+    let origin = hud_origin(monitor.work_area(), size, monitor.scale_factor(), bar_location);
+    // A macOS window reads a physical position with the scale of the display it is on now: move it in points.
+    #[cfg(target_os = "macos")]
+    let origin = origin.to_logical::<f64>(monitor.scale_factor());
+    if let Err(e) = hud.set_position(origin) {
+        eprintln!("Failed to position the dictation bar: {}", e);
     }
 }
 
@@ -384,7 +603,11 @@ fn set_mode(app: &AppHandle, state: &AppState, mode: &mut Mode, next: Mode) {
 }
 
 // Caller holds the mode lock. `started` = when the user asked (opening the mic can take a while).
-fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: Purpose) -> Result<(), String> {
+// Err (reported once by the caller) leaves the mode Idle, also when setup keeps it from starting.
+fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: Purpose) -> Result<(), Notice> {
+    if let Some(issue) = setup::blocker(app, purpose) {
+        return Err(Notice::from_issue(issue));
+    }
     let (device, sound_on, mute, beta) = {
         let c = state.config.lock().unwrap();
         (c.input_device.clone(), c.sound_feedback, c.mute_background, c.beta_features)
@@ -392,11 +615,16 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     let fell_back = state
         .recorder
         .start_recording(device.as_deref())
-        .map_err(|e| format!("Couldn't start recording: {}", e))?;
+        .map_err(|e| Notice::error(format!("Couldn't start recording: {}", e)))?;
     if fell_back {
-        report_error(
+        let mut vars = BTreeMap::new();
+        vars.insert("name".into(), device.unwrap_or_default());
+        report(
             app,
-            format!("Microphone “{}” not found, using the system default", device.unwrap_or_default()),
+            "Microphone “{name}” not found, using the system default",
+            "warning",
+            Duration::from_millis(3500),
+            &vars,
         );
     }
 
@@ -511,6 +739,11 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
             if event == HotkeyEvent::HoldPressed
                 && app.state::<HotkeyEngine>().hold_is_modifier_only((purpose == Purpose::Command) as usize) =>
         {
+            // Before the mode flips to recording, so a missing permission doesn't flash the waveform.
+            if let Some(issue) = setup::blocker(app, purpose) {
+                report_notice(app, &Notice::from_issue(issue));
+                return;
+            }
             let token = state.start_token.fetch_add(1, Ordering::SeqCst) + 1;
             *state.pending_start.lock().unwrap() = Some(token);
             *state.recording_start.lock().unwrap() = Some(at);
@@ -524,7 +757,7 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
                 }
                 *state.pending_start.lock().unwrap() = None;
                 if let Err(e) = begin_capture(&app, &state, at, purpose) {
-                    report_error(&app, e);
+                    report_notice(&app, &e);
                     set_mode(&app, &state, &mut mode, Mode::Idle);
                 }
             });
@@ -532,7 +765,7 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
         Effect::Start => {
             if let Err(e) = begin_capture(app, &state, at, purpose) {
                 state.recording.store(false, Ordering::SeqCst);
-                report_error(app, e);
+                report_notice(app, &e);
                 return;
             }
         }
@@ -601,11 +834,11 @@ fn is_blank(text: &str) -> bool {
 }
 
 /// Snippet (whole dictation = trigger) or the formatting rule's cleanup + dictionary corrections.
-async fn finish_text(db: &Database, raw: &str, config: &TranscriptionConfig, context: Option<&AppContext>) -> String {
+async fn finish_text(app: &AppHandle, db: &Database, raw: &str, config: &TranscriptionConfig, context: Option<&AppContext>) -> String {
     if let Some(snippet_content) = db.match_snippet(raw) {
         return expand_dynamic_tags(&snippet_content);
     }
-    let mut text = apply_formatting(raw, config, &config.formatting_for(context)).await;
+    let mut text = apply_formatting(app, raw, config, &config.formatting_for(context)).await;
     for entry in db.get_dictionary().unwrap_or_default() {
         if !entry.phrase.trim().is_empty() && !entry.replacement.trim().is_empty() {
             text = text.replace(&entry.phrase, &expand_dynamic_tags(&entry.replacement));
@@ -627,7 +860,7 @@ async fn process_recording(app: AppHandle, recording: Recording, duration_ms: i6
     job_finished(&app);
 }
 
-/// Ok(None) = handed over to a command (voice activation), nothing pasted.
+/// Ok(None) = nothing pasted: no speech (reported) or handed over to a command (voice activation).
 async fn transcribe_and_paste(
     app: &AppHandle,
     recording: Recording,
@@ -637,7 +870,8 @@ async fn transcribe_and_paste(
     let state = app.state::<AppState>();
     let (wav, has_speech) = finish_recording(recording).await?;
     if !has_speech {
-        return Err("No speech detected".to_string());
+        report_warning(app, "No speech detected");
+        return Ok(None);
     }
     let id = uuid::Uuid::new_v4().to_string();
     let audio_filename = format!("{}.wav", id);
@@ -664,7 +898,7 @@ async fn transcribe_and_paste(
     // Saved as "running" first: quitting mid-transcription leaves a record with Retry, not a lost dictation.
     let saved_early = audio_saved && state.db.insert_history(&HistoryEntry { status: "running".into(), ..row.clone() }).is_ok();
 
-    let raw = match transcribe_raw(wav, &config, vocab_prompt(&state.db)).await {
+    let raw = match transcribe_raw(app, wav, &config, vocab_prompt(&state.db)).await {
         Ok(t) => t,
         Err(e) => {
             // Keep the audio: the record shows "Transcription failed" with Retry.
@@ -682,7 +916,8 @@ async fn transcribe_and_paste(
         if audio_saved {
             let _ = fs::remove_file(&audio_file_path);
         }
-        return Err("No speech detected".to_string());
+        report_warning(app, "No speech detected");
+        return Ok(None);
     }
 
     // Voice activation: "Glaido, …" turns the dictation into a command; nothing is pasted.
@@ -697,7 +932,7 @@ async fn transcribe_and_paste(
         return Ok(None);
     }
 
-    let final_text = finish_text(&state.db, &raw, &config, context.as_ref()).await;
+    let final_text = finish_text(app, &state.db, &raw, &config, context.as_ref()).await;
 
     // Auto-paste into the active app. Without Accessibility access macOS silently drops the
     // synthetic Cmd+V, so leave the text on the clipboard and tell the user.
@@ -740,7 +975,9 @@ async fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(
     if *mode != Mode::Idle {
         return Ok(());
     }
-    begin_capture(&app, &state, Instant::now(), Purpose::Dictation).inspect_err(|e| report_error(&app, e))?;
+    begin_capture(&app, &state, Instant::now(), Purpose::Dictation)
+        .inspect_err(|e| report_notice(&app, e))
+        .map_err(|e| e.filled())?;
     set_mode(&app, &state, &mut mode, Mode::HandsFree);
     Ok(())
 }
@@ -793,6 +1030,7 @@ async fn save_config(
         return Err(format!("Unknown dictation bar location “{}”", new_config.bar_location));
     }
     new_config.validate_formatting()?;
+    new_config.validate_models()?;
     // MCP prefs only change through the mcp_* commands; never let a stale UI copy overwrite them.
     let _serialized = state.config_write.lock().unwrap();
     let mut new_config = new_config;
@@ -841,14 +1079,11 @@ async fn save_config(
         restore_hotkeys();
         return Err(e);
     }
-    if let Err(e) = write_config(&state.db.app_dir.join(CONFIG_FILE), &new_config) {
-        restore_hotkeys();
-        let _ = set_launch_at_login(&app, old.launch_at_login);
-        return Err(format!("Couldn't save settings: {}", e));
-    }
+    // Keychain first: if it fails, AVAILABLE turns false and config.json below keeps the keys instead.
     for (account, new, old) in [
         ("api_key", &new_config.api_key, &old.api_key),
         ("search_api_key", &new_config.search_api_key, &old.search_api_key),
+        ("llm_api_key", &new_config.llm_api_key, &old.llm_api_key),
     ] {
         if new != old {
             if let Err(e) = secrets::set(account, new) {
@@ -856,12 +1091,18 @@ async fn save_config(
             }
         }
     }
+    if let Err(e) = write_config(&state.db.app_dir.join(CONFIG_FILE), &new_config) {
+        restore_hotkeys();
+        let _ = set_launch_at_login(&app, old.launch_at_login);
+        return Err(format!("Couldn't save settings: {}", e));
+    }
     apply_ui_settings(&app, &new_config, Some(&old));
 
     let mode = state.mode.lock().unwrap();
     *state.config.lock().unwrap() = new_config.clone();
     engine.set_submit_enabled(submit_enabled(*mode, &new_config));
     drop(mode);
+    load_local_models(&app, &new_config, Some(&old));
     update_hud(&app);
     // The dictation bar and command window follow language changes.
     let _ = app.emit("config-changed", &new_config);
@@ -956,7 +1197,7 @@ async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState) -> Resu
     let bytes = fs::read(state.db.app_dir.join("audio").join(filename)).map_err(|e| e.to_string())?;
     let config = state.config.lock().unwrap().clone();
 
-    let raw = transcribe_raw(bytes, &config, vocab_prompt(&state.db)).await.and_then(|raw| {
+    let raw = transcribe_raw(&app, bytes, &config, vocab_prompt(&state.db)).await.and_then(|raw| {
         if is_blank(&raw) {
             Err("No speech detected".to_string())
         } else {
@@ -979,7 +1220,7 @@ async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState) -> Resu
         bundle_id,
         url: None,
     });
-    entry.text = finish_text(&state.db, &raw, &config, context.as_ref()).await;
+    entry.text = finish_text(&app, &state.db, &raw, &config, context.as_ref()).await;
     entry.raw_text = raw;
     entry.status = "ok".into();
     entry.error = None;
@@ -1032,11 +1273,9 @@ async fn get_app_icon(bundle_id: String) -> Option<String> {
 
 /// Localized tray menu labels (the frontend owns the translations).
 #[tauri::command]
-fn set_tray_labels(toggle: String, dashboard: String, quit: String, items: State<'_, TrayItems>) -> Result<(), String> {
-    for (item, text) in items.0.iter().zip([toggle, dashboard, quit]) {
-        item.set_text(text).map_err(|e| e.to_string())?;
-    }
-    Ok(())
+fn set_tray_labels(app: AppHandle, microphone: String, system_default: String, show: String, quit: String) {
+    *app.state::<TrayLabels>().0.lock().unwrap() = [microphone, system_default, show, quit];
+    refresh_tray(&app);
 }
 
 #[tauri::command]
@@ -1090,6 +1329,7 @@ pub fn run() {
                 .build(),
         )
         .setup(|app| {
+            let _ = MAIN_THREAD.set(std::thread::current().id());
             let app_data_dir = app
                 .path()
                 .app_data_dir()
@@ -1131,41 +1371,49 @@ pub fn run() {
                 events,
                 jobs: AtomicUsize::new(0),
                 error_until: Mutex::new(None),
+                hud: Mutex::new(HudVisibility { shown: false, hidden: true, changes: 0 }),
                 config_write: Mutex::new(()),
                 pending_start: Mutex::new(None),
                 start_token: std::sync::atomic::AtomicU64::new(0),
             });
 
-            // Create System Tray Menu
-            let toggle_i = MenuItem::with_id(app, "toggle", "Toggle Dictation", true, None::<&str>)?;
-            let dashboard_i = MenuItem::with_id(app, "dashboard", "Dashboard / Settings", true, None::<&str>)?;
-            let quit_i = MenuItem::with_id(app, "quit", "Quit OpenGlaido", true, None::<&str>)?;
-            let menu = Menu::with_items(app, &[&toggle_i, &dashboard_i, &quit_i])?;
-            app.manage(TrayItems([toggle_i.clone(), dashboard_i.clone(), quit_i.clone()]));
-
+            // Menu bar icon; its menu is built by refresh_tray (English until the frontend sends translations).
+            app.manage(TrayLabels(Mutex::new(["Microphone", "System Default", "Show OpenGlaido", "Quit"].map(String::from))));
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
                 .icon(app.default_window_icon().unwrap().clone())
                 .tooltip("OpenGlaido")
-                .menu(&menu)
-                .on_menu_event(|app, event| {
-                    match event.id().as_ref() {
-                        "toggle" => {
-                            let event = (HotkeyEvent::TogglePressed, Instant::now());
-                            let _ = app.state::<AppState>().events.send(event);
+                .on_tray_icon_event(|tray, event| {
+                    if let tauri::tray::TrayIconEvent::Enter { .. } = event {
+                        refresh_tray(tray.app_handle());
+                    }
+                })
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "show" => {
+                        if let Some(main) = app.get_webview_window("main") {
+                            let _ = main.show();
+                            let _ = main.set_focus();
                         }
-                        "dashboard" => {
-                            if let Some(main) = app.get_webview_window("main") {
-                                let _ = main.show();
-                                let _ = main.set_focus();
+                    }
+                    "quit" => app.exit(0),
+                    id => {
+                        let device = match id.strip_prefix("mic:") {
+                            Some(name) => Some(name.to_string()),
+                            None if id == "mic-default" => None,
+                            None => return,
+                        };
+                        // Off the main thread: update_config takes config_write, which save_config holds while
+                        // it waits on the main thread.
+                        let app = app.clone();
+                        std::thread::spawn(move || {
+                            if let Err(e) = update_config(&app, |c| c.input_device = device) {
+                                report_error(&app, e);
                             }
-                        }
-                        "quit" => {
-                            app.exit(0);
-                        }
-                        _ => {}
+                            refresh_tray(&app);
+                        });
                     }
                 })
                 .build(app)?;
+            refresh_tray(app.handle());
 
             // Apply the persisted settings. Failures are reported but never stop the app.
             if let Err(e) = engine.set_bindings(&config.hotkey_hold, &config.hotkey_toggle) {
@@ -1182,8 +1430,9 @@ pub fn run() {
                 report_error(app.handle(), e);
             }
             apply_ui_settings(app.handle(), &config, None);
+            load_local_models(app.handle(), &config, None);
 
-            // The dictation bar (idle pill unless disabled) never takes clicks.
+            // The dictation bar never takes clicks.
             if let Some(hud) = app.get_webview_window("hud") {
                 if let Err(e) = hud.set_ignore_cursor_events(true) {
                     eprintln!("Failed to set up the dictation bar: {}", e);
@@ -1229,6 +1478,9 @@ pub fn run() {
             stop_hotkey_capture,
             list_input_devices,
             open_accessibility_settings,
+            setup::get_setup_issues,
+            setup::open_microphone_settings,
+            setup::request_microphone_access,
             get_history,
             delete_history_entry,
             get_audio_base64,
@@ -1262,12 +1514,23 @@ pub fn run() {
             commands::mcp_new_server,
             commands::mcp_reveal_folder,
             // === commands wiring: end ===
+            models::list_local_models,
+            models::local_models_supported,
+            models::download_model,
+            models::cancel_model_download,
+            models::delete_model,
+            models::list_provider_models,
+            models::reveal_models_folder,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
             if let tauri::RunEvent::Exit = _event {
                 commands::shutdown(_app);
+                // ponytail: waits for a running local transcription (seconds); whisper's abort callback if that grows.
+                // A running local generation stops at its next token.
+                models::whisper::unload_now();
+                models::llama::unload_now();
                 if let Some(state) = _app.try_state::<AppState>() {
                     output::restore(&state.db.app_dir);
                 }
@@ -1289,6 +1552,16 @@ mod tests {
 
     const SHORT: Duration = Duration::from_millis(100);
     const LONG: Duration = Duration::from_millis(900);
+
+    #[test]
+    fn notice_keeps_placeholders_until_filled() {
+        let mut vars = BTreeMap::new();
+        vars.insert("name".into(), "MacBook Pro Microphone".into());
+        let text = fill("Microphone “{name}” not found, using the system default", &vars);
+        assert_eq!(text, "Microphone “MacBook Pro Microphone” not found, using the system default");
+        let notice = Notice::error("Couldn't start recording: busy");
+        assert_eq!(notice.filled(), "Couldn't start recording: busy");
+    }
 
     #[test]
     fn hold_to_talk() {
@@ -1349,6 +1622,39 @@ mod tests {
         assert_eq!(level_to_ui(0.001), 0.0); // -60 dBFS
         assert!((level_to_ui(0.1) - 0.6).abs() < 1e-5); // -20 dBFS
         assert!((level_to_ui(0.01) - 0.2).abs() < 1e-5); // -40 dBFS
+    }
+
+    #[test]
+    fn old_config_file_migrates() {
+        secrets::use_mock_store();
+        let dir = std::env::temp_dir().join(format!("og-config-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE);
+        // Written before the model settings by a version that kept the key on disk: a local transcription
+        // server (no key needed) and Groq cleanup with a Llama model Groq has since retired.
+        let old = r#"{
+          "endpoint_url": "http://localhost:8000/v1/audio/transcriptions", "api_key": "gsk_old",
+          "model_name": "Systran/faster-whisper-small", "temperature": 0.0,
+          "llm_endpoint_url": "https://api.groq.com/openai/v1/chat/completions", "llm_model_name": "llama-3.3-70b-versatile",
+          "style": "casual", "raw_text": false, "languages": ["de"], "search_api_key": ""
+        }"#;
+        fs::write(&path, old).unwrap();
+        let cfg = load_config(&path);
+        assert_eq!((cfg.stt_source.as_str(), cfg.stt_provider.as_str()), ("cloud", "custom"));
+        assert_eq!((cfg.llm_source.as_str(), cfg.llm_provider.as_str()), ("cloud", "groq"));
+        assert_eq!(cfg.llm_model_name.as_deref(), Some("openai/gpt-oss-20b"));
+        assert_eq!((cfg.model_name.as_str(), cfg.style.as_str()), ("Systran/faster-whisper-small", "casual"));
+        // The language model keeps using the shared key…
+        assert_eq!((cfg.api_key.as_str(), cfg.llm_api_key.as_str()), ("gsk_old", "gsk_old"));
+        let saved = fs::read_to_string(&path).unwrap();
+        assert!(saved.contains(r#""llm_source": "cloud""#) && !saved.contains("gsk_old"), "{saved}");
+        // …once: a config from this version with no language model key keeps it empty.
+        fs::write(&path, r#"{"api_key": "gsk_old", "llm_source": "cloud"}"#).unwrap();
+        assert!(load_config(&path).llm_api_key.is_empty());
+        // No config yet: the defaults.
+        fs::remove_file(&path).unwrap();
+        assert_eq!(load_config(&path), TranscriptionConfig::default());
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -2,10 +2,11 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Copy, Flame, Mic, Pause, Play, RotateCw, ShieldCheck, Sparkles, Timer, Trash2, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { HistoryItem } from "./types";
+import type { HistoryItem, SettingsTab } from "./types";
 import { Bolt, EmptyState, IconButton, Modal, OutlineButton, SearchField } from "./ui";
 import { locale, t } from "./i18n";
 import { Markdown } from "./command-window";
+import { SetupCard } from "./setup";
 
 // ------------------------------------------------------------------
 // App icons (get_app_icon), cached for the session
@@ -354,7 +355,7 @@ export function Home({
   onHistoryChanged: () => void;
   openRecordId: string | null;
   onOpenRecord: (id: string | null) => void;
-  onOpenSettings: () => void;
+  onOpenSettings: (tab: SettingsTab) => void;
 }) {
   const [historyQuery, setHistoryQuery] = useState("");
   const [retranscribingId, setRetranscribingId] = useState<string | null>(null);
@@ -452,6 +453,7 @@ export function Home({
 
   return (
     <>
+      <SetupCard onOpenSettings={onOpenSettings} />
       <div className="grid shrink-0 grid-cols-3 gap-4">
         {statCards.map((card) => {
           const Icon = card.icon;
@@ -496,7 +498,7 @@ export function Home({
               title={t("No dictations yet")}
               description={t("Your transcriptions will appear here once you start dictating.")}
               actionLabel={t("Open settings")}
-              onAction={onOpenSettings}
+              onAction={() => onOpenSettings("dictation")}
             />
           ) : (
             historyGroups.map((group) => (

@@ -1,13 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
-import { Captions, Settings, TriangleAlert, X } from "lucide-react";
+import { Captions, CircleAlert, Settings, TriangleAlert, X } from "lucide-react";
 import { CommandWindow } from "./command-window";
 import { CommandsPage } from "./commands-page";
 import { DictionaryPage } from "./dictionary";
 import { FormattingPage } from "./formatting";
 import { Home } from "./home";
-import { Hud } from "./hud";
+import { Hud, type BarMessage } from "./hud";
 import { CommandPalette } from "./palette";
 import { SettingsModal } from "./settings";
 import { SnippetsPage } from "./snippets";
@@ -18,6 +18,7 @@ import type {
   Page,
   PaletteAction,
   SaveConfig,
+  SettingsTab,
   SnippetItem,
   TranscriptionConfig,
 } from "./types";
@@ -50,7 +51,8 @@ export default function App() {
 
 function MainWindow() {
   const [page, setPage] = useState<Page>("home");
-  const [settingsOpen, setSettingsOpen] = useState(false);
+  // The Settings tab to open on; null = closed.
+  const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
   const [paletteOpen, setPaletteOpen] = useState(false);
   const [config, setConfig] = useState<TranscriptionConfig | null>(null);
 
@@ -63,7 +65,7 @@ function MainWindow() {
   const [addWordOpen, setAddWordOpen] = useState(false);
   const [addSnippetOpen, setAddSnippetOpen] = useState(false);
 
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<BarMessage | null>(null);
   const [addRuleOpen, setAddRuleOpen] = useState(false);
   // A ⌘K result older than the loaded history page.
   const [extraRecord, setExtraRecord] = useState<HistoryItem | null>(null);
@@ -86,9 +88,10 @@ function MainWindow() {
   useTheme(config?.theme);
   useEffect(() => {
     invoke("set_tray_labels", {
-      toggle: t("Toggle Dictation"),
-      dashboard: t("Dashboard / Settings"),
-      quit: t("Quit OpenGlaido"),
+      microphone: t("Microphone"),
+      systemDefault: t("System Default"),
+      show: t("Show OpenGlaido"),
+      quit: t("Quit"),
     }).catch(console.error);
   }, [localeCode]);
 
@@ -142,7 +145,7 @@ function MainWindow() {
   // ---- dictation errors -> toast (main window; the HUD shows its own error pill) ----
   useEffect(() => {
     let timer: number | undefined;
-    const unlisten = listen<string>("dictation-error", (e) => {
+    const unlisten = listen<BarMessage>("dictation-error", (e) => {
       setToast(e.payload);
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setToast(null), 5000);
@@ -158,7 +161,7 @@ function MainWindow() {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === ",") {
         e.preventDefault();
-        setSettingsOpen((v) => !v);
+        setSettingsTab((v) => (v ? null : "dictation"));
         return;
       }
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
@@ -219,7 +222,7 @@ function MainWindow() {
     setPaletteOpen(false);
     switch (action.type) {
       case "settings":
-        setSettingsOpen(true);
+        setSettingsTab("dictation");
         break;
       case "add_word":
         setPage("dictionary");
@@ -299,7 +302,7 @@ function MainWindow() {
           </nav>
           <button
             type="button"
-            onClick={() => setSettingsOpen(true)}
+            onClick={() => setSettingsTab("dictation")}
             className="flex h-10 w-full items-center gap-2.5 rounded-[4px] px-2.5 text-text-subdued transition-colors hover:bg-transparent-secondary hover:text-text-default"
           >
             <Settings className="size-5 shrink-0" />
@@ -316,7 +319,7 @@ function MainWindow() {
               openRecordId={openRecordId}
               extraRecord={extraRecord}
               onOpenRecord={setOpenRecordId}
-              onOpenSettings={() => setSettingsOpen(true)}
+              onOpenSettings={setSettingsTab}
             />
           )}
           {page === "formatting" && config && (
@@ -343,8 +346,8 @@ function MainWindow() {
       </div>
 
       {/* ---------------- Modals ---------------- */}
-      {settingsOpen && config && (
-        <SettingsModal config={config} onSave={saveConfig} onClose={() => setSettingsOpen(false)} />
+      {settingsTab && config && (
+        <SettingsModal config={config} onSave={saveConfig} onClose={() => setSettingsTab(null)} initialTab={settingsTab} />
       )}
 
       <CommandPalette
@@ -356,10 +359,20 @@ function MainWindow() {
       />
 
       {toast && (
-        <div className="fixed right-4 bottom-4 z-[80] flex w-[360px] max-w-[calc(100vw-32px)] items-start gap-3 rounded-[8px] border border-border-default bg-background-card p-4 shadow-2xl">
-          <TriangleAlert className="mt-0.5 size-4 shrink-0 text-text-error" />
+        <div
+          className={`fixed right-4 bottom-4 z-[80] flex w-[360px] max-w-[calc(100vw-32px)] items-start gap-3 rounded-[8px] border bg-background-card bg-linear-to-b p-4 shadow-2xl ${
+            toast.level === "warning"
+              ? "border-warning-border from-warning-surface to-warning-surface"
+              : "border-error-border from-error-surface to-error-surface"
+          }`}
+        >
+          {toast.level === "warning" ? (
+            <TriangleAlert className="mt-0.5 size-4 shrink-0 text-text-warning" />
+          ) : (
+            <CircleAlert className="mt-0.5 size-4 shrink-0 text-text-error" />
+          )}
           <p className="gs-text-body-md-regular min-w-0 flex-1 break-words text-text-default select-text">
-            {t(toast)}
+            {t(toast.message, toast.vars)}
           </p>
           <button
             type="button"
