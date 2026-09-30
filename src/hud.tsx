@@ -14,10 +14,9 @@ export type BarMessage = { message: string; level: "error" | "warning"; vars?: R
 // ------------------------------------------------------------------
 const BAR_COUNT = 10;
 const MESSAGE_MS = { warning: 3500, error: 4500 };
-// Pull toward the band level, keep a little of last frame's speed. Loud peaks arrive in a few
-// frames; the release tail is already in the levels coming from the microphone.
-const SPRING_PULL = 0.5;
-const SPRING_KEEP = 0.42;
+// Fraction of the remaining distance covered each frame. The microphone levels are already
+// eased; this only fills the steps between them, with no stored speed to ring past the level.
+const GLIDE = 0.22;
 type View = "recording" | "processing" | BarMessage["level"];
 
 // Tint + 1px ring over the pill (tokens in index.css).
@@ -36,7 +35,6 @@ export function Hud() {
   const recordingRef = useRef(false);
   const targets = useRef<number[]>(Array(BAR_COUNT).fill(0));
   const pos = useRef<number[]>(Array(BAR_COUNT).fill(0));
-  const vel = useRef<number[]>(Array(BAR_COUNT).fill(0));
   const barEls = useRef<Array<HTMLSpanElement | null>>(Array(BAR_COUNT).fill(null));
   // The last message stays rendered while the pill animates out; `messageOn` says it's current.
   const [message, setMessage] = useState<BarMessage | null>(null);
@@ -97,7 +95,7 @@ export function Hud() {
     };
   }, []);
 
-  // Springs the ten bars toward the latest band levels. Heights are written on the elements so a
+  // Eases the ten bars toward the latest band levels. Heights are written on the elements so a
   // 60 Hz update doesn't re-render the pill, and React doesn't reset them.
   useEffect(() => {
     let raf = 0;
@@ -109,18 +107,12 @@ export function Hud() {
         if (!recording) {
           targets.current[i] = 0;
           pos.current[i] = 0;
-          vel.current[i] = 0;
           el.style.height = "4px";
           continue;
         }
-        const v = vel.current[i] * SPRING_KEEP + (targets.current[i] - pos.current[i]) * SPRING_PULL;
-        let next = pos.current[i] + v;
-        let speed = v;
-        if (next < 0 || next > 1) {
-          next = Math.min(1, Math.max(0, next));
-          speed = 0;
-        }
-        vel.current[i] = speed;
+        let next = pos.current[i] + (targets.current[i] - pos.current[i]) * GLIDE;
+        if (next < 0) next = 0;
+        else if (next > 1) next = 1;
         pos.current[i] = next;
         el.style.height = `${4 + next * 14}px`;
       }

@@ -87,13 +87,15 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
 
 /// Bars in the dictation pill. Each one follows a different part of the voice.
 const BAR_COUNT: usize = 10;
-/// Samples per level update. 256 at 48 kHz is about 5 ms, fast enough that a plosive isn't late.
+/// Samples per level update. 256 at 48 kHz is about 5 ms.
 const HOP: usize = 256;
 /// Band centers from the fundamental up to sibilants. Spaced a little over an octave apart.
 const BAND_HZ: [f32; 5] = [170.0, 420.0, 1_050.0, 2_600.0, 6_200.0];
 const BAND_Q: f32 = 1.35;
-/// Lows bloom and consonants flick off, so the pill doesn't rise and fall as one block.
-const RELEASE_MS: [f32; 5] = [180.0, 145.0, 115.0, 85.0, 55.0];
+/// Long enough that one pitch pulse does not kick a bar, short enough that a syllable still arrives.
+const ATTACK_MS: f32 = 40.0;
+/// Close together on purpose: lows linger a little, and the row rises and falls as one shape.
+const RELEASE_MS: [f32; 5] = [250.0, 230.0, 210.0, 190.0, 175.0];
 
 pub struct AudioRecorder {
     tx: Sender<AudioCommand>,
@@ -171,12 +173,15 @@ impl Biquad {
     }
 }
 
-/// Streaming voice visualizer. Five overlapping bands follow the voice (fast attack, a short
-/// release), then spread across the ten bars: lows toward the middle, consonants toward the edges.
+/// Streaming voice visualizer. Five overlapping bands follow the voice. A normal syllable draws
+/// two humps — warmth taller on the left, brightness taller on the right — with a valley between
+/// them. Attack and release are eased, and a light blend keeps each hump round.
 struct Waveform {
     bands: [Biquad; 5],
     env: [f32; 5],
-    peak: [f32; 5],
+    /// Sum of absolute band output over the current hop.
+    energy: [f32; 5],
+    attack: f32,
     release: [f32; 5],
     done: usize,
     left: usize,
@@ -185,13 +190,13 @@ struct Waveform {
 impl Waveform {
     fn new(rate: u32) -> Self {
         let rate = rate.max(1);
+        let coeff = |ms: f32| (-(HOP as f32) / (rate as f32 * ms / 1000.0)).exp();
         Self {
             bands: std::array::from_fn(|i| Biquad::bandpass(rate, BAND_HZ[i], BAND_Q)),
             env: [0.0; 5],
-            peak: [0.0; 5],
-            release: std::array::from_fn(|i| {
-                (-(HOP as f32) / (rate as f32 * RELEASE_MS[i] / 1000.0)).exp()
-            }),
+            energy: [0.0; 5],
+            attack: coeff(ATTACK_MS),
+            release: std::array::from_fn(|i| coeff(RELEASE_MS[i])),
             done: 0,
             left: HOP,
         }
@@ -201,28 +206,22 @@ impl Waveform {
         while self.done < samples.len() {
             let x = samples[self.done];
             self.done += 1;
-            for (band, peak) in self.bands.iter_mut().zip(self.peak.iter_mut()) {
-                let y = band.tick(x).abs();
-                if y > *peak {
-                    *peak = y;
-                }
+            for (band, energy) in self.bands.iter_mut().zip(self.energy.iter_mut()) {
+                *energy += band.tick(x).abs();
             }
             self.left -= 1;
             if self.left == 0 {
                 self.left = HOP;
+                // π/2 times the mean absolute value equals the amplitude of a sine, and it
+                // ignores a one-sample spike that a peak meter would draw at full height.
+                let scale = std::f32::consts::FRAC_PI_2 / HOP as f32;
                 for i in 0..self.env.len() {
-                    // Release in bar-height space, so a syllable settles on screen in about one
-                    // release time instead of lingering while a quiet tail is still above the floor.
-                    let level = perceptual(self.peak[i]);
-                    let env = self.env[i];
-                    self.env[i] = if level >= env {
-                        level
-                    } else {
-                        level + (env - level) * self.release[i]
-                    };
-                    self.peak[i] = 0.0;
+                    let level = perceptual(self.energy[i] * scale);
+                    let coeff = if level >= self.env[i] { self.attack } else { self.release[i] };
+                    self.env[i] = level + (self.env[i] - level) * coeff;
+                    self.energy[i] = 0.0;
                 }
-                meter.store(layout(&self.env));
+                meter.store(soften(&layout(&self.env)));
             }
         }
     }
@@ -237,24 +236,37 @@ fn perceptual(amplitude: f32) -> f32 {
     ((20.0 * amplitude.log10() + 42.0) / 34.0).clamp(0.0, 1.0)
 }
 
+/// Both humps are driven by the whole voice, so speech does not collapse into one arch in the
+/// middle. Warmth leans the left hump up, brightness the right. `env` is already 0..1.
 fn layout(env: &[f32; 5]) -> [f32; BAR_COUNT] {
     let [low, body, mid, presence, air] = *env;
-    let mixed = [
-        air,
-        presence * 0.85 + air * 0.35,
-        mid,
-        body * 0.9 + mid * 0.25,
-        low * 0.8 + body * 0.45,
-        low * 0.55 + body * 0.7,
-        mid * 0.8 + body * 0.3,
-        presence * 0.9 + mid * 0.25,
-        air * 0.55 + presence * 0.6,
-        air * 0.95,
-    ];
-    // Slightly shorter edges, so broadband sound keeps the pill's rounded silhouette.
-    // `env` is already 0..1, so this only shapes it.
-    const WEIGHT: [f32; BAR_COUNT] = [0.82, 0.9, 0.97, 1.0, 1.0, 1.0, 1.0, 0.97, 0.9, 0.82];
-    std::array::from_fn(|i| (mixed[i] * WEIGHT[i]).clamp(0.0, 1.0))
+    let voice = (low * 0.50 + body * 0.85 + mid * 0.70 + presence * 0.40 + air * 0.22).clamp(0.0, 1.0);
+    let left = (voice * (0.90 + low * 0.16 + body * 0.08 - air * 0.10)).clamp(0.0, 1.0);
+    let right = (voice * (0.86 + presence * 0.14 + air * 0.20 - low * 0.06)).clamp(0.0, 1.0);
+    [
+        left * 0.40,
+        left * 0.72,
+        left,
+        left * 0.70,
+        left * 0.40 + right * 0.06,
+        right * 0.38 + left * 0.06,
+        right * 0.72,
+        right,
+        right * 0.70,
+        right * 0.38,
+    ]
+    .map(|bar| bar.clamp(0.0, 1.0))
+}
+
+/// One light blend toward each neighbor. Enough to round a hump, light enough that the valley
+/// between the two peaks stays.
+fn soften(bars: &[f32; BAR_COUNT]) -> [f32; BAR_COUNT] {
+    let prev = bars;
+    std::array::from_fn(|i| {
+        let left = if i == 0 { prev[1] } else { prev[i - 1] };
+        let right = if i + 1 == BAR_COUNT { prev[BAR_COUNT - 2] } else { prev[i + 1] };
+        left * 0.12 + prev[i] * 0.76 + right * 0.12
+    })
 }
 
 /// Names of the available input devices (cpal names, as stored in `input_device`).
@@ -532,29 +544,32 @@ mod tests {
         assert!(loud > quiet + 1.5, "loud {loud} quiet {quiet}");
     }
 
+    fn assert_two_peaks(bars: &[f32; BAR_COUNT], what: &str) {
+        let left = bars[2];
+        let right = bars[7];
+        let valley = (bars[4] + bars[5]) * 0.5;
+        let edge = (bars[0] + bars[9]) * 0.5;
+        // Relative, so a quiet sibilant has to show the same valley as a loud vowel.
+        assert!(left > valley * 1.25 + 0.015, "{what} left {left} valley {valley} {bars:?}");
+        assert!(right > valley * 1.25 + 0.015, "{what} right {right} valley {valley} {bars:?}");
+        assert!(left > edge && right > edge, "{what} edge {edge} {bars:?}");
+    }
+
     #[test]
-    fn lows_lift_the_middle_and_highs_lift_the_edges() {
+    fn warmth_and_brightness_lean_opposite_peaks() {
         let rate = 48_000;
-        let low = tone(BAND_HZ[0], 0.5, 10, rate);
-        let high = tone(BAND_HZ[4], 0.5, 10, rate);
-        let low_mid = (low[4] + low[5]) / 2.0;
-        let low_edge = (low[0] + low[9]) / 2.0;
-        assert!(
-            low_mid > low_edge + 0.15,
-            "low mid {low_mid} edge {low_edge} {low:?}"
-        );
-        let high_mid = (high[4] + high[5]) / 2.0;
-        let high_edge = (high[0] + high[9]) / 2.0;
-        assert!(
-            high_edge > high_mid + 0.15,
-            "high edge {high_edge} mid {high_mid} {high:?}"
-        );
+        let low = tone(BAND_HZ[0], 0.5, 20, rate);
+        let high = tone(BAND_HZ[4], 0.5, 20, rate);
+        assert_two_peaks(&low, "low");
+        assert_two_peaks(&high, "high");
+        assert!(low[2] > low[7], "warmth should lean left {low:?}");
+        assert!(high[7] > high[2], "brightness should lean right {high:?}");
     }
 
     /// A vowel is not a sine parked on a band center. Harmonics between the centers still have
-    /// to raise the middle of the pill.
+    /// to raise both humps.
     #[test]
-    fn a_vowel_lifts_the_middle() {
+    fn a_vowel_forms_two_peaks() {
         let rate = 48_000;
         let n = HOP * 16;
         let mut raw = vec![0.0f32; n];
@@ -577,15 +592,13 @@ mod tests {
         let meter = BarMeter::new();
         wave.push(&raw, &meter);
         let bars = meter.load();
-        let mid = (bars[4] + bars[5]) / 2.0;
-        let edge = (bars[0] + bars[9]) / 2.0;
-        assert!(mid > 0.35, "mid {mid} {bars:?}");
-        assert!(mid > edge + 0.12, "mid {mid} edge {edge} {bars:?}");
+        assert_two_peaks(&bars, "vowel");
+        assert!(bars[2] > 0.35, "left hump {bars:?}");
     }
 
-    /// Sibilants are noise, not a tone. Their energy belongs on the outer bars.
+    /// Sibilants are noise, not a tone. They still draw two humps, with the right one taller.
     #[test]
-    fn hiss_lifts_the_edges() {
+    fn hiss_leans_on_the_right_peak() {
         let mut state = 0x1234_5678u32;
         let mut prev = 0.0f32;
         let mut raw = Vec::with_capacity(HOP * 20);
@@ -603,23 +616,61 @@ mod tests {
         let meter = BarMeter::new();
         wave.push(&raw, &meter);
         let bars = meter.load();
-        let edge = (bars[0] + bars[9]) / 2.0;
-        let mid = (bars[4] + bars[5]) / 2.0;
-        assert!(edge > mid + 0.12, "edge {edge} mid {mid} {bars:?}");
+        assert_two_peaks(&bars, "hiss");
+        assert!(bars[7] > bars[2], "right hump should lead {bars:?}");
+    }
+
+    #[test]
+    fn the_row_moves_as_one_curve() {
+        let bars = tone(BAND_HZ[0], 0.5, 20, 48_000);
+        let step = bars.windows(2).fold(0.0f32, |m, w| m.max((w[0] - w[1]).abs()));
+        assert!(step < 0.28, "step {step} {bars:?}");
+    }
+
+    /// A steady hiss used to twitch, because each hop kept its loudest sample.
+    #[test]
+    fn steady_noise_holds_its_shape() {
+        let mut state = 0x89ab_cdefu32;
+        let mut prev = 0.0f32;
+        let mut raw = Vec::with_capacity(HOP * 48);
+        for _ in 0..HOP * 48 {
+            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let white = ((state >> 8) & 0x00ff_ffff) as f32 / 16_777_215.0 * 2.0 - 1.0;
+            let sample = (white - prev) * 0.08;
+            prev = white;
+            raw.push(sample);
+        }
+        let mut wave = Waveform::new(48_000);
+        let meter = BarMeter::new();
+        let mut worst = 0.0f32;
+        let mut last = [0.0f32; BAR_COUNT];
+        for hop in 0..48 {
+            let start = hop * HOP;
+            wave.push(&raw[start..start + HOP], &meter);
+            let bars = meter.load();
+            if hop >= 30 {
+                for i in 0..BAR_COUNT {
+                    worst = worst.max((bars[i] - last[i]).abs());
+                }
+            }
+            last = bars;
+        }
+        assert!(worst < 0.05, "step {worst} {last:?}");
     }
 
     #[test]
     fn a_syllable_releases_instead_of_sticking() {
         let rate = 48_000;
         let freq = BAND_HZ[2];
-        let mut samples = tone_samples(freq, 0.5, 3, rate);
+        // Long enough for the eased attack to arrive, then a pause long enough to settle.
+        let mut samples = tone_samples(freq, 0.5, 16, rate);
         let spoken = {
             let meter = BarMeter::new();
             let mut wave = Waveform::new(rate);
             wave.push(&samples, &meter);
             meter.load().into_iter().sum::<f32>()
         };
-        samples.extend(std::iter::repeat_n(0.0, HOP * 50));
+        samples.extend(std::iter::repeat_n(0.0, HOP * 80));
         let meter = BarMeter::new();
         let mut wave = Waveform::new(rate);
         wave.push(&samples, &meter);
