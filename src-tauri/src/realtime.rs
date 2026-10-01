@@ -45,7 +45,7 @@ impl LiveTranscription {
             .map_err(|_| "Transcription failed: check the API key in Settings › Model")?;
         value.set_sensitive(true);
         request.headers_mut().insert(header, value);
-        let session = (!elevenlabs).then(|| session_update(config, (!vocabulary.is_empty()).then(|| vocabulary.join(", "))));
+        let session = (!elevenlabs).then(|| session_update(config, &vocabulary));
         let api_key = config.api_key.trim().to_string();
         // ponytail: bounded callback queue; batch in the audio worker if very small buffers need more setup time.
         let (tx, rx) = mpsc::channel(2048);
@@ -155,9 +155,15 @@ fn elevenlabs_url(config: &TranscriptionConfig, vocabulary: &[String]) -> Result
     Ok(url.to_string())
 }
 
-fn session_update(config: &TranscriptionConfig, prompt: Option<String>) -> Value {
+fn session_update(config: &TranscriptionConfig, vocabulary: &[String]) -> Value {
     let mut transcription = json!({ "model": config.model_name, "delay": "low" });
-    if let Some(prompt) = prompt.filter(|s| !s.trim().is_empty()) { transcription["prompt"] = json!(prompt); }
+    // Literal vocabulary belongs in keywords. Invalid entries reject the whole session, so
+    // omit those hints without changing the dictionary or its local replacement rules.
+    let mut seen = std::collections::BTreeSet::new();
+    let keywords: Vec<_> = vocabulary.iter().map(|term| term.trim())
+        .filter(|term| !term.is_empty() && !term.contains(['<', '>', '\r', '\n']) && seen.insert(*term))
+        .collect();
+    if !keywords.is_empty() { transcription["keywords"] = json!(keywords); }
     let languages: Vec<_> = config.languages.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
     if !languages.is_empty() { transcription["languages"] = json!(languages); }
     json!({ "type": "session.update", "session": { "type": "transcription", "audio": { "input": {
@@ -492,7 +498,7 @@ mod tests {
             let input = &session["session"]["audio"]["input"];
             assert_eq!(session["session"]["type"], "transcription");
             assert_eq!(input["format"], json!({ "type": "audio/pcm", "rate": RATE }));
-            assert_eq!(input["transcription"], json!({ "model": "gpt-live-transcribe", "prompt": "OpenGlaido, Tauri", "languages": ["en", "sl"], "delay": "low" }));
+            assert_eq!(input["transcription"], json!({ "model": "gpt-live-transcribe", "keywords": ["OpenGlaido", "Tauri"], "languages": ["en", "sl"], "delay": "low" }));
             assert!(input["turn_detection"].is_null());
             write(&mut socket, json!({ "type": "session.updated" })).await;
             let first = read(&mut socket).await;
@@ -720,6 +726,26 @@ mod tests {
             }
             server.await.unwrap();
         }
+    }
+
+    #[test]
+    fn openai_dictionary_keywords_preserve_phrases_and_reject_invalid_hints() {
+        let vocabulary = [" OpenGlaido ", "Tauri", "OpenGlaido", "Acme, Inc.", "東京", "C++", "[trace]", "<bad>", "bad>", "two\nlines", "two\rlines", " "]
+            .into_iter().map(String::from).collect::<Vec<_>>();
+        let cfg = config(123);
+        let session = session_update(&cfg, &vocabulary);
+        let transcription = &session["session"]["audio"]["input"]["transcription"];
+        assert_eq!(transcription["keywords"], json!(["OpenGlaido", "Tauri", "Acme, Inc.", "東京", "C++", "[trace]"]));
+        assert!(transcription.get("prompt").is_none());
+        assert_eq!(transcription["model"], cfg.model_name);
+        assert_eq!(transcription["languages"], json!(["en", "sl"]));
+        for words in [vec![], vec![" ".into(), "<invalid>".into(), "two\nlines".into()]] {
+            let session = session_update(&cfg, &words);
+            let transcription = &session["session"]["audio"]["input"]["transcription"];
+            assert!(transcription.get("keywords").is_none());
+            assert!(transcription.get("prompt").is_none());
+        }
+        assert_eq!(vocabulary[0], " OpenGlaido "); // Hints never mutate the user's saved entries.
     }
 
     #[test]
