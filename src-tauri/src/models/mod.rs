@@ -361,6 +361,71 @@ pub async fn list_provider_models(base_url: String, api_key: String, kind: Strin
     Ok(model_ids(&body, &kind))
 }
 
+#[derive(Clone, Copy)]
+enum KeyCheck {
+    Models,
+    OpenRouter,
+    ElevenLabs,
+}
+
+/// Only these known endpoints require authentication. A public/custom model list cannot prove a key works.
+fn key_check_endpoint(base: &str) -> Option<(String, KeyCheck)> {
+    let base = base.trim().trim_end_matches('/');
+    let (path, check) = match base {
+        "https://api.openai.com/v1" | "https://api.groq.com/openai/v1" | "https://api.mistral.ai/v1"
+        | "https://generativelanguage.googleapis.com/v1beta/openai" => ("models", KeyCheck::Models),
+        "https://openrouter.ai/api/v1" => ("key", KeyCheck::OpenRouter),
+        "https://api.elevenlabs.io/v1" => ("user", KeyCheck::ElevenLabs),
+        _ => return None,
+    };
+    Some((format!("{base}/{path}"), check))
+}
+
+/// Checks authentication only, without generating text/audio or checking model access or credit balance.
+/// False means no key or no supported authenticated check; a failed check never blocks saving a key.
+#[tauri::command]
+pub async fn validate_provider_key(base_url: String, api_key: String) -> Result<bool, String> {
+    let Some((url, check)) = key_check_endpoint(&base_url) else { return Ok(false) };
+    check_provider_key(&url, &api_key, check).await
+}
+
+async fn check_provider_key(url: &str, api_key: &str, check: KeyCheck) -> Result<bool, String> {
+    let key = api_key.trim();
+    if key.is_empty() {
+        return Ok(false);
+    }
+    let client = Client::builder()
+        .timeout(Duration::from_secs(10))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "Couldn't check the API key".to_string())?;
+    let request = client.get(url);
+    let request = match check {
+        KeyCheck::ElevenLabs => request.header("xi-api-key", key),
+        _ => request.bearer_auth(key),
+    };
+    // Never include request errors, URLs, or response bodies: they may contain credentials.
+    let response = request.send().await.map_err(|_| "Couldn't reach the provider to check the API key".to_string())?;
+    let status = response.status().as_u16();
+    if !(200..300).contains(&status) {
+        return Err(format!("Couldn't verify the API key (HTTP {status})"));
+    }
+    let unexpected = "The provider sent an unexpected API key check response";
+    let body: Value = response.json().await.map_err(|_| unexpected.to_string())?;
+    let verified = body.get("error").is_none()
+        && match check {
+            KeyCheck::Models => body.get("data").and_then(Value::as_array).is_some_and(|models| {
+                models.iter().all(|model| model.get("id").and_then(Value::as_str).is_some_and(|id| !id.is_empty()))
+            }),
+            KeyCheck::OpenRouter => body.pointer("/data/label").is_some_and(Value::is_string),
+            KeyCheck::ElevenLabs => body.get("user_id").and_then(Value::as_str).is_some_and(|id| !id.is_empty()),
+        };
+    if !verified {
+        return Err(unexpected.into());
+    }
+    Ok(true)
+}
+
 /// Ids from `{data: [{id}]}` or a bare `[{id}]`, without Gemini's `models/` prefix, filtered by `kind`,
 /// sorted and deduped.
 fn model_ids(body: &Value, kind: &str) -> Vec<String> {
@@ -400,6 +465,106 @@ mod tests {
     use serde_json::json;
     use tokio::io::AsyncReadExt;
     use tokio::net::TcpListener;
+
+    #[test]
+    fn key_checks_use_only_known_authenticated_endpoints() {
+        for (base, suffix) in [
+            ("https://api.openai.com/v1", "models"),
+            ("https://api.groq.com/openai/v1", "models"),
+            ("https://api.mistral.ai/v1", "models"),
+            ("https://generativelanguage.googleapis.com/v1beta/openai", "models"),
+            ("https://openrouter.ai/api/v1", "key"),
+            ("https://api.elevenlabs.io/v1", "user"),
+        ] {
+            assert_eq!(key_check_endpoint(&format!(" {base}/ ")).unwrap().0, format!("{base}/{suffix}"));
+        }
+        for base in [
+            "http://api.openai.com/v1", "https://api.openai.com.evil.test/v1", "https://evil.test/api.openai.com/v1",
+            "https://api.openai.com:444/v1", "https://api.openai.com/v1?key=secret", "https://api.openai.com/v2",
+            "http://localhost:1234/v1", "not a URL",
+        ] {
+            assert!(key_check_endpoint(base).is_none());
+        }
+    }
+
+    async fn serve_key_check(status: u16, body: &str, location: Option<&str>) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}/check", listener.local_addr().unwrap());
+        let body = body.to_string();
+        let redirect = location.map(|url| format!("Location: {url}\r\n")).unwrap_or_default();
+        let served = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buf = [0u8; 1024];
+            while !request.windows(4).any(|w| w == b"\r\n\r\n") {
+                let n = socket.read(&mut buf).await.unwrap();
+                assert!(n > 0);
+                request.extend_from_slice(&buf[..n]);
+            }
+            let response = format!(
+                "HTTP/1.1 {status} Result\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{redirect}Connection: close\r\n\r\n{body}",
+                body.len()
+            );
+            socket.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (url, served)
+    }
+
+    #[tokio::test]
+    async fn provider_key_checks_require_authenticated_response_shapes() {
+        for (check, body, header) in [
+            (KeyCheck::Models, r#"{"data":[{"id":"test-model"}]}"#, "authorization: Bearer fixture-key"),
+            (KeyCheck::Models, r#"{"data":[]}"#, "authorization: Bearer fixture-key"),
+            (KeyCheck::OpenRouter, r#"{"data":{"label":"fixture"}}"#, "authorization: Bearer fixture-key"),
+            (KeyCheck::ElevenLabs, r#"{"user_id":"fixture-user"}"#, "xi-api-key: fixture-key"),
+        ] {
+            let (url, served) = serve_key_check(200, body, None).await;
+            assert_eq!(check_provider_key(&url, " fixture-key ", check).await, Ok(true));
+            let request = served.await.unwrap();
+            assert!(request.starts_with("GET /check HTTP/1.1\r\n"));
+            assert!(request.contains(header), "missing expected authentication header");
+            assert_eq!(request.matches("fixture-key").count(), 1);
+        }
+        assert_eq!(validate_provider_key("https://api.openai.com/v1".into(), "  ".into()).await, Ok(false));
+        assert_eq!(validate_provider_key("https://custom.test/v1".into(), "fixture-key".into()).await, Ok(false));
+    }
+
+    #[tokio::test]
+    async fn provider_key_checks_reject_errors_and_malformed_responses_without_echoing_secrets() {
+        for (status, body, check) in [
+            (401, "fixture-key", KeyCheck::Models),
+            (403, "fixture-key", KeyCheck::ElevenLabs),
+            (400, "fixture-key", KeyCheck::Models),
+            (500, "fixture-key", KeyCheck::OpenRouter),
+            (200, "fixture-key", KeyCheck::Models),
+            (200, "", KeyCheck::Models),
+            (200, r#"{"error":"fixture-key"}"#, KeyCheck::Models),
+            (200, r#"{"data":[{}]}"#, KeyCheck::Models),
+            (200, r#"{"data":[]}"#, KeyCheck::OpenRouter),
+            (200, r#"{"user_id":""}"#, KeyCheck::ElevenLabs),
+        ] {
+            let (url, served) = serve_key_check(status, body, None).await;
+            let error = check_provider_key(&format!("{url}?secret=fixture-key"), "fixture-key", check).await.unwrap_err();
+            assert!(!error.contains("fixture-key") && !error.contains(&url));
+            served.await.unwrap();
+        }
+        let error = check_provider_key("http://127.0.0.1:1/check?secret=fixture-key", "fixture-key", KeyCheck::Models)
+            .await.unwrap_err();
+        assert!(!error.contains("fixture-key") && !error.contains("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn provider_key_checks_never_forward_credentials_on_redirects() {
+        for check in [KeyCheck::Models, KeyCheck::ElevenLabs] {
+            let (target, target_served) = serve_key_check(200, r#"{"data":[],"user_id":"fixture-user"}"#, None).await;
+            let (source, source_served) = serve_key_check(302, "", Some(&target)).await;
+            assert!(check_provider_key(&source, "fixture-key", check).await.unwrap_err().contains("302"));
+            assert!(source_served.await.unwrap().contains("fixture-key"));
+            assert!(!target_served.is_finished());
+            target_served.abort();
+        }
+    }
 
     #[test]
     fn model_ids_parse_and_filter() {

@@ -1,6 +1,14 @@
 // Cloud presets for Settings › Model. The config keeps full endpoint URLs:
 // `/audio/transcriptions` for speech to text (`/speech-to-text` for ElevenLabs), `/chat/completions` for chat.
 // Any other provider id means "custom" (the user's own URL).
+import type { LocalModel, TranscriptionConfig } from "./types";
+
+// The original top-level config fields are the cloud transcription ones.
+export const MODEL_FIELDS = {
+  stt: { provider: "stt_provider", url: "endpoint_url", model: "model_name", key: "api_key", local: "local_stt_model" },
+  llm: { provider: "llm_provider", url: "llm_endpoint_url", model: "llm_model_name", key: "llm_api_key", local: "local_llm_model" },
+} as const;
+
 export interface Provider {
   id: string;
   name: string;
@@ -133,4 +141,57 @@ export function endpointUrl(baseUrl: string, kind: "stt" | "llm"): string {
   const base = baseFromUrl(baseUrl);
   const path = kind === "llm" ? "chat/completions" : base === "https://api.elevenlabs.io/v1" ? "speech-to-text" : "audio/transcriptions";
   return `${base}/${path}`;
+}
+
+/** Clear the visible old key immediately; save_config restores this provider's remembered key. */
+export function providerSelection(config: TranscriptionConfig, kind: LocalModel["kind"], id: string): Partial<TranscriptionConfig> | null {
+  const f = MODEL_FIELDS[kind];
+  const current = PROVIDERS.find((p) => p.id === config[f.provider] && endpointUrl(p.baseUrl, kind) === config[f.url]?.trim());
+  if (id === (current?.id ?? "custom")) return null;
+  const provider = PROVIDERS.find((p) => p.id === id);
+  return provider
+    ? {
+        [f.provider]: id,
+        [f.url]: endpointUrl(provider.baseUrl, kind),
+        [f.model]: kind === "stt" ? provider.defaultStt : provider.defaultChat,
+        [f.key]: "",
+      }
+    : { [f.provider]: "custom", [f.key]: "" };
+}
+
+/** Distinguish an explicit key edit (including deletion) from a temporary blank while switching. */
+export function editedModelKeys(patch: Partial<TranscriptionConfig>): string[] {
+  return Object.keys(patch).filter((key) => {
+    const kind = key === "api_key" ? "stt" : key === "llm_api_key" ? "llm" : null;
+    if (!kind) return false;
+    const f = MODEL_FIELDS[kind];
+    return typeof patch[f.key] === "string" && !(f.provider in patch) && !(f.url in patch) && !(`${kind}_source` in patch);
+  });
+}
+
+/** Also used to discard an uncommitted password draft when its destination changes. */
+export function modelKeyScope(config: TranscriptionConfig, kind: LocalModel["kind"]): string {
+  const f = MODEL_FIELDS[kind];
+  return JSON.stringify([kind, config[f.provider], config[f.url] ?? ""]);
+}
+
+export type ApiKeyCheck = { scope: string; key: string; status: "checking" | "verified" | "warning" };
+
+/** Every verification state belongs only to the exact provider, endpoint and key checked. */
+export function apiKeyCheckStatus(check: ApiKeyCheck | null, scope: string, key: string): ApiKeyCheck["status"] | null {
+  return key.trim() && check?.scope === scope && check.key === key ? check.status : null;
+}
+
+export function scopedConfigPatch(config: TranscriptionConfig, patch: Partial<TranscriptionConfig>) {
+  const keyScopes = editedModelKeys(patch).map((key) => {
+    const kind = key === "api_key" ? "stt" : "llm";
+    return [kind, modelKeyScope(config, kind)] as const;
+  });
+  return { patch, keyScopes };
+}
+
+/** A failed provider switch must not rebase its queued key edit onto the previous provider. */
+export function applyConfigPatch(config: TranscriptionConfig, pending: ReturnType<typeof scopedConfigPatch>): TranscriptionConfig | null {
+  if (pending.keyScopes.some(([kind, scope]) => modelKeyScope(config, kind) !== scope)) return null;
+  return { ...config, ...pending.patch };
 }

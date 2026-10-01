@@ -35,15 +35,27 @@ const actionLabel = (action: NonNullable<SetupIssue["action"]>) =>
     open_hotkeys: t("Open settings"),
   })[action];
 
-// Survives page switches, so coming back to Home doesn't replay the card opening.
-let cached: SetupIssue[] = [];
+type SetupProgress = { issues: SetupIssue[]; hasBeenReady: boolean; completed: boolean };
+
+/** Celebrate initial setup once; resolving later settings changes only closes the card. */
+export function updateSetupProgress(previous: SetupProgress, issues: SetupIssue[]): SetupProgress {
+  const ready = issues.length === 0;
+  return {
+    issues,
+    hasBeenReady: previous.hasBeenReady || ready,
+    completed: ready && (previous.completed || (!previous.hasBeenReady && previous.issues.length > 0)),
+  };
+}
+
+// Survives page switches, so coming back to Home doesn't replay setup completion.
+let cached: SetupProgress = { issues: [], hasBeenReady: false, completed: false };
 
 // Height + opacity in/out (grid rows 0fr ↔ 1fr); only a fade with reduced motion.
 const COLLAPSE = "grid transition-[grid-template-rows,opacity,margin] duration-300 ease-out motion-reduce:transition-opacity";
 
 /** "Finish setting up" card on Home: permissions, microphone, models, hotkeys (get_setup_issues). */
 export function SetupCard({ onOpenSettings }: { onOpenSettings: (tab: SettingsTab) => void }) {
-  const [rows, setRows] = useState<SetupRow[]>(cached);
+  const [rows, setRows] = useState<SetupRow[]>(cached.issues);
   const [allSet, setAllSet] = useState(false);
   const refresh = useRef(() => {});
 
@@ -53,9 +65,10 @@ export function SetupCard({ onOpenSettings }: { onOpenSettings: (tab: SettingsTa
       invoke<SetupIssue[]>("get_setup_issues")
         .then((next) => {
           if (!alive) return;
-          const had = cached.length > 0;
-          cached = next;
-          setAllSet((v) => next.length === 0 && (v || had));
+          const progress = updateSetupProgress(cached, next);
+          const justCompleted = progress.completed && !cached.completed;
+          cached = progress;
+          setAllSet((v) => progress.completed && (v || justCompleted));
           setRows((prev) => mergeRows(prev, next, Date.now()));
         })
         .catch(console.error);
@@ -93,7 +106,7 @@ export function SetupCard({ onOpenSettings }: { onOpenSettings: (tab: SettingsTa
   const live = rows.filter((r) => !r.leaving);
   const open = live.length > 0 || allSet;
   // Stays on while the card collapses.
-  const done = live.length === 0;
+  const done = live.length === 0 && cached.completed;
   const firstError = live.find((r) => r.level === "error" && r.action)?.id;
 
   const run = (action: SetupIssue["action"]) => {

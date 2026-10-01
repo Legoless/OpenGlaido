@@ -35,6 +35,8 @@ export interface TranscriptionConfig {
   endpoint_url: string;
   /** Lives in the OS keychain; config.json never has it. */
   api_key: string;
+  /** Backend-owned migration marker for provider-scoped keychain entries. */
+  provider_keys_migrated?: boolean;
   model_name: string;
   temperature?: number | null;
   llm_endpoint_url?: string | null;

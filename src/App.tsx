@@ -7,8 +7,10 @@ import { CommandsPage } from "./commands-page";
 import { DictionaryPage } from "./dictionary";
 import { FormattingPage } from "./formatting";
 import { Home } from "./home";
+import { homeKeyChecks, homeKeyWarnings, type HomeKeyResult } from "./home-key-warnings";
 import { Hud, type BarMessage } from "./hud";
 import { CommandPalette } from "./palette";
+import { applyConfigPatch, editedModelKeys, scopedConfigPatch } from "./providers";
 import { SettingsModal } from "./settings";
 import { SnippetsPage } from "./snippets";
 import type {
@@ -41,6 +43,7 @@ export function useTheme(theme: TranscriptionConfig["theme"] | undefined) {
 
 // Active Glaido icons are filled lime with their inner strokes cut out in the background colour.
 const NAV_ICON_CUT = "[&>:not(:first-child)]:fill-[var(--color-icon-cut-nav)] [&>:not(:first-child)]:stroke-[var(--color-icon-cut-nav)]";
+type MainToast = BarMessage & { source: "dictation" | "model-key" };
 
 // Every window loads this bundle; the hash picks its UI and never changes.
 export default function App() {
@@ -65,17 +68,32 @@ function MainWindow() {
   const [addWordOpen, setAddWordOpen] = useState(false);
   const [addSnippetOpen, setAddSnippetOpen] = useState(false);
 
-  const [toast, setToast] = useState<BarMessage | null>(null);
+  const [toast, setToast] = useState<MainToast | null>(null);
+  const toastRef = useRef<MainToast | null>(null);
+  const toastTimer = useRef<number | undefined>(undefined);
+  const dismissToast = () => {
+    window.clearTimeout(toastTimer.current);
+    toastRef.current = null;
+    setToast(null);
+  };
+  const showToast = (message: MainToast) => {
+    window.clearTimeout(toastTimer.current);
+    toastRef.current = message;
+    setToast(message);
+    toastTimer.current = window.setTimeout(dismissToast, 5000);
+  };
+  const refreshHomeKeys = useRef(() => {});
+  const warnedHomeKeys = useRef(new Set<string>());
   const [addRuleOpen, setAddRuleOpen] = useState(false);
   // A ⌘K result older than the loaded history page.
   const [extraRecord, setExtraRecord] = useState<HistoryItem | null>(null);
   // What the backend last applied, plus the saves still queued on top of it (shown right away).
   const confirmedRef = useRef<TranscriptionConfig | null>(null);
-  const pendingRef = useRef<Partial<TranscriptionConfig>[]>([]);
+  const pendingRef = useRef<ReturnType<typeof scopedConfigPatch>[]>([]);
   const saveQueue = useRef<Promise<unknown>>(Promise.resolve());
   const showConfig = () => {
     const c = confirmedRef.current;
-    if (c) setConfig(pendingRef.current.reduce<TranscriptionConfig>((a, p) => ({ ...a, ...p }), c));
+    if (c) setConfig(pendingRef.current.reduce<TranscriptionConfig>((a, p) => applyConfigPatch(a, p) ?? a, c));
   };
   const confirmConfig = (c: TranscriptionConfig) => {
     confirmedRef.current = c;
@@ -106,6 +124,7 @@ function MainWindow() {
   const loadHistory = async () => {
     try {
       setHistory(await invoke<HistoryItem[]>("get_history", { limit: 500 }));
+      refreshHomeKeys.current();
     } catch (e) {
       console.error(e);
     }
@@ -142,19 +161,63 @@ function MainWindow() {
     };
   }, []);
 
-  // ---- dictation errors -> toast (main window; the HUD shows its own error pill) ----
+  // ---- main-window toasts (key warnings never go through the dictation HUD) ----
   useEffect(() => {
-    let timer: number | undefined;
     const unlisten = listen<BarMessage>("dictation-error", (e) => {
-      setToast(e.payload);
-      window.clearTimeout(timer);
-      timer = window.setTimeout(() => setToast(null), 5000);
+      showToast({ ...e.payload, source: "dictation" });
     });
     return () => {
-      window.clearTimeout(timer);
+      window.clearTimeout(toastTimer.current);
       unlisten.then((f) => f());
     };
   }, []);
+
+  const checks = homeKeyChecks(confirmedRef.current);
+  const checkIdentity = JSON.stringify(checks.map((check) => check.id));
+  const homeVisible = page === "home" && !settingsTab && pendingRef.current.length === 0;
+  const homeCheckContext = useRef({ homeVisible, checkIdentity });
+  homeCheckContext.current = { homeVisible, checkIdentity };
+  useEffect(() => {
+    warnedHomeKeys.current = homeKeyWarnings(checks, [], warnedHomeKeys.current, false).warned;
+    if (!homeVisible || checks.length === 0) return;
+    let alive = true;
+    let inFlight = false;
+    const refresh = async () => {
+      if (inFlight || !document.hasFocus()) return;
+      inFlight = true;
+      const results = await Promise.all(checks.map(async (check): Promise<HomeKeyResult> => {
+        try {
+          const valid = await invoke<boolean>("validate_provider_key", { baseUrl: check.baseUrl, apiKey: check.apiKey });
+          return { id: check.id, result: valid ? "verified" : "unsupported" };
+        } catch {
+          return { id: check.id, result: "failed" };
+        }
+      }));
+      inFlight = false;
+      const current = homeCheckContext.current;
+      if (!alive || !document.hasFocus() || !current.homeVisible || current.checkIdentity !== checkIdentity) return;
+      const result = homeKeyWarnings(homeKeyChecks(confirmedRef.current), results, warnedHomeKeys.current, toastRef.current?.source !== "dictation");
+      warnedHomeKeys.current = result.warned;
+      if (result.providers.length > 0) {
+        showToast({
+          source: "model-key", level: "warning",
+          message: "{provider} API key could not be verified. Check it in Settings › Model.",
+          vars: { provider: result.providers.join(" / ") },
+        });
+      } else if (results.every(({ result }) => result !== "failed") && toastRef.current?.source === "model-key") {
+        dismissToast();
+      }
+    };
+    refreshHomeKeys.current = refresh;
+    void refresh();
+    window.addEventListener("focus", refresh);
+    return () => {
+      alive = false;
+      refreshHomeKeys.current = () => {};
+      window.removeEventListener("focus", refresh);
+      if (toastRef.current?.source === "model-key") dismissToast();
+    };
+  }, [checkIdentity, homeVisible]);
 
   // ---- keyboard shortcuts ----
   useEffect(() => {
@@ -193,19 +256,26 @@ function MainWindow() {
   // save is still running). Saves run one at a time, each on top of what the backend applied;
   // a failed one drops out of what is shown.
   const saveConfig: SaveConfig = (patch) => {
-    pendingRef.current.push(patch);
+    if (!config) return Promise.resolve("Settings are not loaded yet");
+    const pending = scopedConfigPatch(config, patch);
+    pendingRef.current.push(pending);
     showConfig();
     const run = async (): Promise<string | null> => {
       try {
         const base = confirmedRef.current;
         if (!base) return "Settings are not loaded yet";
-        confirmedRef.current = await invoke<TranscriptionConfig>("save_config", { newConfig: { ...base, ...patch } });
+        const newConfig = applyConfigPatch(base, pending);
+        if (!newConfig) return "The provider changed before the API key was saved. Please try again.";
+        confirmedRef.current = await invoke<TranscriptionConfig>("save_config", {
+          newConfig,
+          editedModelKeys: editedModelKeys(patch),
+        });
         return null;
       } catch (e) {
         console.error(e);
         return String(e);
       } finally {
-        pendingRef.current.splice(pendingRef.current.indexOf(patch), 1);
+        pendingRef.current.splice(pendingRef.current.indexOf(pending), 1);
         showConfig();
       }
     };
@@ -360,6 +430,7 @@ function MainWindow() {
 
       {toast && (
         <div
+          role="status"
           className={`fixed right-4 bottom-4 z-[80] flex w-[360px] max-w-[calc(100vw-32px)] items-start gap-3 rounded-[8px] border bg-background-card bg-linear-to-b p-4 shadow-2xl ${
             toast.level === "warning"
               ? "border-warning-border from-warning-surface to-warning-surface"
@@ -376,7 +447,7 @@ function MainWindow() {
           </p>
           <button
             type="button"
-            onClick={() => setToast(null)}
+            onClick={dismissToast}
             title={t("Dismiss")}
             className="shrink-0 text-text-disabled transition-colors hover:text-text-default"
           >

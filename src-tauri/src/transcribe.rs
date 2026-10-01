@@ -25,7 +25,8 @@ pub struct TranscriptionConfig {
     pub llm_source: String,         // "off" | "cloud" | "local"
     pub llm_provider: String,       // cloud preset id
     pub local_llm_model: String,    // models catalog id (kind "llm")
-    pub llm_api_key: String,        // keychain "llm_api_key", like api_key
+    pub llm_api_key: String,        // active provider key, hydrated from the OS keychain
+    pub provider_keys_migrated: bool, // legacy shared keychain accounts copied into provider scopes
     pub sound_feedback: bool,       // play audio chimes on start/stop
     pub hotkey_hold: String,        // push-to-talk binding, see hotkeys.rs ("" = disabled)
     pub hotkey_toggle: String,      // hands-free binding
@@ -129,6 +130,7 @@ impl Default for TranscriptionConfig {
             llm_provider: "groq".to_string(),
             local_llm_model: "gemma-4-e2b-it-q4km".to_string(),
             llm_api_key: String::new(),
+            provider_keys_migrated: false,
             sound_feedback: true,
             hotkey_hold: hotkeys::default_hold().to_string(),
             hotkey_toggle: hotkeys::default_toggle().to_string(),

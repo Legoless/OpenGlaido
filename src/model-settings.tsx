@@ -2,20 +2,14 @@ import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Box, Check, Cloud, Download, FolderOpen, Globe, KeyRound, RotateCw, Sparkles, Trash2, X } from "lucide-react";
+import { AudioLines, Box, Check, Cloud, Download, FolderOpen, Globe, KeyRound, LoaderCircle, RotateCw, Sparkles, Trash2, TriangleAlert, X } from "lucide-react";
 import { locale, t } from "./i18n";
-import { PROVIDERS, baseFromUrl, endpointUrl, providerModelIds } from "./providers";
+import { MODEL_FIELDS as FIELDS, PROVIDERS, apiKeyCheckStatus, baseFromUrl, endpointUrl, modelKeyScope, providerModelIds, providerSelection, type ApiKeyCheck } from "./providers";
 import type { DownloadProgress, LocalModel, SaveConfig, TranscriptionConfig } from "./types";
 import { Dropdown, IS_MAC, IconButton, NoteText, OutlineButton, SettingsRow, SettingsSection, TextInput } from "./ui";
 
 type Kind = LocalModel["kind"];
 type ErrorNote = (key: keyof TranscriptionConfig) => ReactNode;
-
-// Config fields behind each section (the original top-level fields are the cloud transcription ones).
-const FIELDS = {
-  stt: { provider: "stt_provider", url: "endpoint_url", model: "model_name", key: "api_key", local: "local_stt_model" },
-  llm: { provider: "llm_provider", url: "llm_endpoint_url", model: "llm_model_name", key: "llm_api_key", local: "local_llm_model" },
-} as const;
 
 /** "547 MB", "3.1 GB" (decimal units, like Finder). */
 function formatSize(bytes: number): string {
@@ -276,7 +270,7 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
           label={t("Language model")}
           value={config.llm_source}
           options={[{ value: "off", label: t("Off") }, ...onMac, { value: "cloud", label: t("Cloud") }]}
-          onChange={(v) => save({ llm_source: v, ...(v === "cloud" ? sharedKey(config) : {}) })}
+          onChange={(v) => save({ llm_source: v })}
         />
       </SettingsRow>
       {config.llm_source === "cloud" ? (
@@ -288,12 +282,6 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
   );
 }
 
-/** Transcription's key for a language model without one on the same preset provider: it is pasted once. */
-function sharedKey(config: TranscriptionConfig): Partial<TranscriptionConfig> {
-  const samePreset = config.llm_provider === config.stt_provider && PROVIDERS.some((p) => p.id === config.llm_provider);
-  return samePreset && !config.llm_api_key && config.api_key ? { llm_api_key: config.api_key } : {};
-}
-
 /** Provider preset (or Custom URL), API key and model for one cloud section. */
 function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: TranscriptionConfig; save: SaveConfig; errorNote: ErrorNote }) {
   const f = FIELDS[kind];
@@ -301,12 +289,30 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
   // A preset only when the saved URL is its endpoint; anything else shows as Custom so the URL can be fixed.
   const preset = PROVIDERS.find((p) => p.id === config[f.provider] && endpointUrl(p.baseUrl, kind) === url.trim());
   const apiKey = config[f.key];
+  const keyScope = modelKeyScope(config, kind);
   const model = config[f.model] ?? "";
   const base = preset?.baseUrl ?? baseFromUrl(url);
   // Scribe uses presets rather than OpenAI-compatible model discovery.
   const canList = !!base && base !== "https://api.elevenlabs.io/v1" && !(preset?.keyUrl && !apiKey);
   const [listed, setListed] = useState<{ ids: string[]; error: string | null } | null>(null);
   const [other, setOther] = useState(false);
+  const [keyCheck, setKeyCheck] = useState<ApiKeyCheck | null>(null);
+
+  useEffect(() => {
+    setKeyCheck(null);
+    if (!base || !apiKey.trim()) return;
+    setKeyCheck({ scope: keyScope, key: apiKey, status: "checking" });
+    let alive = true;
+    const timer = window.setTimeout(() => {
+      invoke<boolean>("validate_provider_key", { baseUrl: base, apiKey })
+        .then((valid) => alive && setKeyCheck(valid ? { scope: keyScope, key: apiKey, status: "verified" } : null))
+        .catch(() => alive && setKeyCheck({ scope: keyScope, key: apiKey, status: "warning" }));
+    }, 300);
+    return () => {
+      alive = false;
+      window.clearTimeout(timer);
+    };
+  }, [base, apiKey, keyScope]);
 
   useEffect(() => {
     setListed(null);
@@ -340,27 +346,12 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
     { value: null, label: t("Other…") },
   ];
 
-  // One key serves both sections when they use the same provider: it is pasted once.
-  const otherSection = FIELDS[kind === "stt" ? "llm" : "stt"];
   const pickProvider = (id: string) => {
-    const p = PROVIDERS.find((x) => x.id === id);
-    const shared = p && config[otherSection.provider] === id ? config[otherSection.key] : "";
-    save(
-      p
-        ? {
-            [f.provider]: id,
-            [f.url]: endpointUrl(p.baseUrl, kind),
-            [f.model]: kind === "stt" ? p.defaultStt : p.defaultChat,
-            // Never send one provider's key to another: the other section's key for the same provider, else none.
-            [f.key]: shared,
-          }
-        : { [f.provider]: "custom", [f.key]: "" },
-    );
+    const patch = providerSelection(config, kind, id);
+    if (patch) save(patch);
   };
   const saveKey = (v: string) => {
-    if (v === apiKey) return;
-    const share = preset && config[otherSection.provider] === preset.id && !config[otherSection.key];
-    save({ [f.key]: v, ...(share ? { [otherSection.key]: v } : {}) });
+    if (v !== apiKey) save({ [f.key]: v });
   };
 
   return (
@@ -385,7 +376,7 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
         <SettingsRow icon={Globe} title={t("Endpoint URL")} description={t("OpenAI-compatible endpoint")} note={errorNote(f.url)}>
           <CommitInput
             value={url}
-            onCommit={(v) => v !== url && save({ [f.url]: v })}
+            onCommit={(v) => v !== url && save({ [f.url]: v, [f.key]: "" })}
             placeholder={endpointUrl("https://example.com/v1", kind)}
           />
         </SettingsRow>
@@ -411,8 +402,10 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
           }
         >
           <CommitInput
+            key={keyScope}
             type="password"
             value={apiKey}
+            verification={apiKeyCheckStatus(keyCheck, keyScope, apiKey)}
             onCommit={saveKey}
             placeholder={t("Paste your API key")}
           />
@@ -470,25 +463,48 @@ function CommitInput({
   placeholder,
   type,
   autoFocus,
+  verification = null,
 }: {
   value: string;
   onCommit: (v: string) => void;
   placeholder?: string;
   type?: string;
   autoFocus?: boolean;
+  verification?: ApiKeyCheck["status"] | null;
 }) {
   const [draft, setDraft] = useState(value);
   useEffect(() => setDraft(value), [value]);
+  const status = draft.trim() === value ? verification : null;
+  const message = status === "checking" ? t("Verifying…") : status === "verified" ? t("API key verified") : t("Couldn't verify this API key.");
   return (
-    <TextInput
-      type={type}
-      value={draft}
-      onChange={setDraft}
-      onCommit={() => onCommit(draft.trim())}
-      placeholder={placeholder}
-      autoFocus={autoFocus}
-      className="w-[200px] max-w-full"
-    />
+    <div className="w-[200px] max-w-full">
+      <div className="relative">
+        <TextInput
+          type={type}
+          value={draft}
+          onChange={setDraft}
+          onCommit={() => onCommit(draft.trim())}
+          placeholder={placeholder}
+          autoFocus={autoFocus}
+          className={`w-full ${type === "password" ? "pr-8" : ""}`}
+        />
+        {status && (
+          <span role="status" title={message} className={`absolute top-1/2 right-2 -translate-y-1/2 ${status === "checking" ? "text-text-subdued" : status === "verified" ? "text-text-accent" : "text-text-warning"}`}>
+            {status === "checking" ? (
+              <LoaderCircle className="size-4 animate-spin motion-reduce:animate-none" aria-hidden="true" />
+            ) : status === "verified" ? (
+              <Check className="size-4" strokeWidth={2.5} aria-hidden="true" />
+            ) : (
+              <TriangleAlert className="size-4" aria-hidden="true" />
+            )}
+            <span className="sr-only">{message}</span>
+          </span>
+        )}
+      </div>
+      {status === "warning" && (
+        <p className="gs-text-body-xs-regular mt-1 text-text-warning">{message}</p>
+      )}
+    </div>
   );
 }
 

@@ -148,5 +148,6 @@
  "Transcription failed: live transcription timed out",
  "Transcription failed: live transcription connection was interrupted",
  "Transcription failed: the connection was too slow for live audio; retry from History",
- "Transcription failed: invalid audio recording"
+ "Transcription failed: invalid audio recording",
+ "{provider} API key could not be verified. Check it in Settings › Model."
 ]

@@ -378,64 +378,91 @@ fn load_config(path: &Path) -> TranscriptionConfig {
             migrated = true;
         }
     }
-    // Keys live in the keychain. A plaintext key from an older config.json moves there once.
+    // Search keeps its existing slot; model keys move to provider/endpoint-specific slots once.
     let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty() || !config.llm_api_key.is_empty();
-    for (account, value) in [
-        ("api_key", &mut config.api_key),
-        ("search_api_key", &mut config.search_api_key),
-        ("llm_api_key", &mut config.llm_api_key),
-    ] {
-        if value.is_empty() {
-            *value = secrets::get(account);
-        } else if let Err(e) = secrets::set(account, value) {
-            eprintln!("{e}");
-        }
+    if config.search_api_key.is_empty() {
+        config.search_api_key = secrets::get("search_api_key");
+    } else if let Err(e) = secrets::set("search_api_key", &config.search_api_key) {
+        eprintln!("{e}");
     }
-    // Such a config gives the language model its own copy of api_key, once: clearing it later sticks.
-    if shared_key && config.llm_api_key.is_empty() && config.llm_source == "cloud" && !config.api_key.is_empty() {
-        config.llm_api_key = config.api_key.clone();
-        if let Err(e) = secrets::set("llm_api_key", &config.llm_api_key) {
-            eprintln!("{e}");
-        }
-        migrated = true;
+    let keys_loaded = if config.provider_keys_migrated {
+        config.api_key.clear();
+        config.llm_api_key.clear();
+        Ok(())
+    } else {
+        hydrate_legacy_model_keys(&mut config).map(|()| {
+            if shared_key && config.llm_api_key.is_empty() && config.llm_source == "cloud" {
+                config.llm_api_key = config.api_key.clone();
+            }
+        })
+    };
+    let mut keys_migrated = false;
+    match keys_loaded.and_then(|()| secrets::load_model_keys(&mut config)) {
+        Ok(changed) => keys_migrated = changed,
+        Err(e) => eprintln!("Couldn't load provider keys: {e}"),
     }
-    // config_json keeps the keys on disk if the keychain failed, so this never loses one.
-    if plaintext || migrated {
-        if let Err(e) = write_config(path, &config) {
-            eprintln!("Couldn't rewrite {} without keys: {}", path.display(), e);
+    // Only remove legacy slots after both their scoped copies and migration metadata are saved.
+    if plaintext || migrated || keys_migrated {
+        match write_config(path, &config) {
+            Ok(()) if keys_migrated => remove_legacy_model_keys(),
+            Ok(()) => {},
+            Err(e) => eprintln!("Couldn't rewrite {} without keys: {}", path.display(), e),
         }
     }
     config
 }
 
-fn read_config(path: &Path) -> TranscriptionConfig {
-    match fs::read_to_string(path) {
-        Ok(json) => TranscriptionConfig::from_json(&json).unwrap_or_else(|e| {
-            eprintln!("Invalid {}, using defaults: {}", path.display(), e);
-            TranscriptionConfig::default()
-        }),
-        Err(e) => {
-            eprintln!("No config at {} ({}), using defaults", path.display(), e);
-            TranscriptionConfig::default()
+fn hydrate_legacy_model_keys(config: &mut TranscriptionConfig) -> Result<(), String> {
+    let load = |account, value: &String| {
+        if value.is_empty() { secrets::read(account).map(Option::unwrap_or_default) } else { Ok(value.clone()) }
+    };
+    let stt = load("api_key", &config.api_key)?;
+    let llm = load("llm_api_key", &config.llm_api_key)?;
+    config.api_key = stt;
+    config.llm_api_key = llm;
+    Ok(())
+}
+
+fn remove_legacy_model_keys() {
+    for account in ["api_key", "llm_api_key"] {
+        if let Err(e) = secrets::set(account, "") {
+            eprintln!("Couldn't remove migrated key slot: {e}");
         }
     }
 }
 
-/// The on-disk form: everything except the keys (those are in the keychain) — unless the
-/// keychain is unusable, in which case dropping them would lose them.
-fn config_json(config: &TranscriptionConfig) -> Result<String, String> {
-    let on_disk = if secrets::available() {
-        TranscriptionConfig { api_key: String::new(), search_api_key: String::new(), llm_api_key: String::new(), ..config.clone() }
-    } else {
-        config.clone()
-    };
+fn read_config(path: &Path) -> TranscriptionConfig {
+    // Without a valid config we cannot know which provider owns a legacy unscoped key.
+    let defaults = || TranscriptionConfig { provider_keys_migrated: true, ..Default::default() };
+    match fs::read_to_string(path) {
+        Ok(json) => TranscriptionConfig::from_json(&json).unwrap_or_else(|e| {
+            eprintln!("Invalid {}, using defaults: {}", path.display(), e);
+            defaults()
+        }),
+        Err(e) => {
+            eprintln!("No config at {} ({}), using defaults", path.display(), e);
+            defaults()
+        }
+    }
+}
+
+/// Migrated model keys never fall back to plaintext, even if an unrelated keychain call fails.
+fn config_json(config: &TranscriptionConfig, keychain_available: bool) -> Result<String, String> {
+    let mut on_disk = config.clone();
+    if config.provider_keys_migrated {
+        on_disk.api_key.clear();
+        on_disk.llm_api_key.clear();
+    }
+    if keychain_available {
+        on_disk.search_api_key.clear();
+    }
     serde_json::to_string_pretty(&on_disk).map_err(|e| e.to_string())
 }
 
 /// Temp file + rename, so a crash mid-write never leaves a truncated config.json.
 fn write_config(path: &Path, config: &TranscriptionConfig) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, config_json(config)?).map_err(|e| e.to_string())?;
+    fs::write(&tmp, config_json(config, secrets::available())?).map_err(|e| e.to_string())?;
     fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
@@ -916,6 +943,7 @@ async fn transcribe_and_paste(
 ) -> Result<Option<String>, Notice> {
     let state = app.state::<AppState>();
     let (wav, has_speech) = finish_recording(recording).await.map_err(Notice::error)?;
+    eprintln!("Dictation prepared: provider={} model={} duration_ms={} speech={} wav_bytes={}", session.config.stt_provider, session.config.model_name, duration_ms, has_speech, wav.len());
     if !has_speech {
         return Ok(None);
     }
@@ -959,6 +987,7 @@ async fn transcribe_and_paste(
             return Err(Notice::model_error(e));
         }
     };
+    eprintln!("Dictation transcribed: chars={}", raw.chars().count());
     if is_blank(&raw) {
         if saved_early {
             let _ = state.db.delete_history_entry(&id);
@@ -989,12 +1018,13 @@ async fn transcribe_and_paste(
     let keep_in_clipboard = config.copy_to_clipboard || !can_paste;
     let text = final_text.clone();
     let paste_app = app.clone();
+    eprintln!("Dictation paste: target={:?} accessibility={} chars={}", context.as_ref().map(|c| c.bundle_id.as_str()), can_paste, final_text.chars().count());
     match tauri::async_runtime::spawn_blocking(move || paste::paste_text(&paste_app, &text, keep_in_clipboard)).await {
         Ok(Ok(())) if !can_paste => report_error(
             app,
             "Copied to clipboard: allow OpenGlaido in Privacy & Security › Accessibility to paste automatically",
         ),
-        Ok(Ok(())) => {}
+        Ok(Ok(())) => eprintln!("Dictation paste shortcut posted"),
         Ok(Err(e)) => report_error(app, format!("Couldn't paste: {}", e)),
         Err(e) => report_error(app, format!("Couldn't paste: {}", e)),
     }
@@ -1073,6 +1103,7 @@ fn get_config(state: State<'_, AppState>) -> Result<TranscriptionConfig, String>
 async fn save_config(
     app: AppHandle,
     new_config: TranscriptionConfig,
+    edited_model_keys: Option<Vec<String>>,
     state: State<'_, AppState>,
 ) -> Result<TranscriptionConfig, String> {
     if !["bottom", "raised", "high"].contains(&new_config.bar_location.as_str()) {
@@ -1085,7 +1116,13 @@ async fn save_config(
     let mut new_config = new_config;
     new_config.mcp_servers = state.config.lock().unwrap().mcp_servers.clone();
 
-    let old = state.config.lock().unwrap().clone();
+    let mut old = state.config.lock().unwrap().clone();
+    if !old.provider_keys_migrated {
+        hydrate_legacy_model_keys(&mut old)?;
+    }
+    let edited = edited_model_keys.unwrap_or_default();
+    let edited: Vec<&str> = edited.iter().map(String::as_str).collect();
+    let model_keys = secrets::save_model_keys(&old, &mut new_config, &edited)?;
     let engine = app.state::<HotkeyEngine>();
     // Only hotkeys that changed are (re)applied: one that failed to register at startup must not
     // make every unrelated setting fail to save.
@@ -1128,22 +1165,19 @@ async fn save_config(
         restore_hotkeys();
         return Err(e);
     }
-    // Keychain first: if it fails, AVAILABLE turns false and config.json below keeps the keys instead.
-    for (account, new, old) in [
-        ("api_key", &new_config.api_key, &old.api_key),
-        ("search_api_key", &new_config.search_api_key, &old.search_api_key),
-        ("llm_api_key", &new_config.llm_api_key, &old.llm_api_key),
-    ] {
-        if new != old {
-            if let Err(e) = secrets::set(account, new) {
-                report_error(&app, e);
-            }
+    if new_config.search_api_key != old.search_api_key {
+        if let Err(e) = secrets::set("search_api_key", &new_config.search_api_key) {
+            report_error(&app, e);
         }
     }
     if let Err(e) = write_config(&state.db.app_dir.join(CONFIG_FILE), &new_config) {
         restore_hotkeys();
         let _ = set_launch_at_login(&app, old.launch_at_login);
         return Err(format!("Couldn't save settings: {}", e));
+    }
+    model_keys.commit();
+    if !old.provider_keys_migrated {
+        remove_legacy_model_keys();
     }
     apply_ui_settings(&app, &new_config, Some(&old));
 
@@ -1569,6 +1603,7 @@ pub fn run() {
             models::cancel_model_download,
             models::delete_model,
             models::list_provider_models,
+            models::validate_provider_key,
             models::reveal_models_folder,
         ])
         .build(tauri::generate_context!())
@@ -1748,6 +1783,7 @@ mod tests {
         }"#;
         fs::write(&path, old).unwrap();
         let cfg = load_config(&path);
+        assert!(cfg.provider_keys_migrated);
         assert_eq!((cfg.stt_source.as_str(), cfg.stt_provider.as_str()), ("cloud", "custom"));
         assert_eq!((cfg.llm_source.as_str(), cfg.llm_provider.as_str()), ("cloud", "groq"));
         assert_eq!(cfg.llm_model_name.as_deref(), Some("openai/gpt-oss-20b"));
@@ -1761,8 +1797,31 @@ mod tests {
         assert!(load_config(&path).llm_api_key.is_empty());
         // No config yet: the defaults.
         fs::remove_file(&path).unwrap();
-        assert_eq!(load_config(&path), TranscriptionConfig::default());
+        assert_eq!(load_config(&path), TranscriptionConfig { provider_keys_migrated: true, ..Default::default() });
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn migrated_model_keys_never_serialize_to_disk() {
+        let mut config = TranscriptionConfig {
+            provider_keys_migrated: true,
+            api_key: "stt-secret".into(),
+            llm_api_key: "llm-secret".into(),
+            search_api_key: "search-secret".into(),
+            ..Default::default()
+        };
+        for available in [true, false] {
+            let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config, available).unwrap()).unwrap();
+            assert!(saved.api_key.is_empty() && saved.llm_api_key.is_empty());
+            assert_eq!(saved.search_api_key.is_empty(), available);
+            assert!(saved.provider_keys_migrated);
+        }
+        // Failed first-time migration must preserve a legacy plaintext key for retry.
+        config.provider_keys_migrated = false;
+        let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config, false).unwrap()).unwrap();
+        assert_eq!(saved, config);
+        let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config, true).unwrap()).unwrap();
+        assert_eq!((saved.api_key, saved.llm_api_key), (config.api_key, config.llm_api_key));
     }
 
     #[test]

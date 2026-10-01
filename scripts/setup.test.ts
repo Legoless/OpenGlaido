@@ -1,10 +1,36 @@
 // bun test scripts/setup.test.ts
 import { expect, test } from "bun:test";
-import { mergeRows, type SetupRow } from "../src/setup";
+import { mergeRows, updateSetupProgress, type SetupRow } from "../src/setup";
 import type { SetupIssue } from "../src/types";
 
 const issue = (id: string): SetupIssue => ({ id, level: "error", title: id, detail: "", vars: {}, action: null });
 const ids = (rows: SetupRow[]) => rows.map((r) => `${r.id}${r.leaving === undefined ? "" : `@${r.leaving}`}`);
+
+test("switching providers after setup never replays the all-set message", () => {
+  let progress = updateSetupProgress({ issues: [], hasBeenReady: false, completed: false }, []);
+  expect(progress.completed).toBe(false);
+  for (const id of ["stt_key", "llm_key", "stt_model"]) {
+    progress = updateSetupProgress(progress, [issue(id)]);
+    expect(progress.completed).toBe(false);
+    progress = updateSetupProgress(progress, []);
+    expect(progress.completed).toBe(false);
+    expect(progress.issues).toEqual([]);
+  }
+});
+
+test("initial setup completion celebrates once and keeps its heading through collapse", () => {
+  let progress = updateSetupProgress({ issues: [], hasBeenReady: false, completed: false }, [issue("microphone")]);
+  expect(progress.completed).toBe(false);
+  progress = updateSetupProgress(progress, []);
+  expect(progress.completed).toBe(true);
+  // Polling or returning to Home retains the heading without another completion transition.
+  progress = updateSetupProgress(progress, []);
+  expect(progress.completed).toBe(true);
+  progress = updateSetupProgress(progress, [issue("stt_key")]);
+  expect(progress.completed).toBe(false);
+  progress = updateSetupProgress(progress, []);
+  expect(progress.completed).toBe(false);
+});
 
 test("fixed issues stay where they were while they collapse", () => {
   const prev = [issue("a"), issue("b"), issue("c")];
