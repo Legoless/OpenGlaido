@@ -11,6 +11,22 @@ pub struct AppContext {
     pub url: Option<String>,
 }
 
+/// A cheap foreground snapshot. Accessibility enrichment happens later, against this process only.
+pub struct ContextSnapshot {
+    pub context: AppContext,
+    #[cfg(target_os = "macos")]
+    pid: i32,
+}
+
+#[cfg(any(target_os = "macos", test))]
+const CONTEXT_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
+
+#[cfg(any(target_os = "macos", test))]
+fn lookup_timeout(deadline: std::time::Instant, now: std::time::Instant) -> Option<f32> {
+    let remaining = deadline.checked_duration_since(now)?;
+    (!remaining.is_zero()).then(|| remaining.as_secs_f32().min(0.05))
+}
+
 /// An installed app, as returned by `list_apps` / `recent_apps`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct AppInfo {
@@ -56,10 +72,10 @@ fn url_from_title(title: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{app_icon, current_context, is_installed, list_apps, selected_text};
+pub use mac::{app_icon, capture_context, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
 
 #[cfg(not(target_os = "macos"))]
-pub use other::{app_icon, current_context, is_installed, list_apps, selected_text};
+pub use other::{app_icon, capture_context, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -85,6 +101,7 @@ mod mac {
         fn AXUIElementCopyAttributeValue(element: AXUIElementRef, attribute: *const c_void, value: *mut *const c_void) -> i32;
         fn AXUIElementSetAttributeValue(element: AXUIElementRef, attribute: *const c_void, value: *const c_void) -> i32;
         fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f32) -> i32;
+        fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
     }
 
     /// An owned CF/AX object (toll-free bridged, so objc2 can release and downcast it).
@@ -95,10 +112,12 @@ mod mac {
         unsafe { Retained::from_raw(ptr as *mut AnyObject) }
     }
 
-    fn attr(el: &Ax, name: &str) -> Option<Ax> {
+    fn attr(el: &Ax, name: &str, deadline: Instant) -> Option<Ax> {
+        let timeout = lookup_timeout(deadline, Instant::now())?;
         let name = NSString::from_str(name);
         let mut value: *const c_void = std::ptr::null();
         let ok = unsafe {
+            AXUIElementSetMessagingTimeout(Retained::as_ptr(el).cast(), timeout);
             AXUIElementCopyAttributeValue(Retained::as_ptr(el).cast(), Retained::as_ptr(&name).cast(), &mut value)
         };
         if ok == 0 {
@@ -108,38 +127,35 @@ mod mac {
         }
     }
 
-    fn string_attr(el: &Ax, name: &str) -> Option<String> {
-        attr(el, name)?.downcast::<NSString>().ok().map(|s| s.to_string())
+    fn string_attr(el: &Ax, name: &str, deadline: Instant) -> Option<String> {
+        attr(el, name, deadline)?.downcast::<NSString>().ok().map(|s| s.to_string())
     }
 
     fn app_element(pid: i32) -> Option<Ax> {
-        // Never let a hung app stall dictation start: 0.25 s for every element (set globally,
-        // via the system-wide element, so walks over child elements are bounded too).
-        static TIMEOUT: OnceLock<()> = OnceLock::new();
-        TIMEOUT.get_or_init(|| {
-            if let Some(system) = own(unsafe { AXUIElementCreateSystemWide() }) {
-                unsafe { AXUIElementSetMessagingTimeout(Retained::as_ptr(&system).cast(), 0.25) };
-            }
-        });
         own(unsafe { AXUIElementCreateApplication(pid) })
     }
 
     /// Chromium/Electron only build their accessibility tree when asked; ask once per process.
     /// (AXManualAccessibility only: AXEnhancedUserInterface breaks window animations/managers.)
-    fn enable_web_accessibility(app: &Ax, pid: i32) {
+    fn enable_web_accessibility(app: &Ax, pid: i32, deadline: Instant) {
         static DONE: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
-        if !DONE.get_or_init(Default::default).lock().unwrap().insert(pid) {
+        if DONE.get_or_init(Default::default).lock().unwrap().contains(&pid) {
             return;
         }
+        let Some(timeout) = lookup_timeout(deadline, Instant::now()) else { return };
         let yes = NSNumber::new_bool(true);
         let name = NSString::from_str("AXManualAccessibility");
-        unsafe {
-            AXUIElementSetAttributeValue(Retained::as_ptr(app).cast(), Retained::as_ptr(&name).cast(), Retained::as_ptr(&yes).cast());
+        let result = unsafe {
+            AXUIElementSetMessagingTimeout(Retained::as_ptr(app).cast(), timeout);
+            AXUIElementSetAttributeValue(Retained::as_ptr(app).cast(), Retained::as_ptr(&name).cast(), Retained::as_ptr(&yes).cast())
+        };
+        if result == 0 {
+            DONE.get_or_init(Default::default).lock().unwrap().insert(pid);
         }
     }
 
-    fn url_of(el: &Ax) -> Option<String> {
-        let value = attr(el, "AXURL")?;
+    fn url_of(el: &Ax, deadline: Instant) -> Option<String> {
+        let value = attr(el, "AXURL", deadline)?;
         match value.downcast::<NSURL>() {
             Ok(url) => url.absoluteString().map(|s| s.to_string()),
             Err(value) => value.downcast::<NSString>().ok().map(|s| s.to_string()),
@@ -147,74 +163,92 @@ mod mac {
     }
 
     /// The URL of the web area around the focused element, else inside the focused window.
-    fn browser_url(app: &Ax) -> Option<String> {
-        let mut el = attr(app, "AXFocusedUIElement");
+    fn browser_url(app: &Ax, deadline: Instant) -> Option<String> {
+        let mut el = attr(app, "AXFocusedUIElement", deadline);
         for _ in 0..40 {
             let Some(cur) = el else { break };
-            if string_attr(&cur, "AXRole").as_deref() == Some("AXWebArea") {
-                if let Some(url) = url_of(&cur) {
+            if string_attr(&cur, "AXRole", deadline).as_deref() == Some("AXWebArea") {
+                if let Some(url) = url_of(&cur, deadline) {
                     return Some(url);
                 }
             }
-            el = attr(&cur, "AXParent");
+            el = attr(&cur, "AXParent", deadline);
         }
-        let window = attr(app, "AXFocusedWindow")?;
+        let window = attr(app, "AXFocusedWindow", deadline)?;
         // Breadth-first, bounded: the web area sits a few levels below the window.
         let mut queue = vec![window.clone()];
         let mut seen = 0;
         while let Some(cur) = (!queue.is_empty()).then(|| queue.remove(0)) {
             seen += 1;
-            if seen > 300 {
+            if seen > 300 || Instant::now() >= deadline {
                 break;
             }
-            if string_attr(&cur, "AXRole").as_deref() == Some("AXWebArea") {
-                if let Some(url) = url_of(&cur) {
+            if string_attr(&cur, "AXRole", deadline).as_deref() == Some("AXWebArea") {
+                if let Some(url) = url_of(&cur, deadline) {
                     return Some(url);
                 }
             }
-            if let Some(children) = attr(&cur, "AXChildren").and_then(|c| c.downcast::<objc2_foundation::NSArray>().ok()) {
+            if let Some(children) = attr(&cur, "AXChildren", deadline).and_then(|c| c.downcast::<objc2_foundation::NSArray>().ok()) {
                 queue.extend(children.iter());
             }
         }
-        string_attr(&window, "AXTitle").and_then(|t| url_from_title(&t))
+        string_attr(&window, "AXTitle", deadline).and_then(|t| url_from_title(&t))
     }
 
-    pub fn current_context() -> Option<AppContext> {
+    pub fn current_app_id() -> Option<String> {
+        autoreleasepool(|_| NSWorkspace::sharedWorkspace().frontmostApplication()?.bundleIdentifier().map(|id| id.to_string()))
+    }
+
+    pub fn capture_context() -> Option<ContextSnapshot> {
         autoreleasepool(|_| {
             let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
             let bundle_id = app.bundleIdentifier()?.to_string();
             let name = app.localizedName().map(|n| n.to_string()).unwrap_or_else(|| bundle_id.clone());
-            let url = if is_browser(&bundle_id) {
-                let pid = app.processIdentifier();
-                app_element(pid).and_then(|el| {
-                    enable_web_accessibility(&el, pid);
-                    browser_url(&el)
-                })
-            } else {
-                None
-            };
-            Some(AppContext { bundle_id, name, url })
+            Some(ContextSnapshot { context: AppContext { bundle_id, name, url: None }, pid: app.processIdentifier() })
         })
     }
 
-    /// Selected text in the focused element (Accessibility only, never the clipboard).
-    pub fn selected_text() -> Option<String> {
+    pub fn resolve_context(mut target: ContextSnapshot, selection: bool) -> (AppContext, Option<String>) {
+        let deadline = Instant::now() + CONTEXT_BUDGET;
         autoreleasepool(|_| {
-            let app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
-            let pid = app.processIdentifier();
+            let selected = selection.then(|| selected_text_for(target.pid, deadline)).flatten();
+            if is_browser(&target.context.bundle_id) {
+                target.context.url = app_element(target.pid).and_then(|el| {
+                    enable_web_accessibility(&el, target.pid, deadline);
+                    browser_url(&el, deadline)
+                });
+            }
+            (target.context, selected)
+        })
+    }
+
+    pub fn current_context() -> Option<AppContext> {
+        capture_context().map(|target| resolve_context(target, false).0)
+    }
+
+    fn selected_text_for(pid: i32, deadline: Instant) -> Option<String> {
             let el = app_element(pid)?;
             let read = || {
-                let focused = attr(&el, "AXFocusedUIElement").or_else(|| {
+                let focused = attr(&el, "AXFocusedUIElement", deadline).or_else(|| {
                     let system = own(unsafe { AXUIElementCreateSystemWide() })?;
-                    attr(&system, "AXFocusedUIElement")
+                    let focused = attr(&system, "AXFocusedUIElement", deadline)?;
+                    let mut actual_pid = 0;
+                    let result = unsafe { AXUIElementGetPid(Retained::as_ptr(&focused).cast(), &mut actual_pid) };
+                    (result == 0 && actual_pid == pid).then_some(focused)
                 })?;
-                string_attr(&focused, "AXSelectedText").filter(|t| !t.trim().is_empty())
+                string_attr(&focused, "AXSelectedText", deadline).filter(|t| !t.trim().is_empty())
             };
             // Chromium/Electron only expose text once asked to; native apps never need it.
             read().or_else(|| {
-                enable_web_accessibility(&el, pid);
+                enable_web_accessibility(&el, pid, deadline);
                 read()
             })
+    }
+
+    /// Selected text in the captured process, never another app reached during an AX lookup.
+    pub fn selected_text() -> Option<String> {
+        autoreleasepool(|_| {
+            selected_text_for(capture_context()?.pid, Instant::now() + CONTEXT_BUDGET)
         })
     }
 
@@ -298,6 +332,18 @@ mod mac {
 mod other {
     use super::*;
 
+    pub fn current_app_id() -> Option<String> {
+        current_context().map(|context| context.bundle_id)
+    }
+
+    pub fn capture_context() -> Option<ContextSnapshot> {
+        current_context().map(|context| ContextSnapshot { context })
+    }
+
+    pub fn resolve_context(target: ContextSnapshot, _selection: bool) -> (AppContext, Option<String>) {
+        (target.context, None)
+    }
+
     /// Foreground process on Windows: "slack.exe" as the id, "slack" as the name. No URL.
     // ponytail: Windows has no browser URL / selection / app list / icons yet (UI Automation needed).
     pub fn current_context() -> Option<AppContext> {
@@ -350,6 +396,16 @@ mod other {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accessibility_calls_share_one_overall_deadline() {
+        let started = std::time::Instant::now();
+        let deadline = started + CONTEXT_BUDGET;
+        assert_eq!(lookup_timeout(deadline, started), Some(0.05));
+        assert_eq!(lookup_timeout(deadline, deadline - std::time::Duration::from_millis(5)), Some(0.005));
+        assert_eq!(lookup_timeout(deadline, deadline), None);
+        assert_eq!(lookup_timeout(deadline, deadline + std::time::Duration::from_millis(1)), None);
+    }
 
     #[test]
     fn webmail_titles() {

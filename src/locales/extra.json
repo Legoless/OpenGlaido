@@ -149,5 +149,10 @@
  "Transcription failed: live transcription connection was interrupted",
  "Transcription failed: the connection was too slow for live audio; retry from History",
  "Transcription failed: invalid audio recording",
- "{provider} API key could not be verified. Check it in Settings › Model."
+ "{provider} API key could not be verified. Check it in Settings › Model.",
+ "Recording was interrupted. Check your microphone.",
+ "This recording is already being processed",
+ "Couldn't save settings until API keys are secured in the system keychain",
+ "Couldn't paste: The clipboard changed before pasting; the transcript was not pasted",
+ "Couldn't paste: The focused app changed; the text is on the clipboard"
 ]

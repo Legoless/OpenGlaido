@@ -240,7 +240,7 @@ export function CommandWindow() {
   );
 }
 
-function ApprovalCard({ approval }: { approval: NonNullable<CommandState["approval"]> }) {
+export function ApprovalCard({ approval }: { approval: NonNullable<CommandState["approval"]> }) {
   const [left, setLeft] = useState(approval.expires_in_s);
   useEffect(() => {
     setLeft(approval.expires_in_s);
@@ -265,7 +265,7 @@ function ApprovalCard({ approval }: { approval: NonNullable<CommandState["approv
         <button type="button" onClick={() => decide("deny")} className="gs-text-body-sm-regular rounded-[4px] border border-border-default px-2.5 py-1 text-text-subdued hover:text-text-default">
           {t("Deny")}
         </button>
-        <button type="button" onClick={() => decide("always")} className="gs-text-body-sm-regular rounded-[4px] border border-border-default px-2.5 py-1 text-text-subdued hover:text-text-default">
+        <button type="button" disabled={!approval.allow_always} onClick={() => decide("always")} className="gs-text-body-sm-regular rounded-[4px] border border-border-default px-2.5 py-1 text-text-subdued hover:text-text-default">
           {t("Always allow")}
         </button>
         <button type="button" onClick={() => decide("once")} className="gs-text-body-sm-medium rounded-[4px] bg-button-primary px-2.5 py-1 text-text-dark">

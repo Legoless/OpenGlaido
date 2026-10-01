@@ -27,6 +27,7 @@ pub struct TranscriptionConfig {
     pub local_llm_model: String,    // models catalog id (kind "llm")
     pub llm_api_key: String,        // active provider key, hydrated from the OS keychain
     pub provider_keys_migrated: bool, // legacy shared keychain accounts copied into provider scopes
+    pub search_keys_migrated: bool, // search credentials copied into provider-specific keychain slots
     pub sound_feedback: bool,       // play audio chimes on start/stop
     pub hotkey_hold: String,        // push-to-talk binding, see hotkeys.rs ("" = disabled)
     pub hotkey_toggle: String,      // hands-free binding
@@ -131,6 +132,7 @@ impl Default for TranscriptionConfig {
             local_llm_model: "gemma-4-e2b-it-q4km".to_string(),
             llm_api_key: String::new(),
             provider_keys_migrated: false,
+            search_keys_migrated: false,
             sound_feedback: true,
             hotkey_hold: hotkeys::default_hold().to_string(),
             hotkey_toggle: hotkeys::default_toggle().to_string(),
@@ -553,8 +555,7 @@ pub async fn apply_formatting(app: &AppHandle, raw_text: &str, config: &Transcri
         Ok(llm) => {
             // Room for a cleaned copy of the transcript: up to 3 tokens per character (Tamil, Amharic and Burmese
             // take 1–2.5 with some tokenizers; there are no spaces to count words by in Japanese or Chinese).
-            // ponytail: past ~4000 tokens (≈15 min of English) a local model's 8192-token context can't hold the
-            // transcript twice and the tail is cut; History keeps the raw text.
+            // Oversized input or exhausted output makes local cleanup fail, preserving the full raw transcript below.
             let chars = raw_text.chars().count() as u32;
             let llm = llm.tuned(0.1, chars.saturating_mul(3).clamp(256, 4096));
             let messages = [

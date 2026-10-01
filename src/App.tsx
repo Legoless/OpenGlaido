@@ -16,6 +16,7 @@ import { SnippetsPage } from "./snippets";
 import type {
   DictionaryItem,
   HistoryItem,
+  HistoryStats,
   IconType,
   Page,
   PaletteAction,
@@ -24,7 +25,7 @@ import type {
   SnippetItem,
   TranscriptionConfig,
 } from "./types";
-import { BookSpine, CommandsIcon, HouseDoor, SnippetIcon } from "./ui";
+import { BookSpine, CommandsIcon, DialogPortal, HouseDoor, SnippetIcon } from "./ui";
 import { resolveLocale, setLocale, t } from "./i18n";
 
 /** Applies Dark/Light/System to <html data-theme> (System follows the OS live). */
@@ -60,6 +61,12 @@ function MainWindow() {
   const [config, setConfig] = useState<TranscriptionConfig | null>(null);
 
   const [history, setHistory] = useState<HistoryItem[]>([]);
+  const [historyStats, setHistoryStats] = useState<HistoryStats>({ words: 0, duration_ms: 0, streak: 0 });
+  const historyRef = useRef(history);
+  const historyQuery = useRef("");
+  const historyGeneration = useRef(0);
+  const historyLoading = useRef(false);
+  const [historyHasMore, setHistoryHasMore] = useState(false);
   const [dictionary, setDictionary] = useState<DictionaryItem[]>([]);
   const [snippets, setSnippets] = useState<SnippetItem[]>([]);
 
@@ -121,13 +128,50 @@ function MainWindow() {
       console.error(e);
     }
   };
-  const loadHistory = async () => {
+  const loadHistory = async (refreshKeys = true) => {
+    const generation = ++historyGeneration.current;
+    historyLoading.current = true;
     try {
-      setHistory(await invoke<HistoryItem[]>("get_history", { limit: 500 }));
-      refreshHomeKeys.current();
+      const [rows, stats] = await Promise.all([
+        invoke<HistoryItem[]>("get_history_page", { query: historyQuery.current, limit: 100 }),
+        invoke<HistoryStats>("get_history_stats"),
+      ]);
+      if (generation !== historyGeneration.current) return;
+      historyRef.current = rows;
+      setHistory(rows);
+      setHistoryStats(stats);
+      setHistoryHasMore(rows.length === 100);
+      if (refreshKeys) refreshHomeKeys.current();
     } catch (e) {
       console.error(e);
+    } finally {
+      if (generation === historyGeneration.current) historyLoading.current = false;
     }
+  };
+  const loadMoreHistory = async () => {
+    if (historyLoading.current || !historyHasMore) return;
+    const last = historyRef.current[historyRef.current.length - 1];
+    if (!last) return;
+    const generation = historyGeneration.current;
+    historyLoading.current = true;
+    try {
+      const rows = await invoke<HistoryItem[]>("get_history_page", {
+        query: historyQuery.current, limit: 100, before: { created_at: last.created_at, id: last.id },
+      });
+      if (generation !== historyGeneration.current) return;
+      historyRef.current = [...historyRef.current, ...rows];
+      setHistory(historyRef.current);
+      setHistoryHasMore(rows.length === 100);
+    } catch (e) {
+      console.error(e);
+    } finally {
+      if (generation === historyGeneration.current) historyLoading.current = false;
+    }
+  };
+  const searchHistory = (query: string) => {
+    if (historyQuery.current === query) return;
+    historyQuery.current = query;
+    void loadHistory(false);
   };
   const loadDictionary = async () => {
     try {
@@ -243,8 +287,8 @@ function MainWindow() {
     const id = extraRecord?.id;
     if (!id) return;
     invoke<HistoryItem>("get_history_item", { id })
-      .then(setExtraRecord)
-      .catch(() => setExtraRecord(null));
+      .then((entry) => setExtraRecord((current) => current?.id === id ? entry : current))
+      .catch(() => setExtraRecord((current) => current?.id === id ? null : current));
   }, [history]);
 
   // Turning beta features off hides the Commands screen.
@@ -258,6 +302,7 @@ function MainWindow() {
   const saveConfig: SaveConfig = (patch) => {
     if (!config) return Promise.resolve("Settings are not loaded yet");
     const pending = scopedConfigPatch(config, patch);
+    const editedSearchProvider = typeof patch.search_api_key === "string" ? (patch.search_provider ?? config.search_provider) : null;
     pendingRef.current.push(pending);
     showConfig();
     const run = async (): Promise<string | null> => {
@@ -266,9 +311,11 @@ function MainWindow() {
         if (!base) return "Settings are not loaded yet";
         const newConfig = applyConfigPatch(base, pending);
         if (!newConfig) return "The provider changed before the API key was saved. Please try again.";
+        if (editedSearchProvider && editedSearchProvider !== newConfig.search_provider) return "The provider changed before the API key was saved. Please try again.";
         confirmedRef.current = await invoke<TranscriptionConfig>("save_config", {
           newConfig,
           editedModelKeys: editedModelKeys(patch),
+          editedSearchProvider,
         });
         return null;
       } catch (e) {
@@ -312,7 +359,9 @@ function MainWindow() {
         break;
       case "open_history":
         setPage("home");
-        if (!history.some((h) => h.id === action.id)) {
+        if (history.some((h) => h.id === action.id)) {
+          setExtraRecord(history.find((h) => h.id === action.id)!);
+        } else {
           invoke<HistoryItem>("get_history_item", { id: action.id }).then(setExtraRecord).catch(console.error);
         }
         setOpenRecordId(action.id);
@@ -385,10 +434,18 @@ function MainWindow() {
           {page === "home" && (
             <Home
               history={history}
+              onError={(message) => showToast({ source: "dictation", level: "error", message })}
+              historyStats={historyStats}
+              onSearchHistory={searchHistory}
+              onLoadMoreHistory={loadMoreHistory}
+              hasMoreHistory={historyHasMore}
               onHistoryChanged={loadHistory}
               openRecordId={openRecordId}
               extraRecord={extraRecord}
-              onOpenRecord={setOpenRecordId}
+              onOpenRecord={(id) => {
+                setOpenRecordId(id);
+                if (id) setExtraRecord(historyRef.current.find((item) => item.id === id) ?? null);
+              }}
               onOpenSettings={setSettingsTab}
             />
           )}
@@ -429,6 +486,7 @@ function MainWindow() {
       />
 
       {toast && (
+        <DialogPortal>
         <div
           role="status"
           className={`fixed right-4 bottom-4 z-[80] flex w-[360px] max-w-[calc(100vw-32px)] items-start gap-3 rounded-[8px] border bg-background-card bg-linear-to-b p-4 shadow-2xl ${
@@ -454,6 +512,7 @@ function MainWindow() {
             <X className="size-3.5" />
           </button>
         </div>
+        </DialogPortal>
       )}
     </div>
   );

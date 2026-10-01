@@ -7,7 +7,22 @@ fn main() {
     }
     // With bundle.macOS.frameworks set, this copies libs/*.dylib to target/Frameworks and adds the
     // @executable_path/../Frameworks rpath. That covers both `tauri dev` and the bundled .app.
-    tauri_build::build();
+    let windows_msvc = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows")
+        && env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc");
+    if windows_msvc {
+        // tauri-build's resource compiler only links the default manifest into bin targets.
+        // The lib test harness also imports Common Controls v6 (rfd/wry); without this it
+        // dies in the Windows loader with STATUS_ENTRYPOINT_NOT_FOUND before running tests.
+        let attributes = tauri_build::Attributes::new()
+            .windows_attributes(tauri_build::WindowsAttributes::new_without_app_manifest());
+        tauri_build::try_build(attributes).expect("Tauri build failed");
+        let manifest = Path::new(&env::var("CARGO_MANIFEST_DIR").unwrap()).join("windows-app-manifest.xml");
+        println!("cargo:rerun-if-changed={}", manifest.display());
+        println!("cargo:rustc-link-arg=/MANIFEST:EMBED");
+        println!("cargo:rustc-link-arg=/MANIFESTINPUT:{}", manifest.display());
+    } else {
+        tauri_build::build();
+    }
     if macos {
         // `cargo test` binaries run from target/<profile>/deps, where llama-cpp-sys-2 also links the dylibs.
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");

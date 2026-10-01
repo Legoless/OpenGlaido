@@ -11,6 +11,7 @@ jobs:
       matrix:
         os: [macos-latest, windows-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: oven-sh/setup-bun@v2
@@ -21,11 +22,98 @@ jobs:
         with:
           workspaces: src-tauri
       - run: bun install --frozen-lockfile
+      - run: bun test scripts
       - run: bun run build
       - run: bun run check:locales
       - name: Clippy
         working-directory: src-tauri
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Verify Windows test manifests
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/check-windows-tests.ps1
       - name: Tests
         working-directory: src-tauri
-        run: cargo test
+        run: cargo test --locked
+      - name: Build installers
+        run: bun run tauri build --ci -- --locked
+      - name: Launch the macOS app from its disk image
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          image=$(find src-tauri/target/release/bundle/dmg -name '*.dmg' -print -quit)
+          test -n "$image"
+          mount="$RUNNER_TEMP/openglaido-dmg"
+          installed="$RUNNER_TEMP/openglaido-installed"
+          mkdir -p "$mount" "$installed"
+          hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$image"
+          trap 'hdiutil detach "$mount" || true' EXIT
+          ditto "$mount/OpenGlaido.app" "$installed/OpenGlaido.app"
+          hdiutil detach "$mount"
+          trap - EXIT
+          "$installed/OpenGlaido.app/Contents/MacOS/openglaido" > "$RUNNER_TEMP/openglaido-package.log" 2>&1 &
+          app_pid=$!
+          trap 'kill "$app_pid" 2>/dev/null || true' EXIT
+          for second in {1..10}; do
+            if ! kill -0 "$app_pid" 2>/dev/null; then
+              cat "$RUNNER_TEMP/openglaido-package.log"
+              echo 'Packaged macOS app exited during startup'
+              exit 1
+            fi
+            sleep 1
+          done
+      - name: Launch the Windows app from its installer
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $msi = Get-ChildItem src-tauri/target/release/bundle/msi/*.msi | Select-Object -First 1
+          if (!$msi) { throw 'No MSI installer was built' }
+          $installed = Join-Path $env:RUNNER_TEMP 'openglaido-installed'
+          $log = Join-Path $env:RUNNER_TEMP 'openglaido-installer.log'
+          $extract = Start-Process msiexec.exe -ArgumentList "/a `"$($msi.FullName)`" /qn TARGETDIR=`"$installed`" /L*v `"$log`"" -PassThru -Wait
+          if ($extract.ExitCode -ne 0) { throw "Installer extraction failed: $($extract.ExitCode)" }
+          $exe = Get-ChildItem $installed -Recurse -Filter openglaido.exe | Select-Object -First 1
+          if (!$exe) { throw 'Installer did not contain the application executable' }
+          $app = Start-Process $exe.FullName -PassThru -RedirectStandardOutput "$env:RUNNER_TEMP/openglaido-package.log" -RedirectStandardError "$env:RUNNER_TEMP/openglaido-package-error.log"
+          try {
+            if ($app.WaitForExit(10000)) { throw "Packaged app exited during startup: $($app.ExitCode)" }
+            $app.Refresh()
+            if ($app.MainWindowHandle -eq 0) { throw 'Packaged app did not create its main window' }
+          } finally {
+            if (!$app.HasExited) { Stop-Process -Id $app.Id -Force }
+          }
+      - name: Windows loader diagnostics
+        if: failure() && runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $diagnostics = Join-Path $env:RUNNER_TEMP 'openglaido-loader'
+          New-Item -ItemType Directory -Force $diagnostics | Out-Null
+          $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+          $dumpbin = & $vswhere -latest -products '*' -find 'VC/Tools/MSVC/**/bin/Hostx64/x64/dumpbin.exe' | Select-Object -First 1
+          if (!$dumpbin) { throw 'MSVC dumpbin was not found' }
+          Get-ChildItem src-tauri/target/debug/deps/openglaido*.exe | ForEach-Object {
+            & $dumpbin /imports $_.FullName > (Join-Path $diagnostics ($_.Name + '.imports.txt'))
+          }
+          Get-ChildItem "$env:SystemRoot/System32/vcruntime*.dll", "$env:SystemRoot/System32/comctl32.dll" |
+            ForEach-Object { $_.VersionInfo | Format-List FileName, FileVersion, ProductVersion } |
+            Out-File (Join-Path $diagnostics 'runtime-versions.txt')
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: installers-${{ matrix.os }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/msi/*.msi
+            src-tauri/target/release/bundle/nsis/*.exe
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostics-${{ matrix.os }}
+          if-no-files-found: warn
+          path: |
+            ${{ runner.temp }}/openglaido-loader
+            ${{ runner.temp }}/openglaido-*.log

@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { t } from "./i18n";
 import type { HistoryItem, IconType, Page, PaletteAction, TranscriptionConfig } from "./types";
-import { BookSpine, CommandsIcon, HouseDoor, IS_MAC, Keycaps, SnippetIcon, isPlainEnter, useEscape } from "./ui";
+import { BookSpine, CommandsIcon, DIALOG_STYLE, DialogLayer, HouseDoor, IS_MAC, Keycaps, SnippetIcon, isPlainEnter, useEscape, useModalDialog } from "./ui";
 
 export interface CommandPaletteProps {
   open: boolean;
@@ -48,7 +48,9 @@ export function CommandPalette({ open, onClose, onNavigate, onAction, config }: 
   const [results, setResults] = useState<HistoryItem[]>([]);
   const [index, setIndex] = useState(0);
   const listRef = useRef<HTMLDivElement>(null);
+  const dialog = useRef<HTMLDialogElement>(null);
   useEscape(onClose, open);
+  useModalDialog(dialog, open);
 
   useEffect(() => {
     if (open) {
@@ -145,7 +147,8 @@ export function CommandPalette({ open, onClose, onNavigate, onAction, config }: 
 
   let lastGroup = "";
   return (
-    <div className="fixed inset-0 z-[90] flex items-start justify-center bg-black/30 pt-[14vh]" onMouseDown={onClose}>
+    <DialogLayer>
+    <dialog ref={dialog} role="dialog" tabIndex={-1} aria-modal="true" aria-label={t("Type a command or search...")} style={{ ...DIALOG_STYLE, paddingTop: "14vh" }} className="fixed inset-0 z-[90] flex items-start justify-center bg-black/30 pt-[14vh] backdrop:bg-transparent" onCancel={(e) => e.preventDefault()} onMouseDown={onClose}>
       <div
         className="flex max-h-[60vh] w-[560px] max-w-[90vw] flex-col overflow-hidden rounded-[12px] border border-border-default bg-modal-surface shadow-2xl backdrop-blur-xl"
         onMouseDown={(e) => e.stopPropagation()}
@@ -207,6 +210,7 @@ export function CommandPalette({ open, onClose, onNavigate, onAction, config }: 
           </span>
         </div>
       </div>
-    </div>
+    </dialog>
+    </DialogLayer>
   );
 }

@@ -221,12 +221,14 @@ mod imp {
         let mut decoder = encoding_rs::UTF_8.new_decoder();
         let mut out = String::new();
         let end = tokens.len() + (max_tokens as usize).min(N_CTX as usize - tokens.len());
+        let mut complete = false;
         for pos in tokens.len() as i32..end as i32 {
             if stopped() {
                 return Err("Cancelled".into());
             }
             let token = sampler.sample(&ctx, batch.n_tokens() - 1);
             if model.is_eog_token(token) {
+                complete = true;
                 break;
             }
             // `special: false` hides control tokens; think/transcript tags are plain text and get stripped below.
@@ -239,7 +241,14 @@ mod imp {
             batch.add(token, pos, &[0], true).map_err(fail)?;
             ctx.decode(&mut batch).map_err(fail)?;
         }
-        Ok(clean_output(&out))
+        finish_output(&out, complete)
+    }
+
+    fn finish_output(text: &str, complete: bool) -> Result<String, String> {
+        if !complete {
+            return Err("The local language model reached its output limit before finishing".into());
+        }
+        Ok(clean_output(text))
     }
 
     /// The prompt for `messages` in the catalog `template` format, ending where the reply starts. The tokenizer
@@ -266,7 +275,7 @@ mod imp {
     }
 
     /// Makes the prompt fit `budget` tokens (`count` tokenizes): drops the oldest non-system messages (never the
-    /// last one), then cuts the longest contents.
+    /// last one). The remaining prompt must fit intact: truncating a transcript silently loses words.
     fn fit_messages(
         template: &str,
         messages: &[(String, String)],
@@ -284,14 +293,7 @@ mod imp {
                 messages.remove(i);
                 continue;
             }
-            let (_, content) = messages
-                .iter_mut()
-                .max_by_key(|(_, content)| content.len())
-                .filter(|(_, content)| !content.is_empty())
-                .ok_or("The conversation is too long for the local language model")?;
-            // Proportional cut with a 10% margin; the loop re-checks.
-            let keep = content.floor_char_boundary(content.len() * budget / used * 9 / 10);
-            content.truncate(keep);
+            return Err("The conversation is too long for the local language model".into());
         }
     }
 
@@ -348,13 +350,22 @@ mod imp {
             let fitted = fit_messages("chatml", &chat, full - 41, chars).unwrap();
             assert_eq!(fitted, msgs(&[("system", "S"), ("user", "new")]));
 
-            // Then cuts the longest content (on a char boundary).
+            // Neither the latest transcript nor the system instructions may be silently shortened.
             let long = msgs(&[("system", "S"), ("user", &"ü".repeat(500))]);
-            let fitted = fit_messages("chatml", &long, 200, chars).unwrap();
-            assert!(chars(&build_prompt("chatml", &fitted)) <= 200);
-            assert!(fitted[1].1.chars().count() > 100 && fitted[1].1.chars().all(|c| c == 'ü'));
-
+            assert!(fit_messages("chatml", &long, 200, chars).is_err());
             assert!(fit_messages("chatml", &long, 10, chars).is_err());
+            assert!(fit_messages("chatml", &msgs(&[("system", &"S".repeat(500)), ("user", "new")]), 200, chars).is_err());
+            let minimum = msgs(&[("system", "S"), ("user", "new")]);
+            let exact = chars(&build_prompt("chatml", &minimum));
+            assert_eq!(fit_messages("chatml", &chat, exact, chars).unwrap(), minimum);
+            assert!(fit_messages("chatml", &chat, exact - 1, chars).is_err());
+        }
+
+        #[test]
+        fn output_limit_is_an_error_even_with_usable_partial_text() {
+            assert!(finish_output("An incomplete transcript", false).is_err());
+            assert!(finish_output("", false).is_err());
+            assert_eq!(finish_output("<transcript>Complete.</transcript>", true).unwrap(), "Complete.");
         }
 
         #[test]

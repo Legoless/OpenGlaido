@@ -84,6 +84,8 @@ export interface TranscriptionConfig {
   search_provider: "none" | "brave" | "tavily" | "searxng";
   /** Lives in the OS keychain, like api_key. */
   search_api_key: string;
+  /** Backend-owned search credential migration marker. */
+  search_keys_migrated?: boolean;
   searxng_url: string;
   mcp_servers: Record<string, McpServerPrefs>;
 }
@@ -158,9 +160,16 @@ export interface HistoryItem {
   error?: string | null;
   app_name?: string | null;
   app_bundle_id?: string | null;
+  website?: string | null;
   /** Command answer (markdown). */
   answer?: string | null;
   sources: Source[];
+}
+
+export interface HistoryStats {
+  words: number;
+  duration_ms: number;
+  streak: number;
 }
 
 export interface DictionaryItem {
@@ -254,6 +263,7 @@ export interface CommandApproval {
   tool: string;
   summary: string;
   expires_in_s: number;
+  allow_always: boolean;
 }
 
 export interface CommandState {

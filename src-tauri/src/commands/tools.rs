@@ -144,6 +144,22 @@ pub fn is_builtin(name: &str) -> bool {
     SPECS.iter().any(|s| s.id == name)
 }
 
+/// Consent is per call, including file discovery. Existing safe open actions reveal no data.
+/// Tool output, a model-supplied argument, or an MCP policy cannot grant this consent.
+pub fn requires_approval(name: &str, args: &Value) -> bool {
+    name == "history_search" || (name == "files_apps" && !matches!(args["action"].as_str().map(str::trim), Some("open" | "open_app")))
+}
+
+fn check_dispatch(config: &TranscriptionConfig, name: &str, args: &Value, approved: bool) -> Result<(), String> {
+    if !builtin_tools(config).iter().any(|t| t.id == name && t.enabled && t.available) {
+        return Err(format!("{name} is turned off"));
+    }
+    if requires_approval(name, args) && !approved {
+        return Err("The user declined this tool call.".into());
+    }
+    Ok(())
+}
+
 /// Short progress label for the command window.
 pub fn label(name: &str, args: &Value) -> String {
     let arg = |k: &str| args.get(k).and_then(Value::as_str).unwrap_or("").to_string();
@@ -285,11 +301,9 @@ impl ToolResult {
     }
 }
 
-pub async fn run(ctx: &ToolContext, name: &str, args: &Value) -> Result<ToolResult, String> {
+pub(super) async fn run(ctx: &ToolContext, name: &str, args: &Value, approved: bool) -> Result<ToolResult, String> {
     // The model only sees enabled tools, but it can still name a hidden one.
-    if !builtin_tools(&ctx.config).iter().any(|t| t.id == name && t.enabled && t.available) {
-        return Err(format!("{name} is turned off"));
-    }
+    check_dispatch(&ctx.config, name, args, approved)?;
     let arg = |k: &str| args.get(k).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()).map(str::to_string);
     match name {
         "web_search" => {
@@ -773,6 +787,34 @@ fn open_app(app: &str) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_dispatch_requires_per_call_consent_even_if_arguments_claim_approval() {
+        let mut cfg = TranscriptionConfig::default();
+        for (name, args) in [
+            ("files_apps", json!({"action":" read ", "path":"~/Documents/private.txt", "approved":true, "policy":"auto"})),
+            ("files_apps", json!({"action":"find", "query":"contracts"})),
+            ("history_search", json!({"query":"passwords", "approved":true})),
+        ] {
+            assert!(check_dispatch(&cfg, name, &args, false).is_err());
+            assert!(check_dispatch(&cfg, name, &args, true).is_ok());
+            // Approval of the previous call never changes the default for the next one.
+            assert!(check_dispatch(&cfg, name, &args, false).is_err());
+            cfg.builtin_tools.insert(name.into(), false);
+            assert!(check_dispatch(&cfg, name, &args, true).is_err());
+            cfg.builtin_tools.remove(name);
+        }
+        for (name, args) in [
+            ("files_apps", json!({"action":"open_app", "app":"Calculator"})),
+            ("files_apps", json!({"action":"open", "path":"~/Documents/note.txt"})),
+            ("math_dates", json!({"action":"now"})),
+            ("read_page", json!({})),
+            ("docs_search", json!({})),
+        ] {
+            assert!(check_dispatch(&cfg, name, &args, false).is_ok());
+        }
+        assert!(check_dispatch(&cfg, "invented_tool", &json!({}), true).is_err());
+    }
 
     #[test]
     fn math_is_exact() {

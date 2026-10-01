@@ -1,26 +1,17 @@
 //! API keys live in the OS keychain (macOS Keychain / Windows Credential Manager).
-//! Model keys have one account per role/provider/endpoint; search keeps its existing account.
+//! Model keys have one account per role/provider/endpoint; search keys are scoped by provider.
 
 use crate::transcribe::TranscriptionConfig;
 use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicBool, Ordering};
 
 const SERVICE: &str = "com.openglaido.app";
-
-/// False once the keychain failed: legacy config migration must not discard plaintext keys.
-static AVAILABLE: AtomicBool = AtomicBool::new(true);
-
-pub fn available() -> bool {
-    AVAILABLE.load(Ordering::SeqCst)
-}
 
 fn entry(account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, account).map_err(|e| keychain_error("open", e))
 }
 
 fn keychain_error(action: &str, error: keyring::Error) -> String {
-    AVAILABLE.store(false, Ordering::SeqCst);
     format!("Couldn't {action} the keychain: {error}")
 }
 
@@ -29,17 +20,6 @@ pub fn read(account: &str) -> Result<Option<String>, String> {
         Ok(value) => Ok(Some(value)),
         Err(keyring::Error::NoEntry) => Ok(None),
         Err(e) => Err(keychain_error("read", e)),
-    }
-}
-
-/// Legacy callers return an empty key on failure; model-key operations propagate the error.
-pub fn get(account: &str) -> String {
-    match read(account) {
-        Ok(value) => value.unwrap_or_default(),
-        Err(e) => {
-            eprintln!("{e}");
-            String::new()
-        }
     }
 }
 
@@ -55,7 +35,7 @@ fn write(account: &str, value: Option<&str>) -> Result<(), String> {
     result.map_err(|e| keychain_error("update", e))
 }
 
-/// Stores a legacy/search key; an empty value deletes the entry.
+/// Stores a legacy key; an empty value deletes the entry.
 pub fn set(account: &str, value: &str) -> Result<(), String> {
     write(account, (!value.is_empty()).then_some(value))
 }
@@ -252,6 +232,73 @@ fn save_model_keys_with(
     new.api_key = resolved.remove(0);
     new.llm_api_key = resolved.remove(0);
     new.provider_keys_migrated = true;
+    Ok(transaction)
+}
+
+fn search_account(provider: &str) -> String {
+    // Unknown/disabled legacy keys are retained without ever being restored for a real provider.
+    let scope = match provider { "brave" | "tavily" => provider, _ => "unassigned" };
+    format!("search_key_v1_{scope}")
+}
+
+pub fn get_search_provider_key(provider: &str) -> Result<String, String> {
+    if !matches!(provider, "brave" | "tavily") { return Ok(String::new()); }
+    Ok(decode(read(&search_account(provider))?)?.unwrap_or_default())
+}
+
+/// The caller hydrates the legacy search slot only before this migration succeeds.
+pub fn load_search_key(config: &mut TranscriptionConfig) -> Result<bool, String> {
+    load_search_key_with(config, &read, write)
+}
+
+fn load_search_key_with(
+    config: &mut TranscriptionConfig,
+    read: &ReadKey,
+    write: impl Fn(&str, Option<&str>) -> Result<(), String> + 'static,
+) -> Result<bool, String> {
+    let migrated = !config.search_keys_migrated;
+    let account = search_account(&config.search_provider);
+    let stored = decode(read(&account)?)?;
+    let mut updates = BTreeMap::new();
+    let key = match stored {
+        Some(key) => key,
+        None if migrated => {
+            updates.insert(account, encode(&config.search_api_key));
+            config.search_api_key.clone()
+        }
+        None => String::new(),
+    };
+    apply(updates, read, write)?.commit();
+    config.search_api_key = if matches!(config.search_provider.as_str(), "brave" | "tavily") { key } else { String::new() };
+    config.search_keys_migrated = true;
+    Ok(migrated)
+}
+
+pub fn save_search_key(old: &TranscriptionConfig, new: &mut TranscriptionConfig, edited_search_provider: Option<&str>) -> Result<ModelKeyUpdate, String> {
+    save_search_key_with(old, new, edited_search_provider, &read, write)
+}
+
+fn save_search_key_with(
+    old: &TranscriptionConfig,
+    new: &mut TranscriptionConfig,
+    edited_search_provider: Option<&str>,
+    read: &ReadKey,
+    write: impl Fn(&str, Option<&str>) -> Result<(), String> + 'static,
+) -> Result<ModelKeyUpdate, String> {
+    let mut updates = BTreeMap::new();
+    let old_account = search_account(&old.search_provider);
+    if (!old.search_keys_migrated || !old.search_api_key.is_empty()) && read(&old_account)?.is_none() {
+        updates.insert(old_account, encode(&old.search_api_key));
+    }
+    let target = search_account(&new.search_provider);
+    let known = matches!(new.search_provider.as_str(), "brave" | "tavily");
+    if known && edited_search_provider == Some(new.search_provider.as_str()) {
+        updates.insert(target.clone(), encode(&new.search_api_key));
+    }
+    let key = if known { lookup(&target, &updates, read)?.unwrap_or_default() } else { String::new() };
+    let transaction = apply(updates, read, write)?;
+    new.search_api_key = key;
+    new.search_keys_migrated = true;
     Ok(transaction)
 }
 
@@ -553,5 +600,55 @@ mod tests {
         assert_eq!(saved.api_key, "newer-stt");
         assert!(saved.llm_api_key.is_empty());
         assert_eq!(*vault.values.borrow(), before);
+    }
+
+    #[test]
+    fn search_provider_keys_migrate_switch_clear_and_rollback() {
+        let vault = Vault::default();
+        let mut brave = TranscriptionConfig { search_provider: "brave".into(), search_api_key: "brave-secret".into(), ..Default::default() };
+        assert!(load_search_key_with(&mut brave, &vault.reader(), vault.writer()).unwrap());
+        let mut tavily = brave.clone();
+        tavily.search_provider = "tavily".into();
+        save_search_key_with(&brave, &mut tavily, None, &vault.reader(), vault.writer()).unwrap().commit();
+        assert!(tavily.search_api_key.is_empty());
+        let mut keyed = tavily.clone();
+        keyed.search_api_key = "tavily-secret".into();
+        save_search_key_with(&tavily, &mut keyed, Some("tavily"), &vault.reader(), vault.writer()).unwrap().commit();
+        let mut back = keyed.clone();
+        back.search_provider = "brave".into();
+        save_search_key_with(&keyed, &mut back, None, &vault.reader(), vault.writer()).unwrap().commit();
+        assert_eq!(back.search_api_key, "brave-secret");
+
+        let before = vault.values.borrow().clone();
+        let mut cleared = keyed.clone();
+        cleared.search_api_key.clear();
+        drop(save_search_key_with(&keyed, &mut cleared, Some("tavily"), &vault.reader(), vault.writer()).unwrap());
+        assert_eq!(*vault.values.borrow(), before); // Failed config save keeps the old password.
+        save_search_key_with(&keyed, &mut cleared, Some("tavily"), &vault.reader(), vault.writer()).unwrap().commit();
+        cleared.search_keys_migrated = false;
+        cleared.search_api_key = "stale-legacy-value".into();
+        load_search_key_with(&mut cleared, &vault.reader(), vault.writer()).unwrap();
+        assert!(cleared.search_api_key.is_empty()); // Tombstone wins over migration retries.
+        assert_eq!(decode(vault.reader()(&search_account("brave")).unwrap()).unwrap(), Some("brave-secret".into()));
+    }
+
+    #[test]
+    fn ambiguous_search_keys_are_never_reassigned_and_vault_failures_abort() {
+        let vault = Vault::default();
+        let mut unknown = TranscriptionConfig { search_api_key: "unknown-owner".into(), ..Default::default() };
+        load_search_key_with(&mut unknown, &vault.reader(), vault.writer()).unwrap();
+        assert!(unknown.search_api_key.is_empty());
+        let mut brave = unknown.clone();
+        brave.search_provider = "brave".into();
+        save_search_key_with(&unknown, &mut brave, None, &vault.reader(), vault.writer()).unwrap().commit();
+        assert!(brave.search_api_key.is_empty());
+        let before = vault.values.borrow().clone();
+        let mut keyed = brave.clone();
+        keyed.search_api_key = "new-key".into();
+        vault.fail_write.set(Some(vault.writes.get() + 1));
+        assert!(save_search_key_with(&brave, &mut keyed, Some("brave"), &vault.reader(), vault.writer()).is_err());
+        assert_eq!(*vault.values.borrow(), before);
+        *vault.fail_read.borrow_mut() = Some(search_account("brave"));
+        assert!(load_search_key_with(&mut brave, &vault.reader(), vault.writer()).is_err());
     }
 }

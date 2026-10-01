@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Copy, Flame, Mic, Pause, Play, RotateCw, ShieldCheck, Sparkles, Timer, Trash2, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { HistoryItem, SettingsTab } from "./types";
+import type { HistoryItem, HistoryStats, SettingsTab } from "./types";
 import { Bolt, EmptyState, IconButton, Modal, OutlineButton, SearchField } from "./ui";
 import { locale, t } from "./i18n";
 import { Markdown } from "./command-window";
@@ -79,10 +79,6 @@ export function itemSubtitle(item: HistoryItem): string {
 // ------------------------------------------------------------------
 // Stats helpers
 // ------------------------------------------------------------------
-export function wordCount(text: string): number {
-  return text.trim().split(/\s+/).filter(Boolean).length;
-}
-
 export function formatSaved(ms: number): string {
   const totalMin = Math.round(ms / 60000);
   const h = Math.floor(totalMin / 60);
@@ -93,17 +89,6 @@ export function formatSaved(ms: number): string {
 
 export function dayKey(d: Date): string {
   return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
-}
-
-export function computeStreak(history: HistoryItem[]): number {
-  const days = new Set(history.map((h) => dayKey(new Date(h.created_at))));
-  let streak = 0;
-  const cursor = new Date();
-  while (days.has(dayKey(cursor))) {
-    streak += 1;
-    cursor.setDate(cursor.getDate() - 1);
-  }
-  return streak;
 }
 
 export function formatGroupDate(d: Date): string {
@@ -246,11 +231,11 @@ function RecordPlayer({
               {copied ? <Check className="size-4 text-text-accent" /> : <Copy className="size-4" />}
             </IconButton>
             {item.audio_filename && !isCommand && (
-              <IconButton onClick={() => onRetranscribe(item.id)} title={t("Transcribe this recording again")}>
+              <IconButton disabled={retranscribing || item.status === "running"} onClick={() => onRetranscribe(item.id)} title={t("Transcribe this recording again")}>
                 <RotateCw className={`size-4 ${retranscribing ? "animate-spin" : ""}`} />
               </IconButton>
             )}
-            <IconButton onClick={() => onDelete(item.id)} title={t("Delete recording")}>
+            <IconButton disabled={retranscribing} onClick={() => onDelete(item.id)} title={t("Delete recording")}>
               <Trash2 className="size-4" />
             </IconButton>
             <IconButton onClick={onClose} title={t("Close")} subdued>
@@ -272,7 +257,7 @@ function RecordPlayer({
                 {item.error && <p className="gs-text-body-sm-regular text-text-subdued">{t(item.error)}</p>}
               </div>
               {item.audio_filename && !isCommand && (
-                <OutlineButton onClick={() => onRetranscribe(item.id)}>{retranscribing ? t("Retrying…") : t("Retry")}</OutlineButton>
+                <OutlineButton disabled={retranscribing} onClick={() => onRetranscribe(item.id)}>{retranscribing ? t("Retrying…") : t("Retry")}</OutlineButton>
               )}
             </div>
           )}
@@ -342,6 +327,11 @@ function RecordPlayer({
 // ------------------------------------------------------------------
 export function Home({
   history,
+  historyStats,
+  onSearchHistory,
+  onLoadMoreHistory,
+  hasMoreHistory,
+  onError,
   onHistoryChanged,
   openRecordId,
   extraRecord,
@@ -349,6 +339,11 @@ export function Home({
   onOpenSettings,
 }: {
   history: HistoryItem[];
+  historyStats: HistoryStats;
+  onSearchHistory: (query: string) => void;
+  onLoadMoreHistory: () => void;
+  hasMoreHistory: boolean;
+  onError: (message: string) => void;
   /** A record opened from ⌘K that is older than the loaded page. */
   extraRecord?: HistoryItem | null;
   /** Reloads history after a change made here. */
@@ -358,7 +353,24 @@ export function Home({
   onOpenSettings: (tab: SettingsTab) => void;
 }) {
   const [historyQuery, setHistoryQuery] = useState("");
-  const [retranscribingId, setRetranscribingId] = useState<string | null>(null);
+  const retrying = useRef(new Set<string>());
+  const [retranscribingIds, setRetranscribingIds] = useState(new Set<string>());
+  const historyScroll = useRef<HTMLDivElement>(null);
+  const historyEnd = useRef<HTMLDivElement>(null);
+  const searchHistory = useRef(onSearchHistory);
+  searchHistory.current = onSearchHistory;
+  useEffect(() => {
+    const timer = window.setTimeout(() => searchHistory.current(historyQuery.trim()), 200);
+    return () => window.clearTimeout(timer);
+  }, [historyQuery]);
+  useEffect(() => {
+    if (!hasMoreHistory || !historyEnd.current) return;
+    const observer = new IntersectionObserver((entries) => {
+      if (entries.some((entry) => entry.isIntersecting)) onLoadMoreHistory();
+    }, { root: historyScroll.current, rootMargin: "300px" });
+    observer.observe(historyEnd.current);
+    return () => observer.disconnect();
+  }, [hasMoreHistory, onLoadMoreHistory]);
 
   // ---- history actions ----
   const deleteHistory = async (id: string) => {
@@ -367,31 +379,31 @@ export function Home({
       onOpenRecord(null);
       onHistoryChanged();
     } catch (e) {
-      console.error(e);
+      onError(String(e));
     }
   };
   const retranscribe = async (id: string) => {
-    setRetranscribingId(id);
+    if (retrying.current.has(id)) return;
+    retrying.current.add(id);
+    setRetranscribingIds(new Set(retrying.current));
     try {
       await invoke<HistoryItem>("retranscribe", { id });
       onHistoryChanged();
     } catch (e) {
-      console.error("Retranscribe failed:", e);
+      onError(String(e));
       onHistoryChanged();
     } finally {
-      setRetranscribingId(null);
+      retrying.current.delete(id);
+      setRetranscribingIds(new Set(retrying.current));
     }
   };
 
   // ---- derived: stats ----
   const stats = useMemo(() => {
-    const dictations = history.filter((h) => h.kind !== "command" && h.status === "ok");
-    const words = dictations.reduce((a, h) => a + wordCount(h.text), 0);
-    const ms = dictations.reduce((a, h) => a + h.duration_ms, 0);
+    const { words, duration_ms: ms, streak } = historyStats;
     const typingMs = (words / 40) * 60000;
     const savedMs = Math.max(0, typingMs - ms);
     const wpm = ms > 0 ? Math.round(words / (ms / 60000)) : 0;
-    const streak = computeStreak(dictations);
 
     const savedSubtitle =
       savedMs <= 0
@@ -418,16 +430,12 @@ export function Home({
       streak: streak === 1 ? t("1 day") : t("{n} days", { n: streak }),
       streakSubtitle,
     };
-  }, [history, locale()]);
+  }, [historyStats, locale()]);
 
   // ---- derived: grouped + filtered history ----
   const historyGroups = useMemo(() => {
-    const q = historyQuery.trim().toLowerCase();
-    const filtered = q
-      ? history.filter((h) => [h.text, h.answer ?? "", h.app_name ?? ""].some((s) => s.toLowerCase().includes(q)))
-      : history;
     const groups: { label: string; date: string; items: HistoryItem[] }[] = [];
-    for (const item of filtered) {
+    for (const item of history) {
       const d = new Date(item.created_at);
       const label = groupLabel(d);
       const last = groups[groups.length - 1];
@@ -439,7 +447,7 @@ export function Home({
     }
     return groups;
     // The date: "Today" becomes "Yesterday" after midnight.
-  }, [history, historyQuery, locale(), new Date().toDateString()]);
+  }, [history, locale(), new Date().toDateString()]);
 
   const openRecord = openRecordId
     ? (history.find((h) => h.id === openRecordId) ?? (extraRecord?.id === openRecordId ? extraRecord : undefined))
@@ -491,7 +499,7 @@ export function Home({
             placeholder={t("Search transcriptions...")}
           />
         </div>
-        <div className="mt-5 flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pr-[18px] [scrollbar-gutter:stable]">
+        <div ref={historyScroll} className="mt-5 flex min-h-0 flex-1 flex-col gap-6 overflow-y-auto pr-[18px] [scrollbar-gutter:stable]">
           {historyGroups.length === 0 ? (
             <EmptyState
               icon={Mic}
@@ -532,8 +540,8 @@ export function Home({
                       </div>
                       {item.status === "failed" && item.audio_filename && item.kind !== "command" && (
                         <span onClick={(e) => e.stopPropagation()}>
-                          <OutlineButton onClick={() => retranscribe(item.id)}>
-                            {retranscribingId === item.id ? t("Retrying…") : t("Retry")}
+                          <OutlineButton onClick={() => retranscribe(item.id)} disabled={retranscribingIds.has(item.id)}>
+                            {retranscribingIds.has(item.id) ? t("Retrying…") : t("Retry")}
                           </OutlineButton>
                         </span>
                       )}
@@ -546,6 +554,7 @@ export function Home({
               </div>
             ))
           )}
+          {hasMoreHistory && <div ref={historyEnd} className="h-px shrink-0" aria-hidden="true" />}
         </div>
       </div>
 
@@ -556,7 +565,7 @@ export function Home({
           onClose={() => onOpenRecord(null)}
           onDelete={deleteHistory}
           onRetranscribe={retranscribe}
-          retranscribing={retranscribingId === openRecord.id}
+          retranscribing={retranscribingIds.has(openRecord.id)}
           displayText={openRecord.text}
         />
       )}

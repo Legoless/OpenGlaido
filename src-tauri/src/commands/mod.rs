@@ -47,6 +47,7 @@ pub struct Approval {
     pub tool: String,
     pub summary: String,
     pub expires_in_s: u64,
+    pub allow_always: bool,
 }
 
 /// What the command window shows ("command-state" payload).
@@ -77,6 +78,8 @@ pub struct Commands {
     /// Command window shown. Its lock also serializes key arming with show/hide.
     open: Mutex<bool>,
     generation: AtomicU64,
+    /// Closing the window revokes private reads, even if it is reopened before they finish.
+    private_epoch: AtomicU64,
     approvals: Mutex<HashMap<String, oneshot::Sender<String>>>,
     pub mcp: mcp::Manager,
 }
@@ -218,6 +221,7 @@ fn hide_window(app: &AppHandle) {
         let _ = window.hide();
     }
     *commands(app).open.lock().unwrap() = false;
+    commands(app).private_epoch.fetch_add(1, Ordering::SeqCst);
     let _ = app.emit("command-window", json!({ "open": false }));
     // Closing declines anything still waiting for approval (the run itself carries on).
     deny_pending(app);
@@ -234,6 +238,19 @@ fn is_open(app: &AppHandle) -> bool {
     *commands(app).open.lock().unwrap()
 }
 
+fn access_valid(open: bool, generation: u64, current_generation: u64, epoch: Option<u64>, current_epoch: u64) -> bool {
+    generation == current_generation && epoch.is_none_or(|epoch| open && epoch == current_epoch)
+}
+
+fn check_run_access(app: &AppHandle, generation: u64, private_epoch: Option<u64>) -> Result<(), String> {
+    let c = commands(app);
+    if access_valid(is_open(app), generation, c.generation.load(Ordering::SeqCst), private_epoch, c.private_epoch.load(Ordering::SeqCst)) {
+        Ok(())
+    } else {
+        Err("The command's access was cancelled.".into())
+    }
+}
+
 fn refine_keys(app: &AppHandle) -> String {
     app.state::<AppState>().config.lock().unwrap().commands_hold.clone()
 }
@@ -245,6 +262,7 @@ pub fn init(app: &AppHandle) {
         run: Mutex::default(),
         open: Mutex::new(false),
         generation: AtomicU64::new(0),
+        private_epoch: AtomicU64::new(0),
         approvals: Mutex::default(),
         mcp: mcp::Manager::new(&dir),
     });
@@ -291,6 +309,7 @@ pub fn handle_hotkey(app: &AppHandle, event: HotkeyEvent) {
 
 /// A finished recording from the commands hotkey (lib.rs worker / async runtime).
 pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i64, mut session: Session) {
+    session.resolve_context().await;
     let c = commands(&app);
     // Holding the hotkey again while an answer is shown refines it.
     let open = is_open(&app);
@@ -489,7 +508,9 @@ async fn agent_loop(
     }
     let mut sources = Vec::new();
     let mut last_emit = Instant::now();
+    let mut private_epoch = None;
     for step in 0..MAX_STEPS {
+        check_run_access(app, generation, private_epoch)?;
         // The last step gets no tools, so the model has to answer.
         let offered: &[Value] = if step + 1 == MAX_STEPS { &[] } else { &schemas };
         update(app, generation, |r| r.text.clear());
@@ -508,13 +529,19 @@ async fn agent_loop(
                 }
             })
             .await?;
+        check_run_access(app, generation, private_epoch)?;
         if completion.tool_calls.is_empty() {
             return Ok((completion.text.trim().to_string(), sources));
         }
         messages.push(llm::assistant_tool_message(&completion));
         for call in &completion.tool_calls {
             let args: Value = serde_json::from_str(&call.arguments).unwrap_or_else(|_| json!({}));
+            if tools::requires_approval(&call.name, &args) {
+                private_epoch.get_or_insert_with(|| commands(app).private_epoch.load(Ordering::SeqCst));
+            }
             let output = run_tool(app, generation, config, ctx, &call.name, &args, &mut sources).await;
+            // Never pass a private result to the next model request after close/supersession.
+            check_run_access(app, generation, private_epoch)?;
             messages.push(json!({"role":"tool","tool_call_id": call.id, "content": output}));
         }
     }
@@ -530,6 +557,9 @@ async fn run_tool(
     args: &Value,
     sources: &mut Vec<Source>,
 ) -> String {
+    if let Err(e) = check_run_access(app, generation, None) {
+        return format!("Error: {e}");
+    }
     let mcp = &commands(app).mcp;
     let resolved = (!tools::is_builtin(name)).then(|| mcp.resolve(&config.mcp_servers, name)).flatten();
     let label = match &resolved {
@@ -543,15 +573,27 @@ async fn run_tool(
         r.tools.push(ToolStatus { name: name.into(), label: label.clone(), action: arg("action"), detail, status: "running".into() });
     });
     let result: Result<String, String> = if tools::is_builtin(name) {
-        tools::run(ctx, name, args).await.map(|r| {
-            sources.extend(r.sources);
-            r.content
-        })
+        let private_epoch = tools::requires_approval(name, args).then(|| commands(app).private_epoch.load(Ordering::SeqCst));
+        let approved = if private_epoch.is_some() {
+            ask_approval(app, generation, "OpenGlaido · this call only", name, args, false).await == "once"
+        } else {
+            false
+        };
+        match check_run_access(app, generation, private_epoch) {
+            Err(e) => Err(e),
+            Ok(()) => match tools::run(ctx, name, args, approved).await {
+                Err(e) => Err(e),
+                Ok(r) => check_run_access(app, generation, private_epoch).map(|()| {
+                    sources.extend(r.sources);
+                    r.content
+                }),
+            },
+        }
     } else if let Some((server, tool, policy)) = resolved {
-        let decision = if policy == "ask" { ask_approval(app, generation, &server, &tool, args).await } else { policy.clone() };
+        let decision = if policy == "ask" { ask_approval(app, generation, &server, &tool, args, true).await } else { policy.clone() };
         match decision.as_str() {
-            "deny" => Ok("The user declined this tool call.".into()),
-            _ => mcp.call(&server, &tool, args.clone()).await,
+            "once" | "auto" if check_run_access(app, generation, None).is_ok() => mcp.call(&server, &tool, args.clone()).await,
+            _ => Ok("The user declined this tool call.".into()),
         }
     } else {
         Err(format!("Unknown tool {name}"))
@@ -565,52 +607,73 @@ async fn run_tool(
     result.unwrap_or_else(|e| format!("Error: {e}"))
 }
 
-/// Shows the approval card and waits (Enter = once, Esc/close/60 s = deny). "always" persists.
-async fn ask_approval(app: &AppHandle, generation: u64, server: &str, tool: &str, args: &Value) -> String {
-    // Nobody can see a card for a closed window or a superseded run.
-    if !is_open(app) || commands(app).run.lock().unwrap().generation != generation {
-        return "deny".into();
+fn approval_decision(decision: &str, persistent: bool, valid: bool) -> &'static str {
+    match (decision, persistent, valid) {
+        ("always", true, true) => "auto",
+        ("once" | "always", _, true) => "once",
+        _ => "deny",
     }
+}
+
+/// Enter = once; Esc/close/60 s = deny. Only MCP can persist "always" decisions.
+async fn ask_approval(app: &AppHandle, generation: u64, server: &str, tool: &str, args: &Value, persistent: bool) -> String {
+    let c = commands(app);
+    let private_epoch = c.private_epoch.load(Ordering::SeqCst);
     let request_id = uuid::Uuid::new_v4().to_string();
     let (tx, rx) = oneshot::channel();
-    commands(app).approvals.lock().unwrap().insert(request_id.clone(), tx);
     // All of it: padding benign fields must not push a recipient or path out of view.
     let summary = serde_json::to_string_pretty(args).unwrap_or_else(|_| args.to_string());
-    update(app, generation, |r| {
-        r.phase = "approval".into();
-        r.approval = Some(Approval {
+    {
+        // Register atomically with close/new-run cancellation: a hidden card must never wait.
+        let open = c.open.lock().unwrap();
+        let mut run = c.run.lock().unwrap();
+        if !*open || run.generation != generation || c.generation.load(Ordering::SeqCst) != generation {
+            return "deny".into();
+        }
+        c.approvals.lock().unwrap().insert(request_id.clone(), tx);
+        run.phase = "approval".into();
+        run.approval = Some(Approval {
             request_id: request_id.clone(),
             server: server.into(),
             tool: tool.into(),
             summary,
             expires_in_s: APPROVAL_TIMEOUT.as_secs(),
+            allow_always: persistent,
         });
-    });
+        emit(app, &run);
+    }
+    arm_keys(app);
     let decision = match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
         Ok(Ok(d)) => d,
         _ => "deny".into(),
     };
-    commands(app).approvals.lock().unwrap().remove(&request_id);
+    c.approvals.lock().unwrap().remove(&request_id);
     update(app, generation, |r| {
         r.approval = None;
         r.phase = "tool".into();
     });
-    if decision == "always" {
+    let decision = approval_decision(&decision, persistent, check_run_access(app, generation, Some(private_epoch)).is_ok());
+    if decision == "auto" {
         let (server, tool) = (server.to_string(), tool.to_string());
         if let Err(e) = crate::update_config(app, |c| {
             c.mcp_servers.entry(server).or_default().tool_policies.insert(tool, "auto".into());
         }) {
             eprintln!("{e}");
         }
-        return "auto".into();
     }
-    decision
+    decision.into()
 }
 
 fn decide(app: &AppHandle, request_id: &str, decision: &str) {
-    if let Some(tx) = commands(app).approvals.lock().unwrap().remove(request_id) {
-        let _ = tx.send(decision.into());
+    let c = commands(app);
+    let open = c.open.lock().unwrap();
+    let run = c.run.lock().unwrap();
+    if !*open || run.generation != c.generation.load(Ordering::SeqCst) || run.approval.as_ref().is_none_or(|a| a.request_id != request_id) {
+        return;
     }
+    if let Some(tx) = c.approvals.lock().unwrap().remove(request_id) {
+        let _ = tx.send(decision.into());
+    };
 }
 
 fn current_answer(app: &AppHandle) -> Option<String> {
@@ -809,6 +872,28 @@ pub async fn mcp_new_server(app: AppHandle, location: String, language: String, 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn private_approval_cannot_persist_or_outlive_its_visible_run() {
+        assert_eq!(approval_decision("once", false, true), "once");
+        assert_eq!(approval_decision("always", false, true), "once");
+        assert_eq!(approval_decision("always", true, true), "auto");
+        for decision in ["deny", "", "auto", "forged"] {
+            assert_eq!(approval_decision(decision, false, true), "deny");
+        }
+        for decision in ["once", "always"] {
+            for (open, generation, epoch) in [(false, 4, 8), (true, 5, 8), (true, 4, 9)] {
+                let valid = access_valid(open, 4, generation, Some(8), epoch);
+                assert!(!valid);
+                assert_eq!(approval_decision(decision, false, valid), "deny");
+                assert_eq!(approval_decision(decision, true, valid), "deny");
+            }
+        }
+        assert!(access_valid(true, 4, 4, Some(8), 8));
+        // Background safe tools keep running; superseded runs do not.
+        assert!(access_valid(false, 4, 4, None, 9));
+        assert!(!access_valid(true, 4, 5, None, 9));
+    }
 
     #[test]
     fn wake_phrase() {

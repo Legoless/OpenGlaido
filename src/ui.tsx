@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { createPortal } from "react-dom";
 import { Check, ChevronDown, Plus, Search, TriangleAlert, createLucideIcon } from "lucide-react";
 import type { IconType } from "./types";
@@ -70,16 +70,19 @@ export function OutlineButton({
   onClick,
   children,
   autoFocus,
+  disabled,
 }: {
   onClick: () => void;
   children: React.ReactNode;
   autoFocus?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <button
       type="button"
       onClick={onClick}
       autoFocus={autoFocus}
+      disabled={disabled}
       className="gs-text-body-md-medium inline-flex h-7 shrink-0 items-center gap-2.5 whitespace-nowrap rounded-[2px] border border-border-default pr-2.5 pl-3 text-text-subdued transition-colors hover:text-text-default"
     >
       {children}
@@ -112,11 +115,13 @@ export function IconButton({
   onClick,
   title,
   subdued,
+  disabled,
   children,
 }: {
   onClick: () => void;
   title?: string;
   subdued?: boolean;
+  disabled?: boolean;
   children: React.ReactNode;
 }) {
   return (
@@ -124,6 +129,7 @@ export function IconButton({
       type="button"
       onClick={onClick}
       title={title}
+      disabled={disabled}
       className={`flex size-7 items-center justify-center rounded-[2px] p-1 transition-colors hover:text-text-default ${
         subdued ? "text-text-disabled" : "text-text-subdued"
       }`}
@@ -194,6 +200,129 @@ export function isPlainEnter(e: React.KeyboardEvent): boolean {
   return e.key === "Enter" && !e.nativeEvent.isComposing && e.keyCode !== 229;
 }
 
+// Keep the existing overlay geometry; the native dialog supplies focus containment and inertness.
+export const DIALOG_STYLE: React.CSSProperties = {
+  margin: 0, padding: 0, border: 0, width: "100%", maxWidth: "none", height: "100%", maxHeight: "none",
+  color: "inherit", overflow: "visible",
+};
+
+const modalStack: HTMLDialogElement[] = [];
+const modalListeners = new Set<() => void>();
+const legacyDialogs = new Set<HTMLDialogElement>();
+let hiddenBackground: { node: Element; aria: string | null; inert: boolean }[] = [];
+const topDialog = () => modalStack[modalStack.length - 1] ?? null;
+const subscribeDialogs = (listener: () => void) => { modalListeners.add(listener); return () => { modalListeners.delete(listener); }; };
+
+function refreshModalLayers() {
+  // Recompute from the original attributes so unmounting a whole nested stack cannot leave
+  // the main window inert, even when React runs parent cleanup before child cleanup.
+  for (const { node, aria, inert } of hiddenBackground) {
+    if (aria === null) node.removeAttribute("aria-hidden"); else node.setAttribute("aria-hidden", aria);
+    if (!inert) node.removeAttribute("inert");
+  }
+  const dialog = topDialog();
+  hiddenBackground = dialog && legacyDialogs.has(dialog)
+    ? Array.from(document.body.children).filter(node => node !== dialog).map(node => ({ node, aria: node.getAttribute("aria-hidden"), inert: node.hasAttribute("inert") }))
+    : [];
+  for (const { node } of hiddenBackground) { node.setAttribute("aria-hidden", "true"); node.setAttribute("inert", ""); }
+  for (const listener of modalListeners) listener();
+}
+
+/** Keep existing notifications above the active native dialog without moving keyboard focus. */
+export function DialogPortal({ children }: { children: React.ReactNode }) {
+  const dialog = useSyncExternalStore(subscribeDialogs, topDialog, () => null);
+  return createPortal(children, dialog ?? document.body);
+}
+
+/** Older WebKit needs a real React portal to escape blurred parents without losing events. */
+export function DialogLayer({ children }: { children: React.ReactNode }) {
+  const legacy = typeof document !== "undefined" && typeof document.createElement("dialog").showModal !== "function";
+  return legacy ? createPortal(children, document.body) : children;
+}
+
+function dialogControls(dialog: HTMLDialogElement) {
+  return Array.from(dialog.querySelectorAll<HTMLElement>("button, input, textarea, select, a[href], [tabindex], [contenteditable=true]"))
+    .filter(el => el.tabIndex >= 0 && !el.matches(":disabled") && !el.closest("[inert]") && el.getClientRects().length > 0 && el.closest("dialog[open]") === dialog)
+    .sort((a, b) => (a.tabIndex || Infinity) - (b.tabIndex || Infinity));
+}
+
+// macOS 11 can still have WebKit older than Safari 15.4. Preserve the original fixed overlay,
+// with focus/ARIA isolation, when showModal is absent. Portalling out of blurred parents also
+// keeps nested fallback dialogs positioned against the viewport.
+function openLegacyDialog(dialog: HTMLDialogElement) {
+  const oldStyle = dialog.getAttribute("style");
+  dialog.style.color = "var(--color-text-default)";
+  dialog.style.zIndex = String(100 + modalStack.length);
+  legacyDialogs.add(dialog);
+  dialog.setAttribute("open", "");
+  const containFocus = () => {
+    if (topDialog() === dialog && !dialog.contains(document.activeElement)) (dialogControls(dialog)[0] ?? dialog).focus({ preventScroll: true });
+  };
+  window.addEventListener("focusin", containFocus, true);
+  window.addEventListener("focus", containFocus, true);
+  return () => {
+    window.removeEventListener("focusin", containFocus, true);
+    window.removeEventListener("focus", containFocus, true);
+    legacyDialogs.delete(dialog);
+    dialog.removeAttribute("open");
+    if (oldStyle === null) dialog.removeAttribute("style"); else dialog.setAttribute("style", oldStyle);
+  };
+}
+
+export function useModalDialog(ref: React.RefObject<HTMLDialogElement | null>, active = true) {
+  const titleId = useId();
+  const wasActive = useRef(false);
+  const previous = useRef<Element | null>(null);
+  if (active && !wasActive.current && typeof document !== "undefined") previous.current = document.activeElement;
+  wasActive.current = active;
+  useLayoutEffect(() => {
+    const dialog = ref.current;
+    if (!active || !dialog) return;
+    const title = dialog.querySelector<HTMLElement>("h1, h2, h3, h4, h5, h6");
+    if (title) {
+      if (!title.id) title.id = titleId;
+      dialog.setAttribute("aria-labelledby", title.id);
+    }
+    // React autofocus may have already picked an editor inside this overlay.
+    const focused = dialog.contains(document.activeElement) ? document.activeElement as HTMLElement : null;
+    modalStack.push(dialog);
+    let close: () => void;
+    if (typeof dialog.showModal === "function") {
+      dialog.showModal();
+      close = () => dialog.close();
+    } else {
+      close = openLegacyDialog(dialog);
+    }
+    refreshModalLayers();
+    focused?.focus({ preventScroll: true });
+    if (!dialog.contains(document.activeElement)) (dialogControls(dialog)[0] ?? dialog).focus({ preventScroll: true });
+    // Webviews may otherwise tab from the last control into browser chrome. Inertness alone
+    // protects the page behind us; explicitly wrap at the two ends of the visible dialog.
+    const trapTab = (event: KeyboardEvent) => {
+      if (topDialog() !== dialog || event.key !== "Tab" || event.defaultPrevented || event.isComposing || event.keyCode === 229) return;
+      const controls = dialogControls(dialog);
+      const first = controls[0];
+      const last = controls[controls.length - 1];
+      if (!first || (event.shiftKey ? document.activeElement === first : document.activeElement === last)) {
+        event.preventDefault();
+        (event.shiftKey ? last : first)?.focus({ preventScroll: true });
+      }
+    };
+    dialog.addEventListener("keydown", trapTab);
+    return () => {
+      dialog.removeEventListener("keydown", trapTab);
+      modalStack.splice(modalStack.indexOf(dialog), 1);
+      close();
+      refreshModalLayers();
+      const restore = previous.current;
+      // Wait for the whole React unmount: a parent and nested dialog can close together.
+      queueMicrotask(() => {
+        if (restore instanceof HTMLElement && restore.isConnected && (!topDialog() || topDialog()!.contains(restore))) restore.focus({ preventScroll: true });
+      });
+    };
+  }, [active, ref, titleId]);
+}
+
 export function Modal({
   onClose,
   width,
@@ -204,9 +333,19 @@ export function Modal({
   children: React.ReactNode;
 }) {
   useEscape(onClose);
+  const dialog = useRef<HTMLDialogElement>(null);
+  useModalDialog(dialog);
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+    <DialogLayer>
+    <dialog
+      ref={dialog}
+      role="dialog"
+      tabIndex={-1}
+      aria-modal="true"
+      aria-label="OpenGlaido"
+      style={DIALOG_STYLE}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/30 backdrop:bg-transparent"
+      onCancel={(e) => e.preventDefault()}
       onMouseDown={(e) => {
         if (e.target === e.currentTarget) onClose();
       }}
@@ -216,7 +355,8 @@ export function Modal({
       >
         {children}
       </div>
-    </div>
+    </dialog>
+    </DialogLayer>
   );
 }
 
@@ -275,6 +415,7 @@ export function Dropdown({
   const [menu, setMenu] = useState<React.CSSProperties | null>(null);
   const [query, setQuery] = useState("");
   const [active, setActive] = useState(0);
+  const menuHost = useRef<Element | null>(null);
   useEscape(() => setMenu(null), !!menu);
   const filtering = !!search && options.length > 12;
   // Stable, so re-renders (download progress) don't scroll the list back to the active item.
@@ -286,6 +427,8 @@ export function Dropdown({
     if (o.value !== value) onChange(o.value);
   };
   const openMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
+    // Remain inside the top-layer dialog while escaping the blurred/scrolling settings panel.
+    menuHost.current = e.currentTarget.closest("dialog") ?? document.body;
     setQuery("");
     setActive(0);
     const r = e.currentTarget.getBoundingClientRect();
@@ -372,7 +515,7 @@ export function Dropdown({
               ))}
             </div>
           </>,
-          document.body,
+          menuHost.current ?? document.body,
         )}
     </>
   );

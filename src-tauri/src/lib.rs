@@ -138,6 +138,22 @@ pub struct Session {
     /// Model and formatting choices for this recording, even if settings change meanwhile.
     pub config: TranscriptionConfig,
     pub live: Option<realtime::LiveTranscription>,
+    recorded_at: String,
+    context_task: Option<tokio::sync::oneshot::Receiver<(AppContext, Option<String>)>>,
+    delivery: Option<paste::DeliveryTicket>,
+}
+
+impl Session {
+    /// Metadata never blocks capture or release. A late/failed lookup leaves the original app snapshot intact.
+    pub async fn resolve_context(&mut self) {
+        let Some(task) = self.context_task.take() else { return };
+        if let Ok(Ok((context, selection))) = tokio::time::timeout(Duration::from_millis(300), task).await {
+            if self.context.as_ref().is_some_and(|original| original.bundle_id == context.bundle_id) {
+                self.context = Some(context);
+                self.selection = selection;
+            }
+        }
+    }
 }
 
 /// Tray menu labels (Microphone, System Default, Show OpenGlaido, Quit); the frontend sends translations.
@@ -191,6 +207,10 @@ impl Notice {
 
     fn model_error(message: impl Into<String>) -> Self {
         Self { model_failure: true, ..Self::error(message) }
+    }
+
+    fn warning(message: impl Into<String>) -> Self {
+        Self { level: "warning", ..Self::error(message) }
     }
 
     /// Only model setup failures reopen the bar; other blockers stay in the main window.
@@ -378,12 +398,18 @@ fn load_config(path: &Path) -> TranscriptionConfig {
             migrated = true;
         }
     }
-    // Search keeps its existing slot; model keys move to provider/endpoint-specific slots once.
+    // Each credential family migrates independently; failed migration must not rewrite plaintext keys.
     let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty() || !config.llm_api_key.is_empty();
-    if config.search_api_key.is_empty() {
-        config.search_api_key = secrets::get("search_api_key");
-    } else if let Err(e) = secrets::set("search_api_key", &config.search_api_key) {
-        eprintln!("{e}");
+    let search_loaded = if config.search_keys_migrated {
+        config.search_api_key.clear();
+        Ok(())
+    } else {
+        hydrate_legacy_search_key(&mut config)
+    };
+    let mut search_migrated = false;
+    match search_loaded.and_then(|()| secrets::load_search_key(&mut config)) {
+        Ok(changed) => search_migrated = changed,
+        Err(e) => eprintln!("Couldn't load search provider keys: {e}"),
     }
     let keys_loaded = if config.provider_keys_migrated {
         config.api_key.clear();
@@ -402,10 +428,12 @@ fn load_config(path: &Path) -> TranscriptionConfig {
         Err(e) => eprintln!("Couldn't load provider keys: {e}"),
     }
     // Only remove legacy slots after both their scoped copies and migration metadata are saved.
-    if plaintext || migrated || keys_migrated {
+    if plaintext || migrated || keys_migrated || search_migrated {
         match write_config(path, &config) {
-            Ok(()) if keys_migrated => remove_legacy_model_keys(),
-            Ok(()) => {},
+            Ok(()) => {
+                if keys_migrated { remove_legacy_model_keys(); }
+                if search_migrated { remove_legacy_search_key(); }
+            },
             Err(e) => eprintln!("Couldn't rewrite {} without keys: {}", path.display(), e),
         }
     }
@@ -423,6 +451,19 @@ fn hydrate_legacy_model_keys(config: &mut TranscriptionConfig) -> Result<(), Str
     Ok(())
 }
 
+fn hydrate_legacy_search_key(config: &mut TranscriptionConfig) -> Result<(), String> {
+    if config.search_api_key.is_empty() {
+        config.search_api_key = secrets::read("search_api_key")?.unwrap_or_default();
+    }
+    Ok(())
+}
+
+fn remove_legacy_search_key() {
+    if let Err(e) = secrets::set("search_api_key", "") {
+        eprintln!("Couldn't remove migrated search key slot: {e}");
+    }
+}
+
 fn remove_legacy_model_keys() {
     for account in ["api_key", "llm_api_key"] {
         if let Err(e) = secrets::set(account, "") {
@@ -433,7 +474,7 @@ fn remove_legacy_model_keys() {
 
 fn read_config(path: &Path) -> TranscriptionConfig {
     // Without a valid config we cannot know which provider owns a legacy unscoped key.
-    let defaults = || TranscriptionConfig { provider_keys_migrated: true, ..Default::default() };
+    let defaults = || TranscriptionConfig { provider_keys_migrated: true, search_keys_migrated: true, ..Default::default() };
     match fs::read_to_string(path) {
         Ok(json) => TranscriptionConfig::from_json(&json).unwrap_or_else(|e| {
             eprintln!("Invalid {}, using defaults: {}", path.display(), e);
@@ -446,23 +487,23 @@ fn read_config(path: &Path) -> TranscriptionConfig {
     }
 }
 
-/// Migrated model keys never fall back to plaintext, even if an unrelated keychain call fails.
-fn config_json(config: &TranscriptionConfig, keychain_available: bool) -> Result<String, String> {
+/// Never write credentials to config.json. Failed legacy migration leaves the original file intact.
+fn config_json(config: &TranscriptionConfig) -> Result<String, String> {
+    if (!config.provider_keys_migrated && (!config.api_key.is_empty() || !config.llm_api_key.is_empty()))
+        || (!config.search_keys_migrated && !config.search_api_key.is_empty()) {
+        return Err("Couldn't save settings until API keys are secured in the system keychain".into());
+    }
     let mut on_disk = config.clone();
-    if config.provider_keys_migrated {
-        on_disk.api_key.clear();
-        on_disk.llm_api_key.clear();
-    }
-    if keychain_available {
-        on_disk.search_api_key.clear();
-    }
+    on_disk.api_key.clear();
+    on_disk.llm_api_key.clear();
+    on_disk.search_api_key.clear();
     serde_json::to_string_pretty(&on_disk).map_err(|e| e.to_string())
 }
 
 /// Temp file + rename, so a crash mid-write never leaves a truncated config.json.
 fn write_config(path: &Path, config: &TranscriptionConfig) -> Result<(), String> {
     let tmp = path.with_extension("json.tmp");
-    fs::write(&tmp, config_json(config, secrets::available())?).map_err(|e| e.to_string())?;
+    fs::write(&tmp, config_json(config)?).map_err(|e| e.to_string())?;
     fs::rename(&tmp, path).map_err(|e| e.to_string())
 }
 
@@ -470,12 +511,10 @@ fn write_config(path: &Path, config: &TranscriptionConfig) -> Result<(), String>
 pub fn update_config(app: &AppHandle, f: impl FnOnce(&mut TranscriptionConfig)) -> Result<(), String> {
     let state = app.state::<AppState>();
     let _serialized = state.config_write.lock().unwrap();
-    let updated = {
-        let mut config = state.config.lock().unwrap();
-        f(&mut config);
-        config.clone()
-    };
+    let mut updated = state.config.lock().unwrap().clone();
+    f(&mut updated);
     write_config(&state.db.app_dir.join(CONFIG_FILE), &updated)?;
+    *state.config.lock().unwrap() = updated.clone();
     let _ = app.emit("config-changed", &updated);
     Ok(())
 }
@@ -635,10 +674,34 @@ fn spawn_level_meter(app: &AppHandle, started: Instant) {
     tauri::async_runtime::spawn(async move {
         let state = app.state::<AppState>();
         while *state.recording_start.lock().unwrap() == Some(started) {
+            if state.recorder.interruption().is_some() {
+                let app = app.clone();
+                tauri::async_runtime::spawn_blocking(move || interrupt_capture(&app, started));
+                break;
+            }
             let _ = app.emit_to("hud", "mic-level", state.recorder.bars());
             tokio::time::sleep(Duration::from_millis(16)).await;
         }
     });
+}
+
+fn interrupt_capture(app: &AppHandle, started: Instant) {
+    let state = app.state::<AppState>();
+    let capture = {
+        let mut mode = state.mode.lock().unwrap();
+        if *mode == Mode::Idle || *state.recording_start.lock().unwrap() != Some(started) {
+            return;
+        }
+        let capture = end_capture(app, &state);
+        set_mode(app, &state, &mut mode, Mode::Idle);
+        capture
+    };
+    match capture {
+        Ok((recording, duration, session)) => {
+            tauri::async_runtime::spawn(process_recording(app.clone(), recording, duration, session));
+        }
+        Err(error) => report_error(app, error),
+    }
 }
 
 // Caller holds the mode lock. Keeps the engine's Esc/Enter arming in sync with `mode`.
@@ -661,6 +724,16 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     let (device, sound_on, mute, beta) = (
         config.input_device.clone(), config.sound_feedback, config.mute_background, config.beta_features,
     );
+    let target = frontmost::capture_context();
+    let context = target.as_ref().map(|target| target.context.clone());
+    let context_task = target.map(|target| {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        std::thread::spawn(move || {
+            let result = frontmost::resolve_context(target, purpose == Purpose::Command || beta);
+            let _ = tx.send(result);
+        });
+        rx
+    });
     let (live, input) = if config.stt_source == "cloud" && realtime::is_live_model(&config.model_name) {
         let vocabulary = if purpose == Purpose::Dictation { vocab_terms(&state.db) } else { Vec::new() };
         let (live, input) = realtime::LiveTranscription::start(&config, vocabulary).map_err(Notice::model_error)?;
@@ -704,12 +777,11 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         // After the start chime, so the user still hears it.
         output::mute_after(&state.db.app_dir, Duration::from_millis(if sound_on { 250 } else { 0 }));
     }
+    *state.session.lock().unwrap() = Some(Session {
+        purpose, context, selection: None, chime: sound_on, config, live, context_task, delivery: None,
+        recorded_at: (chrono::Utc::now() - chrono::Duration::from_std(started.elapsed()).unwrap_or_default()).to_rfc3339(),
+    });
     spawn_level_meter(app, started);
-    // The mic is already running; Accessibility lookups may take a moment.
-    let context = frontmost::current_context();
-    // Only commands (and voice activation, beta) use the selection.
-    let selection = if purpose == Purpose::Command || beta { frontmost::selected_text() } else { None };
-    *state.session.lock().unwrap() = Some(Session { purpose, context, selection, chime: sound_on, config, live });
     Ok(())
 }
 
@@ -730,6 +802,9 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         chime: false,
         config: state.config.lock().unwrap().clone(),
         live: None,
+        recorded_at: chrono::Utc::now().to_rfc3339(),
+        context_task: None,
+        delivery: None,
     });
     let duration_ms = state
         .recording_start
@@ -741,10 +816,13 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
     let recording = state.recorder.stop_recording(if session.chime { CHIME_TRIM_MS } else { 0 });
     // Microphone callbacks have stopped. Drain their queued audio and commit the live turn
     // immediately, in parallel with local denoising/history work.
-    if recording.is_ok() {
+    if recording.as_ref().is_ok_and(|recording| recording.interruption.is_none()) {
         if let Some(live) = session.live.as_mut() {
             live.finish_input();
         }
+    } else {
+        // Never commit a partial live turn after the input device fails.
+        session.live = None;
     }
     output::restore(&state.db.app_dir);
     // Only now: the stream is stopped, so the stop chime never lands in the audio.
@@ -752,6 +830,9 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         sound::play_stop_tone();
     }
     if recording.is_ok() {
+        if session.purpose == Purpose::Dictation {
+            session.delivery = Some(paste::reserve_delivery());
+        }
         job_started(app);
     }
     recording
@@ -850,6 +931,9 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
         }
         Effect::Stop => match end_capture(app, &state) {
             Ok((recording, duration_ms, session)) => match session.purpose {
+                _ if recording.interruption.is_some() => {
+                    tauri::async_runtime::spawn(process_recording(app.clone(), recording, duration_ms, session));
+                }
                 Purpose::Dictation => {
                     tauri::async_runtime::spawn(process_recording(app.clone(), recording, duration_ms, session));
                 }
@@ -921,6 +1005,18 @@ async fn finish_text(app: &AppHandle, db: &Database, raw: &str, config: &Transcr
     text
 }
 
+fn history_website(context: Option<&AppContext>) -> Option<String> {
+    context.and_then(|c| c.url.as_deref()).map(transcribe::host_of).filter(|host| !host.is_empty())
+}
+
+fn history_context(entry: &HistoryEntry) -> Option<AppContext> {
+    entry.app_bundle_id.clone().map(|bundle_id| AppContext {
+        name: entry.app_name.clone().unwrap_or_else(|| bundle_id.clone()),
+        bundle_id,
+        url: entry.website.clone(),
+    })
+}
+
 /// Transcribes, pastes and saves a dictation from `end_capture` (which counted the job);
 /// model failures are reported to the dictation bar; other failures stay in the main window.
 async fn process_recording(app: AppHandle, recording: Recording, duration_ms: i64, session: Session) {
@@ -942,9 +1038,16 @@ async fn transcribe_and_paste(
     mut session: Session,
 ) -> Result<Option<String>, Notice> {
     let state = app.state::<AppState>();
+    let interruption = recording.interruption.clone();
+    let had_samples = !recording.samples.is_empty();
+    if interruption.is_some() {
+        session.live = None;
+        session.delivery = None;
+    }
     let (wav, has_speech) = finish_recording(recording).await.map_err(Notice::error)?;
+    session.resolve_context().await;
     eprintln!("Dictation prepared: provider={} model={} duration_ms={} speech={} wav_bytes={}", session.config.stt_provider, session.config.model_name, duration_ms, has_speech, wav.len());
-    if !has_speech {
+    if !has_speech && interruption.is_none() {
         return Ok(None);
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -952,7 +1055,7 @@ async fn transcribe_and_paste(
 
     // Save audio file locally for history playback & retranscription
     let audio_file_path = state.db.app_dir.join("audio").join(&audio_filename);
-    let audio_saved = match fs::write(&audio_file_path, &wav) {
+    let audio_saved = had_samples && match fs::write(&audio_file_path, &wav) {
         Ok(()) => true,
         Err(e) => {
             report_error(app, format!("Couldn't save the recording: {}", e));
@@ -963,12 +1066,26 @@ async fn transcribe_and_paste(
     let config = session.config.clone();
     let context = session.context.clone();
     let row = HistoryEntry {
+        kind: if session.purpose == Purpose::Command { "command" } else { "dictation" }.into(),
+        created_at: session.recorded_at.clone(),
         duration_ms,
         audio_filename: audio_saved.then_some(audio_filename),
         app_name: context.as_ref().map(|c| c.name.clone()),
         app_bundle_id: context.as_ref().map(|c| c.bundle_id.clone()),
+        website: history_website(context.as_ref()),
         ..HistoryEntry::new(id.clone())
     };
+    if let Some(error) = interruption {
+        const MESSAGE: &str = "Recording was interrupted. Check your microphone.";
+        eprintln!("Recording interrupted: {error}");
+        if let Err(error) = state.db.insert_history(&HistoryEntry {
+            status: "failed".into(), error: Some(MESSAGE.into()), ..row
+        }) {
+            report_error(app, format!("Couldn't save to history: {error}"));
+        }
+        history_updated(app);
+        return Err(Notice::warning(MESSAGE));
+    }
     // Saved as "running" first: quitting mid-transcription leaves a record with Retry, not a lost dictation.
     let saved_early = audio_saved && state.db.insert_history(&HistoryEntry { status: "running".into(), ..row.clone() }).is_ok();
 
@@ -1012,14 +1129,32 @@ async fn transcribe_and_paste(
 
     let final_text = finish_text(app, &state.db, &raw, &config, context.as_ref()).await;
 
+    // Make a completed transcript recoverable before waiting for another delivery or touching the clipboard.
+    let entry = HistoryEntry { text: final_text.clone(), raw_text: raw, ..row };
+    let saved = if saved_early { state.db.update_history(&entry) } else { state.db.insert_history(&entry) };
+    if let Err(e) = saved {
+        // Keep the recording for recovery even if the database is unavailable.
+        report_error(app, format!("Couldn't save to history: {e}"));
+    }
+    history_updated(app);
+
     // Auto-paste into the active app. Without Accessibility access macOS silently drops the
     // synthetic Cmd+V, so leave the text on the clipboard and tell the user.
     let can_paste = app.state::<HotkeyEngine>().status().permission_granted;
     let keep_in_clipboard = config.copy_to_clipboard || !can_paste;
     let text = final_text.clone();
     let paste_app = app.clone();
+    let target_app_id = context.as_ref().map(|c| c.bundle_id.clone());
+    let delivery = session.delivery.take();
+    if let Some(ticket) = delivery.as_ref() {
+        ticket.wait().await;
+    }
     eprintln!("Dictation paste: target={:?} accessibility={} chars={}", context.as_ref().map(|c| c.bundle_id.as_str()), can_paste, final_text.chars().count());
-    match tauri::async_runtime::spawn_blocking(move || paste::paste_text(&paste_app, &text, keep_in_clipboard)).await {
+    match tauri::async_runtime::spawn_blocking(move || {
+        // The native operation owns its turn even if the awaiting task is cancelled.
+        let _delivery = delivery;
+        paste::paste_text_to(&paste_app, &text, keep_in_clipboard, target_app_id.as_deref())
+    }).await {
         Ok(Ok(())) if !can_paste => report_error(
             app,
             "Copied to clipboard: allow OpenGlaido in Privacy & Security › Accessibility to paste automatically",
@@ -1028,16 +1163,6 @@ async fn transcribe_and_paste(
         Ok(Err(e)) => report_error(app, format!("Couldn't paste: {}", e)),
         Err(e) => report_error(app, format!("Couldn't paste: {}", e)),
     }
-
-    let entry = HistoryEntry { text: final_text.clone(), raw_text: raw, ..row };
-    let saved = if saved_early { state.db.update_history(&entry) } else { state.db.insert_history(&entry) };
-    if let Err(e) = saved {
-        report_error(app, format!("Couldn't save to history: {}", e));
-        if audio_saved {
-            let _ = fs::remove_file(&audio_file_path);
-        }
-    }
-    history_updated(app);
 
     Ok(Some(final_text))
 }
@@ -1073,6 +1198,7 @@ async fn stop_recording_and_process(app: AppHandle, state: State<'_, AppState>) 
         capture.inspect_err(|e| report_error(&app, e))?
     };
     match session.purpose {
+        _ if recording.interruption.is_some() => process_recording(app, recording, duration_ms, session).await,
         Purpose::Dictation => process_recording(app, recording, duration_ms, session).await,
         Purpose::Command => {
             commands::run_recorded(app.clone(), recording, duration_ms, session).await;
@@ -1104,6 +1230,7 @@ async fn save_config(
     app: AppHandle,
     new_config: TranscriptionConfig,
     edited_model_keys: Option<Vec<String>>,
+    edited_search_provider: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<TranscriptionConfig, String> {
     if !["bottom", "raised", "high"].contains(&new_config.bar_location.as_str()) {
@@ -1120,9 +1247,13 @@ async fn save_config(
     if !old.provider_keys_migrated {
         hydrate_legacy_model_keys(&mut old)?;
     }
+    if !old.search_keys_migrated {
+        hydrate_legacy_search_key(&mut old)?;
+    }
     let edited = edited_model_keys.unwrap_or_default();
     let edited: Vec<&str> = edited.iter().map(String::as_str).collect();
     let model_keys = secrets::save_model_keys(&old, &mut new_config, &edited)?;
+    let search_key = secrets::save_search_key(&old, &mut new_config, edited_search_provider.as_deref())?;
     let engine = app.state::<HotkeyEngine>();
     // Only hotkeys that changed are (re)applied: one that failed to register at startup must not
     // make every unrelated setting fail to save.
@@ -1165,20 +1296,17 @@ async fn save_config(
         restore_hotkeys();
         return Err(e);
     }
-    if new_config.search_api_key != old.search_api_key {
-        if let Err(e) = secrets::set("search_api_key", &new_config.search_api_key) {
-            report_error(&app, e);
-        }
-    }
     if let Err(e) = write_config(&state.db.app_dir.join(CONFIG_FILE), &new_config) {
         restore_hotkeys();
         let _ = set_launch_at_login(&app, old.launch_at_login);
         return Err(format!("Couldn't save settings: {}", e));
     }
     model_keys.commit();
+    search_key.commit();
     if !old.provider_keys_migrated {
         remove_legacy_model_keys();
     }
+    if !old.search_keys_migrated { remove_legacy_search_key(); }
     apply_ui_settings(&app, &new_config, Some(&old));
 
     let mode = state.mode.lock().unwrap();
@@ -1239,12 +1367,27 @@ fn get_history(limit: Option<usize>, state: State<'_, AppState>) -> Result<Vec<H
 }
 
 #[tauri::command]
+async fn get_history_page(query: String, before: Option<db::HistoryCursor>, limit: Option<usize>, state: State<'_, AppState>) -> Result<Vec<HistoryEntry>, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.get_history_page(&query, before.as_ref(), limit.unwrap_or(100)))
+        .await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_history_stats(state: State<'_, AppState>) -> Result<db::HistoryStats, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.history_stats()).await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn get_search_provider_key(provider: String) -> Result<String, String> {
+    secrets::get_search_provider_key(&provider)
+}
+
+#[tauri::command]
 fn delete_history_entry(id: String, state: State<'_, AppState>) -> Result<(), String> {
-    if let Ok(entry) = state.db.get_history_entry(&id) {
-        if let Some(filename) = entry.audio_filename {
-            let path = state.db.app_dir.join("audio").join(filename);
-            let _ = fs::remove_file(path);
-        }
+    if state.db.get_history_entry(&id)?.status == "running" {
+        return Err("This recording is already being processed".into());
     }
     state.db.delete_history_entry(&id)
 }
@@ -1264,6 +1407,7 @@ fn get_audio_base64(id: String, state: State<'_, AppState>) -> Result<String, St
 /// Transcribes a record's audio again with the current settings and replaces its text.
 #[tauri::command]
 async fn retranscribe(app: AppHandle, id: String, state: State<'_, AppState>) -> Result<HistoryEntry, String> {
+    let _retry = state.db.begin_retry(&id)?;
     job_started(&app);
     let result = retranscribe_entry(&app, &id, &state).await;
     job_finished(&app);
@@ -1297,12 +1441,8 @@ async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState) -> Resu
             return Err(e);
         }
     };
-    // Same rule as the original dictation (the URL isn't stored, so app rules only).
-    let context = entry.app_bundle_id.clone().map(|bundle_id| AppContext {
-        name: entry.app_name.clone().unwrap_or_else(|| bundle_id.clone()),
-        bundle_id,
-        url: None,
-    });
+    // Retain the original website while using the user's current model and formatting settings.
+    let context = history_context(&entry);
     entry.text = finish_text(&app, &state.db, &raw, &config, context.as_ref()).await;
     entry.raw_text = raw;
     entry.status = "ok".into();
@@ -1565,6 +1705,9 @@ pub fn run() {
             setup::open_microphone_settings,
             setup::request_microphone_access,
             get_history,
+            get_history_page,
+            get_history_stats,
+            get_search_provider_key,
             delete_history_entry,
             get_audio_base64,
             retranscribe,
@@ -1797,31 +1940,79 @@ mod tests {
         assert!(load_config(&path).llm_api_key.is_empty());
         // No config yet: the defaults.
         fs::remove_file(&path).unwrap();
-        assert_eq!(load_config(&path), TranscriptionConfig { provider_keys_migrated: true, ..Default::default() });
+        assert_eq!(load_config(&path), TranscriptionConfig { provider_keys_migrated: true, search_keys_migrated: true, ..Default::default() });
         fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
-    fn migrated_model_keys_never_serialize_to_disk() {
+    fn credentials_never_fall_back_to_plaintext() {
         let mut config = TranscriptionConfig {
             provider_keys_migrated: true,
+            search_keys_migrated: true,
             api_key: "stt-secret".into(),
             llm_api_key: "llm-secret".into(),
             search_api_key: "search-secret".into(),
             ..Default::default()
         };
-        for available in [true, false] {
-            let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config, available).unwrap()).unwrap();
-            assert!(saved.api_key.is_empty() && saved.llm_api_key.is_empty());
-            assert_eq!(saved.search_api_key.is_empty(), available);
-            assert!(saved.provider_keys_migrated);
-        }
-        // Failed first-time migration must preserve a legacy plaintext key for retry.
+        let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config).unwrap()).unwrap();
+        assert!(saved.api_key.is_empty() && saved.llm_api_key.is_empty() && saved.search_api_key.is_empty());
+        assert!(saved.provider_keys_migrated && saved.search_keys_migrated);
+        // Failed first-time migration cannot rewrite or lose the original plaintext file.
         config.provider_keys_migrated = false;
-        let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config, false).unwrap()).unwrap();
-        assert_eq!(saved, config);
-        let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config, true).unwrap()).unwrap();
-        assert_eq!((saved.api_key, saved.llm_api_key), (config.api_key, config.llm_api_key));
+        assert!(config_json(&config).is_err());
+        config.provider_keys_migrated = true;
+        config.search_keys_migrated = false;
+        assert!(config_json(&config).is_err());
+        let dir = std::env::temp_dir().join(format!("og-key-migration-{}", uuid::Uuid::new_v4()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(CONFIG_FILE);
+        let original = serde_json::to_string(&config).unwrap();
+        fs::write(&path, &original).unwrap();
+        assert!(write_config(&path, &config).is_err());
+        assert_eq!(fs::read_to_string(&path).unwrap(), original);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn retry_retains_the_site_rule_without_storing_private_url_details() {
+        let config = TranscriptionConfig::default();
+        let original = AppContext { bundle_id: "com.google.Chrome".into(), name: "Chrome".into(), url: Some("https://mail.google.com/mail/u/0?secret=example#inbox".into()) };
+        let entry = HistoryEntry {
+            app_bundle_id: Some(original.bundle_id.clone()), app_name: Some(original.name.clone()),
+            website: history_website(Some(&original)), ..HistoryEntry::new("retry")
+        };
+        assert_eq!(entry.website.as_deref(), Some("mail.google.com"));
+        assert_eq!(config.formatting_for(Some(&original)), config.formatting_for(history_context(&entry).as_ref()));
+        let old = HistoryEntry { website: None, ..entry };
+        assert!(history_context(&old).unwrap().url.is_none());
+    }
+
+    #[tokio::test]
+    async fn session_context_is_bound_to_its_original_target_and_survives_cancelled_lookup() {
+        let original = AppContext { bundle_id: "com.google.Chrome".into(), name: "Chrome".into(), url: None };
+        let mut session = Session {
+            purpose: Purpose::Dictation, context: Some(original.clone()), selection: None,
+            chime: false, config: TranscriptionConfig::default(), live: None, context_task: None, delivery: None,
+            recorded_at: chrono::Utc::now().to_rfc3339(),
+        };
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        session.context_task = Some(rx);
+        tx.send((AppContext { bundle_id: "other.app".into(), name: "Other".into(), url: None }, Some("unrelated text".into()))).unwrap();
+        session.resolve_context().await;
+        assert_eq!(session.context, Some(original.clone()));
+        assert!(session.selection.is_none());
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        session.context_task = Some(rx);
+        drop(tx);
+        session.resolve_context().await;
+        assert_eq!(session.context, Some(original.clone()));
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        session.context_task = Some(rx);
+        let resolved = AppContext { url: Some("https://example.com".into()), ..original };
+        tx.send((resolved.clone(), Some("selected".into()))).unwrap();
+        session.resolve_context().await;
+        assert_eq!(session.context, Some(resolved));
+        assert_eq!(session.selection.as_deref(), Some("selected"));
     }
 
     #[test]

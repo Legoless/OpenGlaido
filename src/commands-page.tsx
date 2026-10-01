@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import {
@@ -161,9 +161,34 @@ function ToolDialog({ tool, config, onSave, onClose }: { tool: BuiltinTool } & C
   const needsSearch = tool.id === "web_search" || tool.id === "deep_research";
   const [provider, setProvider] = useState<string>(config.search_provider);
   const [key, setKey] = useState(config.search_api_key);
+  const keyDrafts = useRef(new Map([[config.search_provider as string, config.search_api_key]]));
+  const selectedProvider = useRef(provider);
+  const [loadingKey, setLoadingKey] = useState(false);
+  const [keyLoadFailed, setKeyLoadFailed] = useState(false);
   const [url, setUrl] = useState(config.searxng_url);
   const [error, setError] = useState<string | null>(null);
   const Icon = TOOL_ICONS[tool.id] ?? Globe;
+
+  const selectProvider = async (next: string) => {
+    selectedProvider.current = next;
+    setProvider(next);
+    setError(null);
+    setKeyLoadFailed(false);
+    setKey("");
+    if (next !== "brave" && next !== "tavily") { setLoadingKey(false); return; }
+    const cached = keyDrafts.current.get(next);
+    if (cached !== undefined) { setKey(cached); setLoadingKey(false); return; }
+    setLoadingKey(true);
+    try {
+      const saved = await invoke<string>("get_search_provider_key", { provider: next });
+      if (!keyDrafts.current.has(next)) keyDrafts.current.set(next, saved);
+      if (selectedProvider.current === next) setKey(keyDrafts.current.get(next)!);
+    } catch (e) {
+      if (selectedProvider.current === next) { setError(String(e)); setKeyLoadFailed(true); }
+    } finally {
+      if (selectedProvider.current === next) setLoadingKey(false);
+    }
+  };
 
   const save = async () => {
     const err = await onSave({
@@ -205,11 +230,11 @@ function ToolDialog({ tool, config, onSave, onClose }: { tool: BuiltinTool } & C
             <Dropdown
               value={provider}
               options={PROVIDERS.map((p) => ({ ...p, label: t(p.label) }))}
-              onChange={(v) => v && setProvider(v)}
+              onChange={(v) => v && void selectProvider(v)}
               className="w-[220px]"
             />
             {(provider === "brave" || provider === "tavily") && (
-              <TextInput type="password" value={key} onChange={setKey} placeholder={t("API key")} className="w-full" />
+              <TextInput type="password" value={key} onChange={(value) => { keyDrafts.current.set(provider, value); setKey(value); setKeyLoadFailed(false); setError(null); }} placeholder={t("API key")} className="w-full" />
             )}
             {provider === "searxng" && (
               <TextInput value={url} onChange={setUrl} placeholder="https://searx.example.org" className="w-full" />
@@ -220,7 +245,7 @@ function ToolDialog({ tool, config, onSave, onClose }: { tool: BuiltinTool } & C
             {error && <NoteText tone="error">{t(error)}</NoteText>}
             <div className="flex justify-end gap-2">
               <OutlineButton onClick={onClose}>{t("Cancel")}</OutlineButton>
-              <LimeButton onClick={save}>{t("Save")}</LimeButton>
+              <LimeButton onClick={save} disabled={loadingKey || keyLoadFailed}>{t("Save")}</LimeButton>
             </div>
           </div>
         )}

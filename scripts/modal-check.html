@@ -1,0 +1,127 @@
+<!doctype html>
+<!-- Run `bun run dev`, open /scripts/modal-check.html, then await runDialogChecks() and await runLegacyDialogChecks() in the console. -->
+<html lang="en"><head><meta charset="UTF-8"><title>Dialog regression check</title></head><body>
+<div id="root"></div>
+<script type="module">
+import React, { useState } from "react";
+import { createRoot } from "react-dom/client";
+import { DialogPortal, Modal, Dropdown, TextInput, useEscape } from "/src/ui.tsx";
+import { CommandPalette } from "/src/palette.tsx";
+import "/src/index.css";
+const e = React.createElement;
+function Recorder() {
+  useEscape(() => { throw Error("Recorder's owned Escape was intercepted"); }, true, true);
+  return e("input", { id: "recorder", autoFocus: true });
+}
+function Fixture() {
+  const [open, setOpen] = useState(false);
+  const [nested, setNested] = useState(false);
+  const [palette, setPalette] = useState(false);
+  const [recording, setRecording] = useState(false);
+  return e(React.Fragment, null,
+    e("button", { id: "trigger", onClick: () => setOpen(true) }, "Open"),
+    e("button", { id: "background" }, "Background"),
+    open && e(Modal, { onClose: () => setOpen(false), width: "w-[420px]" },
+      e("h2", null, "Test settings"),
+      e(TextInput, { value: "", onChange: () => {}, autoFocus: true }),
+      e(Dropdown, { value: "0", options: Array.from({ length: 13 }, (_, i) => ({ value: String(i), label: `Option ${i}` })), onChange: () => {}, search: "Filter options" }),
+      e("button", { id: "nested-trigger", onClick: () => setNested(true) }, "Nested"),
+      e("button", { id: "palette-trigger", onClick: () => setPalette(true) }, "Palette"),
+      e("button", { id: "recorder-trigger", onClick: () => setRecording(!recording) }, "Recorder"),
+      recording && e(Recorder),
+      nested && e(Modal, { onClose: () => setNested(false), width: "w-[300px]" },
+        e("h2", null, "Nested settings"), e("button", { id: "nested-first" }, "First"), e("button", { id: "nested-last" }, "Last"),
+        e("button", { id: "close-stack", onClick: () => { setNested(false); setOpen(false); } }, "Close stack"))),
+    e(CommandPalette, { open: palette, onClose: () => setPalette(false), onNavigate: () => {}, onAction: () => {}, config: null }),
+    e(DialogPortal, null, e("div", { id: "toast", role: "status", className: "fixed right-4 bottom-4 z-[80] flex w-[360px] max-w-[calc(100vw-32px)] items-start gap-3 rounded-[8px] border bg-background-card bg-linear-to-b p-4 shadow-2xl border-warning-border from-warning-surface to-warning-surface" },
+      e("p", { className: "gs-text-body-md-regular min-w-0 flex-1 break-words text-text-default select-text" }, "Warning notification"),
+      e("button", { id: "toast-dismiss", className: "shrink-0 text-text-disabled transition-colors hover:text-text-default" }, "×"))));
+}
+createRoot(document.getElementById("root")).render(e(React.StrictMode, null, e(Fixture)));
+const tick = () => new Promise(resolve => setTimeout(resolve, 30));
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const focus = node => {
+  node.focus();
+  // Background WKWebViews update activeElement but suppress focus events until activated.
+  if (!document.hasFocus()) node.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+};
+const click = async selector => { const node = document.querySelector(selector); node.focus(); node.click(); await tick(); };
+const escape = async composing => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true, isComposing: !!composing })); await tick(); };
+window.runDialogChecks = async () => {
+  const rect = el => [el.getBoundingClientRect().x, el.getBoundingClientRect().y, el.getBoundingClientRect().width, el.getBoundingClientRect().height];
+  const toastRect = JSON.stringify(rect(document.getElementById("toast")));
+  const checkToast = () => {
+    const focused = document.activeElement;
+    const toast = document.getElementById("toast");
+    const bounds = toast.getBoundingClientRect();
+    assert(JSON.stringify(rect(toast)) === toastRect, "Toast geometry must stay unchanged above every dialog");
+    assert(toast.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2)), "Toast must be visible above the current dialog");
+    assert(document.activeElement === focused && focused.closest("dialog[open]"), "Notification display must preserve modal focus");
+  };
+  await click("#trigger");
+  const parent = document.querySelector("dialog[open]");
+  assert(parent && parent.getAttribute("aria-modal") === "true", "Modal must use native modal semantics");
+  const reference = document.createElement("div");
+  reference.className = parent.className;
+  reference.innerHTML = parent.innerHTML;
+  document.body.append(reference);
+  assert(JSON.stringify(rect(parent.firstElementChild)) === JSON.stringify(rect(reference.firstElementChild)) && getComputedStyle(parent).backgroundColor === getComputedStyle(reference).backgroundColor, "Native dialog must preserve the original div overlay geometry and backdrop");
+  reference.remove();
+  assert(document.getElementById(parent.getAttribute("aria-labelledby"))?.textContent === "Test settings", "Dialog must have its visible heading as accessible name");
+  assert(parent.contains(document.activeElement), "Focus must enter the modal");
+  assert(document.activeElement.matches("input"), "Existing React autofocus must stay on the editor");
+  checkToast();
+  focus(document.getElementById("background"));
+  assert(parent.contains(document.activeElement), "Background must be inert");
+  await click("dialog button");
+  const filter = document.querySelector('input[placeholder="Filter options"]');
+  assert(filter && parent.contains(filter), "Portalled dropdown must stay inside the native modal");
+  filter.focus();
+  assert(document.activeElement === filter, "Dropdown must receive focus");
+  await escape(true);
+  assert(document.querySelector('input[placeholder="Filter options"]'), "IME Escape must not close overlays");
+  await escape();
+  assert(!document.querySelector('input[placeholder="Filter options"]') && parent.open, "Escape must close only the dropdown");
+  await click("#nested-trigger");
+  assert(document.querySelectorAll("dialog[open]").length === 2, "Nested modal must join the modal stack");
+  checkToast();
+  focus(document.getElementById("nested-trigger"));
+  assert(document.activeElement.id === "nested-first", "Lower modal must be inert");
+  document.getElementById("toast-dismiss").focus();
+  document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+  assert(document.activeElement.id === "nested-first", "Tab must wrap inside the modal");
+  document.activeElement.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", shiftKey: true, bubbles: true, cancelable: true }));
+  assert(document.activeElement.id === "toast-dismiss", "Shift+Tab must wrap inside the modal, including notifications");
+  await escape();
+  assert(document.querySelectorAll("dialog[open]").length === 1 && document.activeElement.id === "nested-trigger", "Nested close must restore focus to its trigger");
+  checkToast();
+  await click("#palette-trigger");
+  assert(document.querySelectorAll("dialog[open]").length === 2 && document.activeElement.matches('input[placeholder="Type a command or search..."]'), "Sibling palette must remain usable above Settings");
+  checkToast();
+  await escape();
+  assert(document.querySelectorAll("dialog[open]").length === 1 && document.activeElement.id === "palette-trigger", "Palette close must restore modal focus");
+  await click("#recorder-trigger");
+  await escape();
+  assert(parent.open && document.getElementById("recorder"), "Recorder must own Escape without closing Settings");
+  await click("#recorder-trigger");
+  await escape();
+  assert(!document.querySelector("dialog[open]") && document.activeElement.id === "trigger", "Final close must restore original focus");
+  assert(!document.querySelector("[inert]") && !document.querySelector('[aria-hidden="true"]'), "Closing the modal stack must release the background");
+  assert(document.getElementById("toast").parentElement === document.body && JSON.stringify(rect(document.getElementById("toast"))) === toastRect, "Toast must return to the main window without moving when the final modal closes");
+  await click("#trigger");
+  await click("#nested-trigger");
+  await click("#close-stack");
+  assert(!document.querySelector("dialog[open]") && !document.querySelector("[inert]") && !document.querySelector('[aria-hidden="true"]'), "Unmounting nested dialogs together must release the background");
+  assert(document.activeElement.id === "trigger" && document.getElementById("toast").parentElement === document.body, "Unmounting a whole stack must restore root focus and the toast host");
+  return "Passed: modal semantics, accessible name, focus entry/restoration, Tab wrapping, background inertness, portalled dropdowns, nested modal/palette, IME/recorder Escape, unchanged toast geometry/visibility.";
+};
+window.runLegacyDialogChecks = async () => {
+  const showModal = HTMLDialogElement.prototype.showModal;
+  const setAttribute = Element.prototype.setAttribute;
+  HTMLDialogElement.prototype.showModal = undefined;
+  // Simulate WebKit before both native modal dialogs and inert background support.
+  Element.prototype.setAttribute = function(name, value) { if (name !== "inert") return setAttribute.call(this, name, value); };
+  try { return await window.runDialogChecks(); }
+  finally { HTMLDialogElement.prototype.showModal = showModal; Element.prototype.setAttribute = setAttribute; }
+};
+</script></body></html>
