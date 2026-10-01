@@ -10,19 +10,18 @@ export type BarMessage = { message: string; level: "error" | "warning"; vars?: R
 
 // ------------------------------------------------------------------
 // HUD dictation bar (/#hud): one pill in a 420x72 window that morphs between
-// recording, processing and a warning/error message, and animates in and out.
+// recording and a warning/error message. Release hides it immediately.
 // ------------------------------------------------------------------
 const BAR_COUNT = 10;
 const MESSAGE_MS = { warning: 3500, error: 4500 };
 // Fraction of the remaining distance covered each frame. The microphone levels are already
 // eased; this only fills the steps between them, with no stored speed to ring past the level.
 const GLIDE = 0.22;
-type View = "recording" | "processing" | BarMessage["level"];
+type View = "recording" | BarMessage["level"];
 
 // Tint + 1px ring over the pill (tokens in index.css).
 const TONES: Record<View, string> = {
   recording: "inset-ring-border-default",
-  processing: "inset-ring-border-default",
   warning: "bg-warning-surface inset-ring-warning-border",
   error: "bg-error-surface inset-ring-error-border",
 };
@@ -31,7 +30,6 @@ const ICON_OFF = "scale-50 opacity-0 blur-[2px]";
 
 export function Hud() {
   const [isRecording, setIsRecording] = useState(false);
-  const [isProcessing, setIsProcessing] = useState(false);
   const recordingRef = useRef(false);
   const targets = useRef<number[]>(Array(BAR_COUNT).fill(0));
   const pos = useRef<number[]>(Array(BAR_COUNT).fill(0));
@@ -39,7 +37,7 @@ export function Hud() {
   // The last message stays rendered while the pill animates out; `messageOn` says it's current.
   const [message, setMessage] = useState<BarMessage | null>(null);
   const [messageOn, setMessageOn] = useState(false);
-  // "hud-visibility" false arrives ~220 ms before the backend hides the window.
+  // The backend hides the native window at the same time as this event.
   const [visible, setVisible] = useState(true);
   // What the pill shows; kept while it's hidden so it doesn't morph on the way out.
   const [view, setView] = useState<View>("recording");
@@ -56,11 +54,11 @@ export function Hud() {
     const unlistenRec = listen<boolean>("recording-status", (e) => {
       recordingRef.current = e.payload;
       setIsRecording(e.payload);
-      if (e.payload) setVisible(true);
-    });
-    const unlistenProc = listen<boolean>("processing-status", (e) => {
-      setIsProcessing(e.payload);
-      if (e.payload) setVisible(true);
+      if (e.payload) {
+        targets.current.fill(0);
+        pos.current.fill(0);
+        setVisible(true);
+      }
     });
     invoke<boolean>("get_recording_state")
       .then((recording) => {
@@ -72,7 +70,6 @@ export function Hud() {
       unlistenConfig.then((f) => f());
       unlistenVisibility.then((f) => f());
       unlistenRec.then((f) => f());
-      unlistenProc.then((f) => f());
     };
   }, []);
 
@@ -135,7 +132,7 @@ export function Hud() {
   }, []);
 
   const live: View | null =
-    messageOn && message ? message.level : isRecording ? "recording" : isProcessing ? "processing" : null;
+    messageOn && message ? message.level : isRecording ? "recording" : null;
   if (live && live !== view) setView(live);
   const shown = visible && live !== null;
   const isMessage = view === "warning" || view === "error";
@@ -154,8 +151,8 @@ export function Hud() {
           settled ? "transition-[width,height,opacity,scale,translate]" : "transition-[opacity,scale,translate]"
         } ${
           shown
-            ? "duration-[340ms] ease-[cubic-bezier(0.25,1.25,0.5,1)]"
-            : "translate-y-1 scale-90 opacity-0 duration-200 ease-in"
+            ? "duration-[120ms] ease-[cubic-bezier(0.25,1.25,0.5,1)]"
+            : "translate-y-1 scale-90 opacity-0 duration-0"
         }`}
       >
         <span
@@ -163,7 +160,7 @@ export function Hud() {
         />
         <div
           ref={contentRef}
-          className={`relative flex w-max shrink-0 items-center gap-2 ${view === "processing" ? "gs-waveform-processing" : ""}`}
+          className="relative flex w-max shrink-0 items-center gap-2"
         >
           <span className="relative size-[18px] shrink-0">
             <AudioLines className={`${ICON} text-text-accent ${isMessage ? ICON_OFF : ""}`} />

@@ -282,6 +282,16 @@ pub fn has_input_device() -> bool {
     cpal::default_host().default_input_device().is_some()
 }
 
+// Input/output endpoints can share a name. Skip output-only endpoints, but keep genuine
+// configuration failures so the caller reports them instead of silently changing microphones.
+fn is_input_config(config: &Result<cpal::SupportedStreamConfig, cpal::DefaultStreamConfigError>) -> bool {
+    match config {
+        Ok(config) => config.channels() > 0,
+        Err(cpal::DefaultStreamConfigError::StreamTypeNotSupported) => false,
+        Err(_) => true,
+    }
+}
+
 // Downmixes one callback chunk to mono, appends it and updates the bar levels.
 fn record_chunk<T: Copy>(
     data: &[T],
@@ -314,29 +324,51 @@ impl AudioRecorder {
     }
 
     fn event_loop(rx: Receiver<AudioCommand>, meter: Arc<BarMeter>) {
-        let mut _current_stream: Option<cpal::Stream> = None;
+        let mut current_stream: Option<cpal::Stream> = None;
         let samples = Arc::new(Mutex::new(Vec::new()));
         let mut sample_rate = 16000;
 
-        while let Ok(cmd) = rx.recv() {
+        loop {
+            let cmd = rx.recv();
+            // ponytail: CPAL 0.15's CoreAudio listener retains named streams; upgrade CPAL
+            // to reclaim them. Pause before drop so stop/cancel/replacement/shutdown end capture.
+            if let Some(stream) = current_stream.take() {
+                if let Err(e) = stream.pause() {
+                    eprintln!("Failed to stop audio stream: {e}");
+                }
+            }
+            meter.clear();
+            let Ok(cmd) = cmd else { break };
             match cmd {
                 AudioCommand::Start(device_name, reply) => {
                     let host = cpal::default_host();
                     let named = device_name.as_deref().and_then(|name| {
-                        host.input_devices()
+                        // input_devices() opens audio units for every device on macOS. Only
+                        // query matching names, and reuse the config needed to build the stream.
+                        host.devices()
                             .ok()?
-                            .find(|d| d.name().is_ok_and(|n| n == name))
+                            .filter(|d| d.name().is_ok_and(|n| n == name))
+                            .find_map(|device| {
+                                let config = device.default_input_config();
+                                is_input_config(&config).then_some((device, config))
+                            })
                     });
                     let fell_back = device_name.is_some() && named.is_none();
-                    let device = match named.or_else(|| host.default_input_device()) {
-                        Some(d) => d,
+                    let input = named.or_else(|| {
+                        host.default_input_device().map(|device| {
+                            let config = device.default_input_config();
+                            (device, config)
+                        })
+                    });
+                    let (device, config) = match input {
+                        Some(input) => input,
                         None => {
                             let _ = reply.send(Err("No audio input device found".to_string()));
                             continue;
                         }
                     };
 
-                    let supported_config = match device.default_input_config() {
+                    let supported_config = match config {
                         Ok(c) => c,
                         Err(e) => {
                             let _ = reply.send(Err(format!("Input config error: {}", e)));
@@ -348,7 +380,6 @@ impl AudioRecorder {
                     sample_rate = supported_config.sample_rate().0;
 
                     samples.lock().unwrap().clear();
-                    meter.clear();
 
                     let err_fn = |err| eprintln!("Audio stream error: {err}");
                     let samples_clone = Arc::clone(&samples);
@@ -402,9 +433,10 @@ impl AudioRecorder {
                     match stream_res {
                         Ok(stream) => {
                             if let Err(e) = stream.play() {
+                                let _ = stream.pause();
                                 let _ = reply.send(Err(format!("Failed to start stream: {}", e)));
                             } else {
-                                _current_stream = Some(stream);
+                                current_stream = Some(stream);
                                 let _ = reply.send(Ok(fell_back));
                             }
                         }
@@ -414,8 +446,6 @@ impl AudioRecorder {
                     }
                 }
                 AudioCommand::Stop(skip_ms, reply) => {
-                    _current_stream = None;
-                    meter.clear();
                     let recorded = {
                         let mut s = samples.lock().unwrap();
                         std::mem::take(&mut *s)
@@ -434,8 +464,6 @@ impl AudioRecorder {
                     }));
                 }
                 AudioCommand::Cancel => {
-                    _current_stream = None;
-                    meter.clear();
                     let mut s = samples.lock().unwrap();
                     s.clear();
                 }
@@ -495,6 +523,21 @@ impl AudioRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_input_skips_output_endpoints_without_hiding_config_failures() {
+        use cpal::DefaultStreamConfigError::{DeviceNotAvailable, StreamTypeNotSupported};
+        let config = |channels| Ok(cpal::SupportedStreamConfig::new(
+            channels,
+            cpal::SampleRate(48_000),
+            cpal::SupportedBufferSize::Unknown,
+            cpal::SampleFormat::F32,
+        ));
+        assert!(!is_input_config(&Err(StreamTypeNotSupported)));
+        assert!(!is_input_config(&config(0)));
+        assert!(is_input_config(&config(1)));
+        assert!(is_input_config(&Err(DeviceNotAvailable)));
+    }
 
     #[test]
     fn resample_lengths_and_endpoints() {

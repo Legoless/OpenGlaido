@@ -35,9 +35,13 @@ const TRAY_ID: &str = "main";
 const CONFIG_FILE: &str = "config.json";
 /// Hold-to-talk presses shorter than this are treated as accidental taps and cancelled.
 const MIN_HOLD: Duration = Duration::from_millis(300);
-/// A modifier-only hold only starts the mic (chime, mute, Accessibility lookups) once the key has
-/// been held alone this long, so ⌥←, ⌥e or fn+arrows never flash a recording.
+/// Give another key time to complete a modifier shortcut. Fn is the primary dictation key,
+/// so it uses a shorter grace period; ordinary editing modifiers retain the longer one.
 const HOLD_START_DELAY: Duration = Duration::from_millis(150);
+
+fn hold_start_delay(binding: &str) -> Duration {
+    if binding == "Fn" { Duration::from_millis(60) } else { HOLD_START_DELAY }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
@@ -58,8 +62,8 @@ enum Effect {
     Cancel,
 }
 
-/// Recording state machine. `held` = time since the recording started.
-fn transition(mode: Mode, event: HotkeyEvent, held: Duration) -> (Mode, Effect) {
+/// Recording state machine. `held` = time since the press; `pending` = mic start still delayed.
+fn transition(mode: Mode, event: HotkeyEvent, held: Duration, pending: bool) -> (Mode, Effect) {
     use HotkeyEvent::*;
     use Mode::*;
     match (mode, event) {
@@ -68,7 +72,7 @@ fn transition(mode: Mode, event: HotkeyEvent, held: Duration) -> (Mode, Effect) 
         (Hold, HoldReleased) if held < MIN_HOLD => (Idle, Effect::Cancel),
         (Hold, HoldReleased) => (Idle, Effect::Stop),
         (Hold, HoldAborted) => (Idle, Effect::Cancel),
-        (Hold, TogglePressed) => (HandsFree, Effect::None),
+        (Hold, TogglePressed) => (HandsFree, if pending { Effect::Start } else { Effect::None }),
         (HandsFree, HoldPressed) => (HandsFreeHoldDown, Effect::None),
         (HandsFreeHoldDown, HoldAborted) => (HandsFree, Effect::None),
         (HandsFreeHoldDown, HoldReleased) => (Idle, Effect::Stop),
@@ -96,7 +100,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     /// Hotkey and tray events with the time they happened, handled in order on one worker thread.
     pub events: Sender<(HotkeyEvent, Instant)>,
-    /// Transcriptions in flight: the bar shows "processing" while > 0.
+    /// Transcriptions in flight; processing must not keep the recording bar visible.
     pub jobs: AtomicUsize,
     /// The dictation bar stays visible until then to show a message.
     pub error_until: Mutex<Option<Instant>>,
@@ -250,63 +254,73 @@ pub fn show_passive(window: &tauri::WebviewWindow) -> Result<(), String> {
     window.show().map_err(|e| e.to_string())
 }
 
-/// How long the HUD has to animate out between "hud-visibility" false and the window hiding.
-const HUD_HIDE_DELAY: Duration = Duration::from_millis(220);
-
-/// The dictation bar's last "hud-visibility" and whether its window is hidden; `changes` tells a
-/// delayed hide whether the bar was shown again meanwhile.
+/// The dictation bar's visibility; `changes` invalidates queued shows after a release.
 pub struct HudVisibility {
     shown: bool,
     hidden: bool,
     changes: u64,
 }
 
-/// Shows the dictation bar only while recording, processing or showing a message (like Glaido), on
-/// the display with the pointer when it appears. "hud-visibility" goes out before it shows and
-/// HUD_HIDE_DELAY before it hides.
-pub fn update_hud(app: &AppHandle) {
-    let (Some(state), Some(hud)) = (app.try_state::<AppState>(), app.get_webview_window("hud")) else { return };
-    let showing_error = state.error_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
-    let busy = state.recording.load(Ordering::SeqCst) || state.jobs.load(Ordering::SeqCst) > 0;
-    let show = busy || showing_error;
-    let mut bar = state.hud.lock().unwrap();
-    let changed = bar.shown != show;
-    if changed {
-        bar.shown = show;
-        bar.changes += 1;
-        // Under the lock, so the HUD hears the changes in order.
-        let _ = app.emit("hud-visibility", show);
+impl HudVisibility {
+    fn update(&mut self, recording: bool, showing_error: bool) -> bool {
+        let show = recording || showing_error;
+        if self.shown == show {
+            return false;
+        }
+        self.shown = show;
+        self.changes += 1;
+        true
     }
-    if show {
-        let appear = std::mem::take(&mut bar.hidden);
-        drop(bar);
-        if appear {
-            let location = state.config.lock().unwrap().bar_location.clone();
-            position_hud(app, &location);
-        }
-        if let Err(e) = show_passive(&hud) {
-            eprintln!("Failed to show the dictation bar: {}", e);
-        }
-    } else if changed {
-        let change = bar.changes;
-        drop(bar);
-        let app = app.clone();
-        std::thread::spawn(move || {
-            std::thread::sleep(HUD_HIDE_DELAY);
-            let state = app.state::<AppState>();
-            // Under the lock, so a show can't slip in between.
-            let mut bar = state.hud.lock().unwrap();
-            if bar.changes == change {
-                bar.hidden = true;
-                if let Err(e) = hud.hide() {
-                    eprintln!("Failed to hide the dictation bar: {}", e);
-                }
-            }
-        });
+
+    fn can_show(&self, change: u64) -> bool {
+        self.shown && self.changes == change
     }
 }
 
-/// Counts a transcription in flight (the bar shows "processing" while any runs).
+/// Shows the dictation bar while recording or showing a message, on the display with the
+/// pointer. Release hides it immediately; transcription continues without keeping it visible.
+pub fn update_hud(app: &AppHandle) {
+    let (Some(state), Some(hud)) = (app.try_state::<AppState>(), app.get_webview_window("hud")) else { return };
+    let mut bar = state.hud.lock().unwrap();
+    let showing_error = state.error_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
+    let changed = bar.update(state.recording.load(Ordering::SeqCst), showing_error);
+    if changed {
+        // Under the lock, so the HUD hears the changes in order.
+        let _ = app.emit("hud-visibility", bar.shown);
+    }
+    if bar.shown {
+        let appear = std::mem::take(&mut bar.hidden);
+        let change = bar.changes;
+        drop(bar);
+        let location = appear.then(|| state.config.lock().unwrap().bar_location.clone());
+        let app = app.clone();
+        let window = hud.clone();
+        // One main-thread dispatch: positioning must not hold up microphone startup with
+        // separate blocking round trips for each monitor/window query.
+        if let Err(e) = hud.run_on_main_thread(move || {
+            let state = app.state::<AppState>();
+            let bar = state.hud.lock().unwrap();
+            if !bar.can_show(change) {
+                return;
+            }
+            if let Some(location) = location {
+                position_hud_now(&app, &location);
+            }
+            if let Err(e) = show_passive(&window) {
+                eprintln!("Failed to show the dictation bar: {}", e);
+            }
+        }) {
+            eprintln!("Failed to show the dictation bar: {}", e);
+        }
+    } else if changed {
+        bar.hidden = true;
+        if let Err(e) = hud.hide() {
+            eprintln!("Failed to hide the dictation bar: {}", e);
+        }
+    }
+}
+
+/// Counts transcriptions in flight independently of recording/HUD visibility.
 pub fn job_started(app: &AppHandle) {
     let state = app.state::<AppState>();
     if state.jobs.fetch_add(1, Ordering::SeqCst) == 0 {
@@ -604,10 +618,20 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         let c = state.config.lock().unwrap();
         (c.input_device.clone(), c.sound_feedback, c.mute_background, c.beta_features)
     };
-    let fell_back = state
-        .recorder
-        .start_recording(device.as_deref())
-        .map_err(|e| Notice::error(format!("Couldn't start recording: {}", e)))?;
+    // Acknowledge the press while the device opens. Bars stay at rest until real mic levels
+    // arrive; the start chime still means the microphone is ready.
+    *state.recording_start.lock().unwrap() = Some(started);
+    state.recording.store(true, Ordering::SeqCst);
+    let _ = app.emit("recording-status", true);
+    update_hud(app);
+    let fell_back = match state.recorder.start_recording(device.as_deref()) {
+        Ok(fell_back) => fell_back,
+        Err(e) => {
+            *state.recording_start.lock().unwrap() = None;
+            end_recording_feedback(app, state);
+            return Err(Notice::error(format!("Couldn't start recording: {}", e)));
+        }
+    };
     if fell_back {
         let mut vars = BTreeMap::new();
         vars.insert("name".into(), device.unwrap_or_default());
@@ -620,8 +644,6 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         );
     }
 
-    *state.recording_start.lock().unwrap() = Some(started);
-    state.recording.store(true, Ordering::SeqCst);
     if sound_on {
         sound::play_start_tone();
     }
@@ -630,8 +652,6 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         output::mute_after(&state.db.app_dir, Duration::from_millis(if sound_on { 250 } else { 0 }));
     }
     spawn_level_meter(app, started);
-    let _ = app.emit("recording-status", true);
-    update_hud(app);
     // The mic is already running; Accessibility lookups may take a moment.
     let context = frontmost::current_context();
     // Only commands (and voice activation, beta) use the selection.
@@ -640,8 +660,16 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     Ok(())
 }
 
+// Hide before microphone teardown or output restoration can block the hotkey worker.
+fn end_recording_feedback(app: &AppHandle, state: &AppState) {
+    state.recording.store(false, Ordering::SeqCst);
+    let _ = app.emit("recording-status", false);
+    update_hud(app);
+}
+
 // Caller holds the mode lock. Returns the recording, its duration and its session.
 fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Session), String> {
+    end_recording_feedback(app, state);
     let session = state.session.lock().unwrap().take().unwrap_or(Session {
         purpose: Purpose::Dictation,
         context: None,
@@ -655,19 +683,15 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         .take()
         .map(|s| s.elapsed().as_millis() as i64)
         .unwrap_or(0);
-    output::restore(&state.db.app_dir);
     let recording = state.recorder.stop_recording(if session.chime { CHIME_TRIM_MS } else { 0 });
+    output::restore(&state.db.app_dir);
     // Only now: the stream is stopped, so the stop chime never lands in the audio.
     if session.chime {
         sound::play_stop_tone();
     }
-    // processing before !recording, so the bar never flashes idle in between.
     if recording.is_ok() {
         job_started(app);
     }
-    state.recording.store(false, Ordering::SeqCst);
-    let _ = app.emit("recording-status", false);
-    update_hud(app);
     recording
         .map(|r| (r, duration_ms, session))
         .map_err(|e| format!("Recording failed: {}", e))
@@ -675,13 +699,11 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
 
 // Caller holds the mode lock.
 fn cancel_capture(app: &AppHandle, state: &AppState) {
+    end_recording_feedback(app, state);
     state.recorder.cancel();
     *state.recording_start.lock().unwrap() = None;
     *state.session.lock().unwrap() = None;
     output::restore(&state.db.app_dir);
-    state.recording.store(false, Ordering::SeqCst);
-    let _ = app.emit("recording-status", false);
-    update_hud(app);
 }
 
 /// Command hotkeys drive the same state machine as dictation; the purpose decides what a
@@ -713,16 +735,13 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
         return;
     }
     // Event timestamps, so a slow mic start doesn't shorten the measured hold.
-    let held = state
-        .recording_start
-        .lock()
-        .unwrap()
-        .map_or(Duration::ZERO, |t| at.saturating_duration_since(t));
-    let (next, effect) = transition(*mode, event, held);
+    let started = *state.recording_start.lock().unwrap();
+    let held = started.map_or(Duration::ZERO, |t| at.saturating_duration_since(t));
     let not_started = state.pending_start.lock().unwrap().take().is_some();
+    let (next, effect) = transition(*mode, event, held, not_started);
     match effect {
         Effect::None => {
-            // Still waiting to start (e.g. hold → hands-free upgrade): keep waiting.
+            // An ignored event keeps the original delayed start armed.
             if not_started {
                 *state.pending_start.lock().unwrap() = Some(state.start_token.load(Ordering::SeqCst));
             }
@@ -731,17 +750,16 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
             if event == HotkeyEvent::HoldPressed
                 && app.state::<HotkeyEngine>().hold_is_modifier_only((purpose == Purpose::Command) as usize) =>
         {
-            // Before the mode flips to recording, so a missing permission doesn't flash the waveform.
-            if let Some(issue) = setup::blocker(app, purpose) {
-                report_notice(app, &Notice::from_issue(issue));
-                return;
-            }
             let token = state.start_token.fetch_add(1, Ordering::SeqCst) + 1;
             *state.pending_start.lock().unwrap() = Some(token);
             *state.recording_start.lock().unwrap() = Some(at);
+            let delay = {
+                let c = state.config.lock().unwrap();
+                hold_start_delay(if purpose == Purpose::Command { &c.commands_hold } else { &c.hotkey_hold })
+            };
             let app = app.clone();
             std::thread::spawn(move || {
-                std::thread::sleep(HOLD_START_DELAY);
+                std::thread::sleep(delay.saturating_sub(at.elapsed()));
                 let state = app.state::<AppState>();
                 let mut mode = state.mode.lock().unwrap();
                 if *state.pending_start.lock().unwrap() != Some(token) || *mode == Mode::Idle {
@@ -755,8 +773,10 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
             });
         }
         Effect::Start => {
-            if let Err(e) = begin_capture(app, &state, at, purpose) {
-                state.recording.store(false, Ordering::SeqCst);
+            // A confirmed toggle chord needn't wait; taking its token above disarms the timer.
+            let started = if not_started { started.unwrap_or(at) } else { at };
+            if let Err(e) = begin_capture(app, &state, started, purpose) {
+                set_mode(app, &state, &mut mode, Mode::Idle);
                 report_notice(app, &e);
                 return;
             }
@@ -764,6 +784,7 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
         // Released/aborted/cancelled before the mic ever started: nothing to stop.
         Effect::Stop | Effect::Cancel if not_started => {
             *state.recording_start.lock().unwrap() = None;
+            end_recording_feedback(app, &state);
         }
         Effect::Stop => match end_capture(app, &state) {
             Ok((recording, duration_ms, session)) => match session.purpose {
@@ -1546,6 +1567,41 @@ mod tests {
     const LONG: Duration = Duration::from_millis(900);
 
     #[test]
+    fn releasing_recording_hides_hud_and_invalidates_queued_shows() {
+        let mut hud = HudVisibility { shown: false, hidden: true, changes: 0 };
+        assert!(hud.update(true, false));
+        let first_recording = hud.changes;
+        assert!(hud.can_show(first_recording));
+        assert!(hud.update(false, false));
+        assert!(!hud.shown);
+        assert!(!hud.can_show(first_recording));
+        // Background job completions cannot make a stopped recording visible again.
+        assert!(!hud.update(false, false));
+        assert!(!hud.shown);
+        // A quick new recording has its own show; the old queued one stays invalid.
+        assert!(hud.update(true, false));
+        assert!(!hud.can_show(first_recording));
+        assert!(hud.can_show(hud.changes));
+        // Errors still appear after release, and disappear when their lifetime ends.
+        assert!(!hud.update(false, true));
+        assert!(hud.shown);
+        assert!(hud.update(false, false));
+        assert!(!hud.shown);
+    }
+
+    #[test]
+    fn fn_hold_responds_promptly_without_speeding_up_editing_modifiers() {
+        assert_eq!(hold_start_delay("Fn"), Duration::from_millis(60));
+        for binding in ["AltRight", "ControlLeft", "ShiftLeft", "MetaRight", "Fn+AltRight"] {
+            assert_eq!(hold_start_delay(binding), Duration::from_millis(150));
+        }
+        // Releasing or completing another shortcut during the grace period still cancels.
+        for event in [HoldReleased, HoldAborted, Cancel] {
+            assert_eq!(transition(Mode::Hold, event, Duration::from_millis(30), true), (Mode::Idle, Effect::Cancel));
+        }
+    }
+
+    #[test]
     fn notice_keeps_placeholders_until_filled() {
         let mut vars = BTreeMap::new();
         vars.insert("name".into(), "MacBook Pro Microphone".into());
@@ -1557,42 +1613,54 @@ mod tests {
 
     #[test]
     fn hold_to_talk() {
-        assert_eq!(transition(Mode::Idle, HoldPressed, Duration::ZERO), (Mode::Hold, Effect::Start));
-        assert_eq!(transition(Mode::Hold, HoldReleased, LONG), (Mode::Idle, Effect::Stop));
-        assert_eq!(transition(Mode::Hold, HoldReleased, SHORT), (Mode::Idle, Effect::Cancel));
-        assert_eq!(transition(Mode::Hold, HoldAborted, LONG), (Mode::Idle, Effect::Cancel));
-        assert_eq!(transition(Mode::Hold, Cancel, LONG), (Mode::Idle, Effect::Cancel));
-        assert_eq!(transition(Mode::Hold, Submit, LONG), (Mode::Hold, Effect::None));
+        assert_eq!(transition(Mode::Idle, HoldPressed, Duration::ZERO, false), (Mode::Hold, Effect::Start));
+        assert_eq!(transition(Mode::Hold, HoldReleased, LONG, false), (Mode::Idle, Effect::Stop));
+        assert_eq!(transition(Mode::Hold, HoldReleased, SHORT, false), (Mode::Idle, Effect::Cancel));
+        assert_eq!(transition(Mode::Hold, HoldAborted, LONG, false), (Mode::Idle, Effect::Cancel));
+        assert_eq!(transition(Mode::Hold, Cancel, LONG, false), (Mode::Idle, Effect::Cancel));
+        assert_eq!(transition(Mode::Hold, Submit, LONG, false), (Mode::Hold, Effect::None));
     }
 
     #[test]
     fn hands_free() {
-        assert_eq!(transition(Mode::Idle, TogglePressed, Duration::ZERO), (Mode::HandsFree, Effect::Start));
+        assert_eq!(transition(Mode::Idle, TogglePressed, Duration::ZERO, false), (Mode::HandsFree, Effect::Start));
         // Hold → hands-free keeps recording; the later hold release is ignored.
-        assert_eq!(transition(Mode::Hold, TogglePressed, SHORT), (Mode::HandsFree, Effect::None));
-        assert_eq!(transition(Mode::HandsFree, HoldReleased, LONG), (Mode::HandsFree, Effect::None));
-        assert_eq!(transition(Mode::HandsFree, TogglePressed, LONG), (Mode::Idle, Effect::Stop));
-        assert_eq!(transition(Mode::HandsFree, Submit, LONG), (Mode::Idle, Effect::Stop));
-        assert_eq!(transition(Mode::HandsFree, Cancel, LONG), (Mode::Idle, Effect::Cancel));
+        assert_eq!(transition(Mode::Hold, TogglePressed, SHORT, false), (Mode::HandsFree, Effect::None));
+        assert_eq!(transition(Mode::HandsFree, HoldReleased, LONG, false), (Mode::HandsFree, Effect::None));
+        assert_eq!(transition(Mode::HandsFree, TogglePressed, LONG, false), (Mode::Idle, Effect::Stop));
+        assert_eq!(transition(Mode::HandsFree, Submit, LONG, false), (Mode::Idle, Effect::Stop));
+        assert_eq!(transition(Mode::HandsFree, Cancel, LONG, false), (Mode::Idle, Effect::Cancel));
+    }
+
+    #[test]
+    fn pending_hold_starts_on_toggle_and_still_cancels() {
+        // Fn then Space confirms intent before the modifier-only guard expires.
+        assert_eq!(transition(Mode::Hold, TogglePressed, SHORT, true), (Mode::HandsFree, Effect::Start));
+        assert_eq!(transition(Mode::Hold, TogglePressed, SHORT, false), (Mode::HandsFree, Effect::None));
+        // A short tap, another shortcut, or Esc must cancel even before capture starts.
+        for event in [HoldReleased, HoldAborted, Cancel] {
+            assert_eq!(transition(Mode::Hold, event, SHORT, true), (Mode::Idle, Effect::Cancel));
+        }
+        assert_eq!(transition(Mode::Hold, HoldPressed, SHORT, true), (Mode::Hold, Effect::None));
     }
 
     #[test]
     fn hold_key_stops_hands_free_on_release_only() {
         // Fn alone: stop on release.
-        assert_eq!(transition(Mode::HandsFree, HoldPressed, LONG), (Mode::HandsFreeHoldDown, Effect::None));
-        assert_eq!(transition(Mode::HandsFreeHoldDown, HoldReleased, LONG), (Mode::Idle, Effect::Stop));
+        assert_eq!(transition(Mode::HandsFree, HoldPressed, LONG, false), (Mode::HandsFreeHoldDown, Effect::None));
+        assert_eq!(transition(Mode::HandsFreeHoldDown, HoldReleased, LONG, false), (Mode::Idle, Effect::Stop));
         // Fn+Space: stops once on the toggle; the trailing Fn release is a no-op when idle.
-        assert_eq!(transition(Mode::HandsFreeHoldDown, TogglePressed, LONG), (Mode::Idle, Effect::Stop));
-        assert_eq!(transition(Mode::Idle, HoldReleased, LONG), (Mode::Idle, Effect::None));
+        assert_eq!(transition(Mode::HandsFreeHoldDown, TogglePressed, LONG, false), (Mode::Idle, Effect::Stop));
+        assert_eq!(transition(Mode::Idle, HoldReleased, LONG, false), (Mode::Idle, Effect::None));
         // Fn + another key: keep dictating.
-        assert_eq!(transition(Mode::HandsFreeHoldDown, HoldAborted, LONG), (Mode::HandsFree, Effect::None));
-        assert_eq!(transition(Mode::HandsFreeHoldDown, Cancel, LONG), (Mode::Idle, Effect::Cancel));
+        assert_eq!(transition(Mode::HandsFreeHoldDown, HoldAborted, LONG, false), (Mode::HandsFree, Effect::None));
+        assert_eq!(transition(Mode::HandsFreeHoldDown, Cancel, LONG, false), (Mode::Idle, Effect::Cancel));
     }
 
     #[test]
     fn idle_ignores_everything_but_start() {
         for ev in [HoldReleased, HoldAborted, Cancel, Submit] {
-            assert_eq!(transition(Mode::Idle, ev, LONG), (Mode::Idle, Effect::None));
+            assert_eq!(transition(Mode::Idle, ev, LONG, false), (Mode::Idle, Effect::None));
         }
     }
 
