@@ -290,7 +290,7 @@ pub fn handle_hotkey(app: &AppHandle, event: HotkeyEvent) {
 // ---- flows ----
 
 /// A finished recording from the commands hotkey (lib.rs worker / async runtime).
-pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i64, session: Session) {
+pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i64, mut session: Session) {
     let c = commands(&app);
     // Holding the hotkey again while an answer is shown refines it.
     let open = is_open(&app);
@@ -319,8 +319,12 @@ pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i6
     }
     show_window(&app);
 
-    let config = app.state::<AppState>().config.lock().unwrap().clone();
-    let instruction = match transcribe_raw(&app, wav, &config, None).await {
+    let config = session.config.clone();
+    let transcription = match session.live.take() {
+        Some(live) => live.finish().await,
+        None => transcribe_raw(&app, wav, &config, Vec::new()).await,
+    };
+    let instruction = match transcription {
         Ok(t) if t.chars().any(char::is_alphanumeric) => t,
         Ok(_) => return update(&app, generation, |r| fail(r, "No speech detected")),
         Err(e) => return update(&app, generation, |r| fail(r, &e)),

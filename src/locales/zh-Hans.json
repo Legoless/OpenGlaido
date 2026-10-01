@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "从 OpenGlaido 中移除？",
  "Replaces “{phrase}”": "替换“{phrase}”",
  "Searching the web for “{query}”": "正在网上搜索“{query}”",
- "Searching your history for “{query}”": "正在历史记录中搜索“{query}”"
+ "Searching your history for “{query}”": "正在历史记录中搜索“{query}”",
+ "After recording": "录音后",
+ "Real time": "实时",
+ "Streams while you speak; pastes when you stop.": "说话时实时转写，停止录音后粘贴。",
+ "Transcribes after you stop recording.": "停止录音后进行转写。",
+ "Transcription failed: live transcription timed out": "转写失败：实时转写超时",
+ "Transcription failed: live transcription connection was interrupted": "转写失败：实时转写连接中断",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "转写失败：连接速度过慢，无法实时传输音频；请从历史记录重试",
+ "Transcription failed: invalid audio recording": "转写失败：录音无效",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "词典提示会使 ElevenLabs 费用增加 20%（实时转写最多 50 条，录音后转写最多 100 条）。"
 }

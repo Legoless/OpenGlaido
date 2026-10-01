@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "OpenGlaido에서 제거할까요?",
  "Replaces “{phrase}”": "‘{phrase}’ 대체",
  "Searching the web for “{query}”": "웹에서 ‘{query}’ 검색 중",
- "Searching your history for “{query}”": "기록에서 ‘{query}’ 검색 중"
+ "Searching your history for “{query}”": "기록에서 ‘{query}’ 검색 중",
+ "After recording": "녹음 후",
+ "Real time": "실시간",
+ "Streams while you speak; pastes when you stop.": "말하는 동안 받아쓰고, 녹음을 멈추면 붙여넣습니다.",
+ "Transcribes after you stop recording.": "녹음을 멈춘 후 받아씁니다.",
+ "Transcription failed: live transcription timed out": "받아쓰기 실패: 실시간 받아쓰기 시간이 초과되었습니다",
+ "Transcription failed: live transcription connection was interrupted": "받아쓰기 실패: 실시간 받아쓰기 연결이 끊겼습니다",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "받아쓰기 실패: 연결이 너무 느려 실시간 오디오를 전송할 수 없습니다. 기록에서 다시 시도하세요",
+ "Transcription failed: invalid audio recording": "받아쓰기 실패: 유효하지 않은 오디오 녹음입니다",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "사전 힌트를 사용하면 ElevenLabs 비용이 20% 추가됩니다(실시간 최대 50개, 녹음 후 최대 100개)."
 }

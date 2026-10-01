@@ -144,5 +144,9 @@
  "Download the language model",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.",
  "The language model needs it to clean up dictations and answer commands.",
- "Microphone “{name}” not found, using the system default"
+ "Microphone “{name}” not found, using the system default",
+ "Transcription failed: live transcription timed out",
+ "Transcription failed: live transcription connection was interrupted",
+ "Transcription failed: the connection was too slow for live audio; retry from History",
+ "Transcription failed: invalid audio recording"
 ]

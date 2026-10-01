@@ -53,6 +53,7 @@ fn keyed_provider(id: &str) -> Option<&'static str> {
     Some(match id {
         "groq" => "Groq",
         "openai" => "OpenAI",
+        "elevenlabs" => "ElevenLabs",
         "openrouter" => "OpenRouter",
         "mistral" => "Mistral",
         "gemini" => "Google Gemini",
@@ -348,6 +349,11 @@ mod tests {
         assert_eq!(compute(&checks(&no_url, &OK))[0].title, "Set up transcription");
         let gemini = TranscriptionConfig { llm_provider: "gemini".into(), llm_api_key: String::new(), ..configured() };
         assert_eq!(compute(&checks(&gemini, &OK))[0].vars["provider"], "Google Gemini");
+        let elevenlabs = TranscriptionConfig {
+            stt_provider: "elevenlabs".into(), endpoint_url: "https://api.elevenlabs.io/v1/speech-to-text".into(),
+            api_key: String::new(), llm_source: "off".into(), ..configured()
+        };
+        assert_eq!(compute(&checks(&elevenlabs, &OK))[0].vars["provider"], "ElevenLabs");
     }
 
     #[test]

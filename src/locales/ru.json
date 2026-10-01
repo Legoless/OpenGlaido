@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "Удалить из OpenGlaido?",
  "Replaces “{phrase}”": "Заменяет «{phrase}»",
  "Searching the web for “{query}”": "Поиск в интернете: «{query}»",
- "Searching your history for “{query}”": "Поиск в истории: «{query}»"
+ "Searching your history for “{query}”": "Поиск в истории: «{query}»",
+ "After recording": "После записи",
+ "Real time": "В реальном времени",
+ "Streams while you speak; pastes when you stop.": "Расшифровывает речь, пока вы говорите; вставляет текст после остановки.",
+ "Transcribes after you stop recording.": "Расшифровывает речь после остановки записи.",
+ "Transcription failed: live transcription timed out": "Не удалось расшифровать речь: превышено время ожидания расшифровки в реальном времени",
+ "Transcription failed: live transcription connection was interrupted": "Не удалось расшифровать речь: соединение для расшифровки в реальном времени прервано",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "Не удалось расшифровать речь: соединение было слишком медленным для передачи звука в реальном времени; повторите попытку из истории",
+ "Transcription failed: invalid audio recording": "Не удалось расшифровать речь: некорректная аудиозапись",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Подсказки из словаря увеличивают стоимость ElevenLabs на 20% (до 50 в реальном времени или 100 после записи)."
 }

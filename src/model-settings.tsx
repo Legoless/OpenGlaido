@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Box, Check, Cloud, Download, FolderOpen, Globe, KeyRound, RotateCw, Sparkles, Trash2, X } from "lucide-react";
 import { locale, t } from "./i18n";
-import { PROVIDERS, baseFromUrl, endpointUrl } from "./providers";
+import { PROVIDERS, baseFromUrl, endpointUrl, providerModelIds } from "./providers";
 import type { DownloadProgress, LocalModel, SaveConfig, TranscriptionConfig } from "./types";
 import { Dropdown, IS_MAC, IconButton, NoteText, OutlineButton, SettingsRow, SettingsSection, TextInput } from "./ui";
 
@@ -303,7 +303,8 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
   const apiKey = config[f.key];
   const model = config[f.model] ?? "";
   const base = preset?.baseUrl ?? baseFromUrl(url);
-  const canList = !!base && !(preset?.keyUrl && !apiKey);
+  // Scribe uses presets rather than OpenAI-compatible model discovery.
+  const canList = !!base && base !== "https://api.elevenlabs.io/v1" && !(preset?.keyUrl && !apiKey);
   const [listed, setListed] = useState<{ ids: string[]; error: string | null } | null>(null);
   const [other, setOther] = useState(false);
 
@@ -319,10 +320,23 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
     };
   }, [kind, base, apiKey, canList]);
 
-  const ids = listed?.ids.length ? listed.ids : ((kind === "stt" ? preset?.sttModels : preset?.chatModels) ?? []);
+  const openaiStt = kind === "stt" && preset?.id === "openai";
+  const elevenlabsStt = kind === "stt" && preset?.id === "elevenlabs";
+  const ids = providerModelIds(preset, kind, listed?.ids, model);
   const modelOptions = [
     ...(model ? [] : [{ value: "", label: t("Choose a model") }]),
-    ...[...new Set([...ids, model].filter(Boolean))].map((id) => ({ value: id, label: id })),
+    ...ids.map((id) => ({
+      value: id,
+      label: openaiStt && id === "gpt-transcribe"
+        ? `GPT Transcribe · ${t("After recording")}`
+        : openaiStt && id === "gpt-live-transcribe"
+          ? `GPT Live Transcribe · ${t("Real time")}`
+          : elevenlabsStt && id === "scribe_v2"
+            ? `Scribe v2 · ${t("After recording")}`
+            : elevenlabsStt && id === "scribe_v2_realtime"
+              ? `Scribe v2 · ${t("Real time")}`
+              : id,
+    })),
     { value: null, label: t("Other…") },
   ];
 
@@ -407,9 +421,14 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
       <SettingsRow
         icon={Box}
         title={t("Model")}
-        description={t("Pick one from the list or type its name")}
+        description={(openaiStt && model === "gpt-live-transcribe") || (elevenlabsStt && model === "scribe_v2_realtime")
+          ? t("Streams while you speak; pastes when you stop.")
+          : (openaiStt && model === "gpt-transcribe") || (elevenlabsStt && model === "scribe_v2")
+            ? t("Transcribes after you stop recording.")
+            : t("Pick one from the list or type its name")}
         note={
           <>
+            {elevenlabsStt && <NoteText tone="hint">{t("Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).")}</NoteText>}
             {canList && !listed && <NoteText tone="hint">{t("Loading models…")}</NoteText>}
             {listed?.error && <NoteText tone="error">{t(listed.error)}</NoteText>}
             {errorNote(f.model)}
@@ -425,7 +444,7 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
               setOther(v === null);
               if (v && v !== model) save({ [f.model]: v });
             }}
-            className="w-[200px] max-w-full"
+            className={`${openaiStt || elevenlabsStt ? "w-[300px]" : "w-[200px]"} max-w-full`}
           />
           {other && (
             <CommitInput

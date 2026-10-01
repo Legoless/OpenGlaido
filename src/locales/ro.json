@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "Elimini din OpenGlaido?",
  "Replaces “{phrase}”": "Înlocuiește „{phrase}”",
  "Searching the web for “{query}”": "Se caută pe web „{query}”",
- "Searching your history for “{query}”": "Se caută în istoric „{query}”"
+ "Searching your history for “{query}”": "Se caută în istoric „{query}”",
+ "After recording": "După înregistrare",
+ "Real time": "În timp real",
+ "Streams while you speak; pastes when you stop.": "Transcrie în timp ce vorbești; lipește textul când te oprești.",
+ "Transcribes after you stop recording.": "Transcrie după ce oprești înregistrarea.",
+ "Transcription failed: live transcription timed out": "Transcrierea a eșuat: a expirat timpul de așteptare pentru transcrierea în timp real",
+ "Transcription failed: live transcription connection was interrupted": "Transcrierea a eșuat: conexiunea pentru transcrierea în timp real a fost întreruptă",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "Transcrierea a eșuat: conexiunea a fost prea lentă pentru audio în timp real; reîncearcă din istoric",
+ "Transcription failed: invalid audio recording": "Transcrierea a eșuat: înregistrare audio nevalidă",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Sugestiile din dicționar cresc costurile ElevenLabs cu 20% (până la 50 în timp real sau 100 după înregistrare)."
 }

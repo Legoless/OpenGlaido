@@ -172,6 +172,7 @@ fn provider_of(url: &str) -> String {
     match host_of(url).as_str() {
         "api.groq.com" | "" => "groq",
         "api.openai.com" => "openai",
+        "api.elevenlabs.io" => "elevenlabs",
         _ => "custom",
     }
     .to_string()
@@ -417,7 +418,10 @@ struct WhisperResponse {
 }
 
 fn http_client() -> Result<Client, String> {
-    Client::builder().timeout(Duration::from_secs(45)).build().map_err(|e| e.to_string())
+    // xi-api-key survives reqwest's redirect cleanup. Keep provider credentials and audio
+    // on the explicitly configured endpoint, including on 307/308 redirects.
+    Client::builder().timeout(Duration::from_secs(45))
+        .redirect(reqwest::redirect::Policy::none()).build().map_err(|e| e.to_string())
 }
 
 /// The multipart language fields: gpt-transcribe takes every allowed language as `languages[]`;
@@ -438,39 +442,73 @@ pub async fn transcribe_raw(
     app: &AppHandle,
     wav_bytes: Vec<u8>,
     config: &TranscriptionConfig,
-    initial_prompt: Option<String>,
+    vocabulary: Vec<String>,
 ) -> Result<String, String> {
     if config.stt_source == "local" {
+        let initial_prompt = (!vocabulary.is_empty()).then(|| vocabulary.join(", "));
         return models::whisper::transcribe(app, &config.local_stt_model, wav_bytes, &config.languages, initial_prompt).await;
     }
-    let client = http_client()?;
+    // History Retry still uses the selected model: feed the saved WAV through its live
+    // protocol instead of sending a live-only model to the file transcription endpoint.
+    if crate::realtime::is_live_model(&config.model_name) {
+        return crate::realtime::transcribe_wav(config, wav_bytes, vocabulary).await;
+    }
+    transcribe_file(wav_bytes, config, &vocabulary).await
+}
 
+fn is_elevenlabs(config: &TranscriptionConfig) -> bool {
+    config.stt_provider == "elevenlabs" || host_of(&config.endpoint_url) == "api.elevenlabs.io"
+}
+
+fn transcription_fields(config: &TranscriptionConfig, vocabulary: &[String]) -> Vec<(&'static str, String)> {
+    if is_elevenlabs(config) {
+        let mut fields = vec![
+            ("model_id", config.model_name.clone()),
+            ("tag_audio_events", "false".into()),
+            ("diarize", "false".into()),
+        ];
+        let languages: Vec<_> = config.languages.iter().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+        if let [language] = languages.as_slice() {
+            fields.push(("language_code", (*language).to_string()));
+        }
+        fields.extend(crate::realtime::elevenlabs_keyterms(vocabulary, false).into_iter().map(|term| ("keyterms", term)));
+        return fields;
+    }
+    let mut fields = vec![("model", config.model_name.clone())];
+    if !vocabulary.is_empty() {
+        fields.push(("prompt", vocabulary.join(", ")));
+    }
+    fields.extend(language_fields(&config.model_name, &config.languages));
+    if let Some(temp) = config.temperature {
+        fields.push(("temperature", temp.to_string()));
+    }
+    fields
+}
+
+/// Completed cloud recording. Kept separate from the desktop handle for protocol tests.
+async fn transcribe_file(wav_bytes: Vec<u8>, config: &TranscriptionConfig, vocabulary: &[String]) -> Result<String, String> {
+    let client = http_client()?;
     let part = Part::bytes(wav_bytes)
         .file_name("audio.wav")
         .mime_str("audio/wav")
         .map_err(|e| e.to_string())?;
 
-    let mut form = Form::new()
-        .text("model", config.model_name.clone())
-        .part("file", part);
-
-    if let Some(prompt) = initial_prompt {
-        if !prompt.trim().is_empty() {
-            form = form.text("prompt", prompt);
-        }
-    }
-
-    for (field, lang) in language_fields(&config.model_name, &config.languages) {
-        form = form.text(field, lang);
-    }
-
-    if let Some(temp) = config.temperature {
-        form = form.text("temperature", temp.to_string());
+    let mut form = Form::new().part("file", part);
+    for (field, value) in transcription_fields(config, vocabulary) {
+        form = form.text(field, value);
     }
 
     let mut request = client.post(&config.endpoint_url).multipart(form);
     if !config.api_key.trim().is_empty() {
-        request = request.header("Authorization", format!("Bearer {}", config.api_key.trim()));
+        let (header, value) = if is_elevenlabs(config) {
+            ("xi-api-key", config.api_key.trim().to_string())
+        } else {
+            ("Authorization", format!("Bearer {}", config.api_key.trim()))
+        };
+        let mut value = reqwest::header::HeaderValue::from_str(&value)
+            .map_err(|_| "Transcription failed: check the API key in Settings › Model")?;
+        value.set_sensitive(true);
+        request = request.header(header, value);
     }
 
     // Errors below are user-facing (shown in the dictation bar); details go to the log.
@@ -559,6 +597,103 @@ fn cleaned_reply(reply: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    async fn read_http_request(socket: &mut tokio::net::TcpStream) -> String {
+        use tokio::io::AsyncReadExt;
+        let mut bytes = Vec::new();
+        let mut chunk = [0; 4096];
+        loop {
+            let read = socket.read(&mut chunk).await.unwrap();
+            assert!(read > 0);
+            bytes.extend_from_slice(&chunk[..read]);
+            if let Some(header_end) = bytes.windows(4).position(|w| w == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&bytes[..header_end]).to_lowercase();
+                let length: usize = headers.lines().find_map(|line| line.strip_prefix("content-length: "))
+                    .unwrap().parse().unwrap();
+                if bytes.len() >= header_end + 4 + length { break; }
+            }
+        }
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[tokio::test]
+    async fn cloud_upload_uses_the_selected_provider_contract() {
+        use tokio::io::AsyncWriteExt;
+        for elevenlabs in [false, true] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let request = read_http_request(&mut socket).await;
+                let headers = request.split("\r\n\r\n").next().unwrap().to_lowercase();
+                let has_field = |name: &str, value: &str| request.contains(&format!("name=\"{name}\"\r\n\r\n{value}\r\n"));
+                assert!(request.contains("filename=\"audio.wav\""));
+                if elevenlabs {
+                    assert!(headers.starts_with("post /v1/speech-to-text "));
+                    assert!(headers.contains("xi-api-key: fake-key"));
+                    assert!(!headers.contains("authorization:"));
+                    assert!(has_field("model_id", "scribe_v2"));
+                    assert!(has_field("language_code", "en"));
+                    assert!(has_field("keyterms", "ACME, Inc."));
+                    assert!(has_field("keyterms", "OpenGlaido"));
+                    assert!(has_field("tag_audio_events", "false"));
+                    assert!(!request.contains("name=\"prompt\"") && !request.contains("name=\"model\""));
+                } else {
+                    assert!(headers.starts_with("post /v1/audio/transcriptions "));
+                    assert!(headers.contains("authorization: bearer fake-key"));
+                    assert!(!headers.contains("xi-api-key:"));
+                    assert!(has_field("model", "gpt-transcribe"));
+                    assert!(has_field("languages[]", "en"));
+                    assert!(has_field("prompt", "ACME, Inc., OpenGlaido"));
+                }
+                let body = r#"{"text":"  Hello, OpenGlaido.  ","language_code":"en"}"#;
+                socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            });
+            let config = TranscriptionConfig {
+                stt_provider: if elevenlabs { "elevenlabs" } else { "openai" }.into(),
+                endpoint_url: format!("http://{address}/v1/{}", if elevenlabs { "speech-to-text" } else { "audio/transcriptions" }),
+                model_name: if elevenlabs { "scribe_v2" } else { "gpt-transcribe" }.into(),
+                api_key: "fake-key".into(),
+                languages: vec!["en".into()],
+                llm_source: "off".into(),
+                ..Default::default()
+            };
+            let transcript = tokio::time::timeout(Duration::from_secs(5), transcribe_file(
+                b"audio bytes".to_vec(), &config, &["ACME, Inc.".into(), "OpenGlaido".into()],
+            )).await.unwrap().unwrap();
+            assert_eq!(transcript, "Hello, OpenGlaido.");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn uploads_never_forward_provider_keys_or_audio_through_redirects() {
+        use tokio::io::AsyncWriteExt;
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_address = source.local_addr().unwrap();
+        let target_address = target.local_addr().unwrap();
+        let redirect = tokio::spawn(async move {
+            let (mut socket, _) = source.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            socket.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_address}/capture\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let destination = tokio::spawn(async move {
+            if let Ok(Ok((mut socket, _))) = tokio::time::timeout(Duration::from_millis(500), target.accept()).await {
+                read_http_request(&mut socket).await;
+                socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\nConnection: close\r\n\r\n{\"text\":\"x\"}").await.unwrap();
+                true
+            } else { false }
+        });
+        let config = TranscriptionConfig {
+            stt_provider: "elevenlabs".into(), model_name: "scribe_v2".into(), api_key: "fake-key".into(),
+            endpoint_url: format!("http://{source_address}/v1/speech-to-text"), ..Default::default()
+        };
+        let result = tokio::time::timeout(Duration::from_secs(5), transcribe_file(b"audio bytes".to_vec(), &config, &[])).await.unwrap();
+        assert_eq!(result.unwrap_err(), "Transcription failed: the server returned 307 Temporary Redirect");
+        redirect.await.unwrap();
+        assert!(!destination.await.unwrap(), "Provider key and audio reached the redirected endpoint");
+    }
 
     #[test]
     fn config_json_round_trip() {

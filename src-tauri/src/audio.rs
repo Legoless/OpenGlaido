@@ -1,7 +1,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use hound::{WavSpec, WavWriter};
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -9,10 +9,54 @@ use std::thread;
 enum AudioCommand {
     /// Device name (None = system default); replies Ok(true) when the named device was
     /// missing and the default was used instead.
-    Start(Option<String>, Sender<Result<bool, String>>),
+    Start(Option<String>, Option<StreamInput>, u32, Sender<Result<bool, String>>),
     /// Skip this many ms at the start (the start chime) and hand the samples back.
     Stop(u32, Sender<Result<Recording, String>>),
     Cancel,
+}
+
+/// Newly captured mono audio, at the microphone's native sample rate.
+pub struct AudioChunk {
+    pub samples: Vec<f32>,
+    pub rate: u32,
+}
+
+#[derive(Clone)]
+pub struct StreamInput {
+    pub tx: tokio::sync::mpsc::Sender<AudioChunk>,
+    /// A full queue invalidates the live transcript rather than silently losing speech.
+    pub overflowed: Arc<AtomicBool>,
+}
+
+struct StreamFeed {
+    input: Option<StreamInput>,
+    rate: u32,
+    skip: usize,
+}
+
+impl StreamFeed {
+    fn push(&mut self, samples: &[f32]) {
+        let Some(input) = self.input.as_ref() else { return };
+        if input.overflowed.load(Ordering::Acquire) {
+            self.input = None;
+            return;
+        }
+        let skip = self.skip.min(samples.len());
+        self.skip -= skip;
+        let samples = &samples[skip..];
+        if samples.is_empty() {
+            return;
+        }
+        // The audio callback must never wait for a network consumer.
+        match input.tx.try_send(AudioChunk { samples: samples.to_vec(), rate: self.rate }) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                input.overflowed.store(true, Ordering::Release);
+                self.input = None;
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => self.input = None,
+        }
+    }
 }
 
 /// Raw mono samples from a finished recording; `process` turns them into the upload.
@@ -300,13 +344,16 @@ fn record_chunk<T: Copy>(
     samples: &Mutex<Vec<f32>>,
     wave: &mut Waveform,
     meter: &BarMeter,
+    feed: &mut StreamFeed,
 ) {
     let mut s = samples.lock().unwrap();
+    let start = s.len();
     s.extend(
         data.chunks(channels)
             .map(|frame| frame.iter().map(|&x| to_f32(x)).sum::<f32>() / channels as f32),
     );
     wave.push(&s, meter);
+    feed.push(&s[start..]);
 }
 
 impl AudioRecorder {
@@ -340,7 +387,7 @@ impl AudioRecorder {
             meter.clear();
             let Ok(cmd) = cmd else { break };
             match cmd {
-                AudioCommand::Start(device_name, reply) => {
+                AudioCommand::Start(device_name, stream_input, skip_ms, reply) => {
                     let host = cpal::default_host();
                     let named = device_name.as_deref().and_then(|name| {
                         // input_devices() opens audio units for every device on macOS. Only
@@ -384,6 +431,11 @@ impl AudioRecorder {
                     let err_fn = |err| eprintln!("Audio stream error: {err}");
                     let samples_clone = Arc::clone(&samples);
                     let meter_clone = Arc::clone(&meter);
+                    let mut feed = StreamFeed {
+                        input: stream_input,
+                        rate: sample_rate,
+                        skip: sample_rate as usize * skip_ms as usize / 1000,
+                    };
 
                     let stream_res = match supported_config.sample_format() {
                         cpal::SampleFormat::F32 => {
@@ -400,6 +452,7 @@ impl AudioRecorder {
                                         &samples_clone,
                                         &mut wave,
                                         &meter_clone,
+                                        &mut feed,
                                     )
                                 },
                                 err_fn,
@@ -418,6 +471,7 @@ impl AudioRecorder {
                                         &samples_clone,
                                         &mut wave,
                                         &meter_clone,
+                                        &mut feed,
                                     )
                                 },
                                 err_fn,
@@ -474,10 +528,23 @@ impl AudioRecorder {
     /// Starts capturing from `device_name` (None = system default). Returns Ok(true) when that
     /// device is gone and the system default is recording instead.
     pub fn start_recording(&self, device_name: Option<&str>) -> Result<bool, String> {
+        self.start_recording_streamed(device_name, None, 0)
+    }
+
+    /// Also forwards new mono samples after the first `skip_ms` to a live transcriber.
+    /// Use the same trim in `stop_recording` so saved audio and live audio agree.
+    pub fn start_recording_streamed(
+        &self,
+        device_name: Option<&str>,
+        stream: Option<StreamInput>,
+        skip_ms: u32,
+    ) -> Result<bool, String> {
         let (reply_tx, reply_rx) = channel();
         self.tx
             .send(AudioCommand::Start(
                 device_name.map(str::to_string),
+                stream,
+                skip_ms,
                 reply_tx,
             ))
             .map_err(|e| e.to_string())?;
@@ -523,6 +590,75 @@ impl AudioRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn live_audio_trims_once_across_callbacks_and_sends_only_new_mono_samples() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let mut feed = StreamFeed {
+            input: Some(StreamInput { tx, overflowed: overflowed.clone() }),
+            rate: 1000,
+            skip: 3,
+        };
+        let samples = Mutex::new(Vec::new());
+        let mut wave = Waveform::new(1000);
+        let meter = BarMeter::new();
+        let mut streamed = Vec::new();
+        for data in [
+            [0.2, 0.4, 0.6, 0.8],
+            [0.1, 0.3, 0.5, 0.7],
+            [0.2, 0.2, 0.4, 0.4],
+        ] {
+            record_chunk(&data, 2, |x| x, &samples, &mut wave, &meter, &mut feed);
+            while let Ok(chunk) = rx.try_recv() {
+                assert_eq!(chunk.rate, 1000);
+                streamed.extend(chunk.samples);
+            }
+        }
+        let recorded = samples.lock().unwrap();
+        assert_eq!(recorded.len(), 6);
+        assert_eq!(streamed, recorded[3..]);
+        assert_eq!(streamed.len(), 3);
+        assert!(!overflowed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn live_audio_overflow_stops_sending_but_preserves_the_recording() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let mut feed = StreamFeed {
+            input: Some(StreamInput { tx, overflowed: overflowed.clone() }),
+            rate: 16000,
+            skip: 0,
+        };
+        let samples = Mutex::new(Vec::new());
+        let mut wave = Waveform::new(16000);
+        let meter = BarMeter::new();
+        for sample in [16384i16, 8192] {
+            record_chunk(&[sample], 1, |x| x as f32 / 32768.0, &samples, &mut wave, &meter, &mut feed);
+        }
+        assert!(overflowed.load(Ordering::Acquire));
+        assert!(feed.input.is_none());
+        assert_eq!(rx.try_recv().unwrap().samples, vec![0.5]);
+        record_chunk(&[0i16], 1, |x| x as f32 / 32768.0, &samples, &mut wave, &meter, &mut feed);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(*samples.lock().unwrap(), vec![0.5, 0.25, 0.0]);
+    }
+
+    #[test]
+    fn canceled_live_consumer_stops_sending_without_overflow() {
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let mut feed = StreamFeed {
+            input: Some(StreamInput { tx, overflowed: overflowed.clone() }),
+            rate: 16000,
+            skip: 0,
+        };
+        drop(rx);
+        feed.push(&[0.5]);
+        assert!(feed.input.is_none());
+        assert!(!overflowed.load(Ordering::Acquire));
+    }
 
     #[test]
     fn named_input_skips_output_endpoints_without_hiding_config_failures() {

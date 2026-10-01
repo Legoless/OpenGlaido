@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "OpenGlaidoから削除しますか？",
  "Replaces “{phrase}”": "「{phrase}」を置き換え",
  "Searching the web for “{query}”": "「{query}」をウェブで検索中",
- "Searching your history for “{query}”": "履歴で「{query}」を検索中"
+ "Searching your history for “{query}”": "履歴で「{query}」を検索中",
+ "After recording": "録音後",
+ "Real time": "リアルタイム",
+ "Streams while you speak; pastes when you stop.": "話している間に文字起こしし、録音を停止すると貼り付けます。",
+ "Transcribes after you stop recording.": "録音を停止してから文字起こしします。",
+ "Transcription failed: live transcription timed out": "文字起こしに失敗しました：リアルタイム文字起こしがタイムアウトしました",
+ "Transcription failed: live transcription connection was interrupted": "文字起こしに失敗しました：リアルタイム文字起こしの接続が中断されました",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "文字起こしに失敗しました：接続が遅すぎて音声をリアルタイムで送信できませんでした。履歴から再試行してください",
+ "Transcription failed: invalid audio recording": "文字起こしに失敗しました：録音データが無効です",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "辞書のヒントを使用するとElevenLabsの料金が20%増加します（リアルタイムでは最大50件、録音後では最大100件）。"
 }

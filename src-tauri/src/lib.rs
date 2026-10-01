@@ -6,6 +6,7 @@ pub mod hotkeys;
 pub mod models;
 pub mod output;
 pub mod paste;
+pub mod realtime;
 pub mod secrets;
 pub mod setup;
 pub mod sound;
@@ -128,13 +129,15 @@ pub enum Purpose {
 }
 
 /// Captured when a recording starts: which app/URL it is for and the selected text.
-#[derive(Debug, Clone)]
 pub struct Session {
     pub purpose: Purpose,
     pub context: Option<AppContext>,
     pub selection: Option<String>,
     /// The start chime played (its first ~150 ms are cut from the audio).
     pub chime: bool,
+    /// Model and formatting choices for this recording, even if settings change meanwhile.
+    pub config: TranscriptionConfig,
+    pub live: Option<realtime::LiveTranscription>,
 }
 
 /// Tray menu labels (Microphone, System Default, Show OpenGlaido, Quit); the frontend sends translations.
@@ -627,9 +630,16 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     if let Some(issue) = setup::blocker(app, purpose) {
         return Err(Notice::from_issue(issue));
     }
-    let (device, sound_on, mute, beta) = {
-        let c = state.config.lock().unwrap();
-        (c.input_device.clone(), c.sound_feedback, c.mute_background, c.beta_features)
+    let config = state.config.lock().unwrap().clone();
+    let (device, sound_on, mute, beta) = (
+        config.input_device.clone(), config.sound_feedback, config.mute_background, config.beta_features,
+    );
+    let (live, input) = if config.stt_source == "cloud" && realtime::is_live_model(&config.model_name) {
+        let vocabulary = if purpose == Purpose::Dictation { vocab_terms(&state.db) } else { Vec::new() };
+        let (live, input) = realtime::LiveTranscription::start(&config, vocabulary).map_err(Notice::model_error)?;
+        (Some(live), Some(input))
+    } else {
+        (None, None)
     };
     // Acknowledge the press while the device opens. Bars stay at rest until real mic levels
     // arrive; the start chime still means the microphone is ready.
@@ -637,7 +647,9 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     state.recording.store(true, Ordering::SeqCst);
     let _ = app.emit("recording-status", true);
     update_hud(app);
-    let fell_back = match state.recorder.start_recording(device.as_deref()) {
+    let fell_back = match state.recorder.start_recording_streamed(
+        device.as_deref(), input, if sound_on { CHIME_TRIM_MS } else { 0 },
+    ) {
         Ok(fell_back) => fell_back,
         Err(e) => {
             *state.recording_start.lock().unwrap() = None;
@@ -670,7 +682,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     let context = frontmost::current_context();
     // Only commands (and voice activation, beta) use the selection.
     let selection = if purpose == Purpose::Command || beta { frontmost::selected_text() } else { None };
-    *state.session.lock().unwrap() = Some(Session { purpose, context, selection, chime: sound_on });
+    *state.session.lock().unwrap() = Some(Session { purpose, context, selection, chime: sound_on, config, live });
     Ok(())
 }
 
@@ -684,11 +696,13 @@ fn end_recording_feedback(app: &AppHandle, state: &AppState) {
 // Caller holds the mode lock. Returns the recording, its duration and its session.
 fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Session), String> {
     end_recording_feedback(app, state);
-    let session = state.session.lock().unwrap().take().unwrap_or(Session {
+    let mut session = state.session.lock().unwrap().take().unwrap_or_else(|| Session {
         purpose: Purpose::Dictation,
         context: None,
         selection: None,
         chime: false,
+        config: state.config.lock().unwrap().clone(),
+        live: None,
     });
     let duration_ms = state
         .recording_start
@@ -698,6 +712,13 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         .map(|s| s.elapsed().as_millis() as i64)
         .unwrap_or(0);
     let recording = state.recorder.stop_recording(if session.chime { CHIME_TRIM_MS } else { 0 });
+    // Microphone callbacks have stopped. Drain their queued audio and commit the live turn
+    // immediately, in parallel with local denoising/history work.
+    if recording.is_ok() {
+        if let Some(live) = session.live.as_mut() {
+            live.finish_input();
+        }
+    }
     output::restore(&state.db.app_dir);
     // Only now: the stream is stopped, so the stop chime never lands in the audio.
     if session.chime {
@@ -849,10 +870,9 @@ pub async fn finish_recording(recording: Recording) -> Result<(Vec<u8>, bool), S
         .map_err(|e| format!("Recording failed: {e}"))?
 }
 
-/// Dictionary words bias Whisper towards the right spelling.
-fn vocab_prompt(db: &Database) -> Option<String> {
-    let words: Vec<String> = db.get_dictionary().unwrap_or_default().into_iter().map(|d| d.phrase).collect();
-    (!words.is_empty()).then(|| words.join(", "))
+/// Keep phrases intact: providers with keyterm lists must not split names containing commas.
+fn vocab_terms(db: &Database) -> Vec<String> {
+    db.get_dictionary().unwrap_or_default().into_iter().map(|d| d.phrase).collect()
 }
 
 /// Punctuation or whitespace only (Whisper's output for silence).
@@ -892,7 +912,7 @@ async fn transcribe_and_paste(
     app: &AppHandle,
     recording: Recording,
     duration_ms: i64,
-    session: Session,
+    mut session: Session,
 ) -> Result<Option<String>, Notice> {
     let state = app.state::<AppState>();
     let (wav, has_speech) = finish_recording(recording).await.map_err(Notice::error)?;
@@ -912,7 +932,7 @@ async fn transcribe_and_paste(
         }
     };
 
-    let config = state.config.lock().unwrap().clone();
+    let config = session.config.clone();
     let context = session.context.clone();
     let row = HistoryEntry {
         duration_ms,
@@ -924,7 +944,11 @@ async fn transcribe_and_paste(
     // Saved as "running" first: quitting mid-transcription leaves a record with Retry, not a lost dictation.
     let saved_early = audio_saved && state.db.insert_history(&HistoryEntry { status: "running".into(), ..row.clone() }).is_ok();
 
-    let raw = match transcribe_raw(app, wav, &config, vocab_prompt(&state.db)).await {
+    let transcription = match session.live.take() {
+        Some(live) => live.finish().await,
+        None => transcribe_raw(app, wav, &config, vocab_terms(&state.db)).await,
+    };
+    let raw = match transcription {
         Ok(t) => t,
         Err(e) => {
             // Keep the audio: the record shows "Transcription failed" with Retry.
@@ -1222,7 +1246,7 @@ async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState) -> Resu
     let bytes = fs::read(state.db.app_dir.join("audio").join(filename)).map_err(|e| e.to_string())?;
     let config = state.config.lock().unwrap().clone();
 
-    let raw = transcribe_raw(&app, bytes, &config, vocab_prompt(&state.db)).await.and_then(|raw| {
+    let raw = transcribe_raw(&app, bytes, &config, vocab_terms(&state.db)).await.and_then(|raw| {
         if is_blank(&raw) {
             Err("No speech detected".to_string())
         } else {

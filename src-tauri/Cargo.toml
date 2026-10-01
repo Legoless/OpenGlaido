@@ -35,6 +35,7 @@ tauri-plugin-notification = "2"
 nnnoiseless = { version = "0.5.2", default-features = false }
 keyring = { version = "3", features = ["apple-native", "windows-native"] }
 futures-util = "0.3.34"
+tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 evalexpr = "13.1.0"
 chrono-tz = "0.10.4"
 sha2 = "0.10"

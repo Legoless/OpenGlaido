@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "Κατάργηση από το OpenGlaido;",
  "Replaces “{phrase}”": "Αντικαθιστά το «{phrase}»",
  "Searching the web for “{query}”": "Αναζήτηση στον ιστό για «{query}»",
- "Searching your history for “{query}”": "Αναζήτηση στο ιστορικό για «{query}»"
+ "Searching your history for “{query}”": "Αναζήτηση στο ιστορικό για «{query}»",
+ "After recording": "Μετά την εγγραφή",
+ "Real time": "Σε πραγματικό χρόνο",
+ "Streams while you speak; pastes when you stop.": "Μεταγράφει όσο μιλάς· επικολλά το κείμενο όταν σταματάς.",
+ "Transcribes after you stop recording.": "Μεταγράφει αφού σταματήσεις την εγγραφή.",
+ "Transcription failed: live transcription timed out": "Η μεταγραφή απέτυχε: έληξε ο χρόνος αναμονής της μεταγραφής σε πραγματικό χρόνο",
+ "Transcription failed: live transcription connection was interrupted": "Η μεταγραφή απέτυχε: διακόπηκε η σύνδεση της μεταγραφής σε πραγματικό χρόνο",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "Η μεταγραφή απέτυχε: η σύνδεση ήταν πολύ αργή για ζωντανό ήχο· δοκίμασε ξανά από το ιστορικό",
+ "Transcription failed: invalid audio recording": "Η μεταγραφή απέτυχε: μη έγκυρη ηχογράφηση",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Οι υποδείξεις λεξικού αυξάνουν το κόστος του ElevenLabs κατά 20% (έως 50 σε πραγματικό χρόνο ή 100 μετά την εγγραφή)."
 }

@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "Ukloniti iz OpenGlaido?",
  "Replaces “{phrase}”": "Zamenjuje „{phrase}”",
  "Searching the web for “{query}”": "Pretraga veba za „{query}”",
- "Searching your history for “{query}”": "Pretraga istorije za „{query}”"
+ "Searching your history for “{query}”": "Pretraga istorije za „{query}”",
+ "After recording": "Posle snimanja",
+ "Real time": "U realnom vremenu",
+ "Streams while you speak; pastes when you stop.": "Transkribuje dok govoriš; nalepljuje tekst kada staneš.",
+ "Transcribes after you stop recording.": "Transkribuje nakon što zaustaviš snimanje.",
+ "Transcription failed: live transcription timed out": "Transkripcija nije uspela: isteklo je vreme čekanja za transkripciju u realnom vremenu",
+ "Transcription failed: live transcription connection was interrupted": "Transkripcija nije uspela: veza za transkripciju u realnom vremenu je prekinuta",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "Transkripcija nije uspela: veza je bila prespora za zvuk uživo; pokušaj ponovo iz istorije",
+ "Transcription failed: invalid audio recording": "Transkripcija nije uspela: nevažeći audio-snimak",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Smernice iz rečnika povećavaju cenu ElevenLabs usluge za 20% (do 50 u realnom vremenu ili 100 posle snimanja)."
 }

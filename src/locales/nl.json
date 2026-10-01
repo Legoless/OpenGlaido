@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "Verwijderen uit OpenGlaido?",
  "Replaces “{phrase}”": "Vervangt ‘{phrase}’",
  "Searching the web for “{query}”": "Het web doorzoeken naar ‘{query}’",
- "Searching your history for “{query}”": "Je geschiedenis doorzoeken naar ‘{query}’"
+ "Searching your history for “{query}”": "Je geschiedenis doorzoeken naar ‘{query}’",
+ "After recording": "Na de opname",
+ "Real time": "Realtime",
+ "Streams while you speak; pastes when you stop.": "Transcribeert terwijl je spreekt; plakt de tekst wanneer je stopt.",
+ "Transcribes after you stop recording.": "Transcribeert nadat je de opname stopt.",
+ "Transcription failed: live transcription timed out": "Transcriptie mislukt: time-out bij realtime transcriptie",
+ "Transcription failed: live transcription connection was interrupted": "Transcriptie mislukt: de verbinding voor realtime transcriptie is onderbroken",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "Transcriptie mislukt: de verbinding was te traag voor live audio; probeer opnieuw vanuit de geschiedenis",
+ "Transcription failed: invalid audio recording": "Transcriptie mislukt: ongeldige audio-opname",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Woordenboekhints verhogen de kosten van ElevenLabs met 20% (maximaal 50 in realtime of 100 na de opname)."
 }

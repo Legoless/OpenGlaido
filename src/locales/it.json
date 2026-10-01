@@ -425,5 +425,14 @@
  "Remove from OpenGlaido?": "Rimuovere da OpenGlaido?",
  "Replaces “{phrase}”": "Sostituisce «{phrase}»",
  "Searching the web for “{query}”": "Ricerca di «{query}» sul web",
- "Searching your history for “{query}”": "Ricerca di «{query}» nella cronologia"
+ "Searching your history for “{query}”": "Ricerca di «{query}» nella cronologia",
+ "After recording": "Dopo la registrazione",
+ "Real time": "In tempo reale",
+ "Streams while you speak; pastes when you stop.": "Trascrive mentre parli; incolla il testo quando ti fermi.",
+ "Transcribes after you stop recording.": "Trascrive quando termini la registrazione.",
+ "Transcription failed: live transcription timed out": "Trascrizione non riuscita: tempo scaduto per la trascrizione in tempo reale",
+ "Transcription failed: live transcription connection was interrupted": "Trascrizione non riuscita: la connessione per la trascrizione in tempo reale è stata interrotta",
+ "Transcription failed: the connection was too slow for live audio; retry from History": "Trascrizione non riuscita: la connessione era troppo lenta per l’audio in diretta; riprova dalla cronologia",
+ "Transcription failed: invalid audio recording": "Trascrizione non riuscita: registrazione audio non valida",
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "I suggerimenti del dizionario aumentano del 20% i costi di ElevenLabs (fino a 50 in tempo reale o 100 dopo la registrazione)."
 }
