@@ -384,8 +384,13 @@ pub fn start_from_dictation(
     context: Option<AppContext>,
     history_id: String,
 ) {
+    let activity = match app.state::<crate::updater::UpdateState>().activity() {
+        Ok(activity) => activity,
+        Err(error) => return report_error(app, error),
+    };
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
+        let _activity = activity;
         let c = commands(&app);
         let generation = c.generation.fetch_add(1, Ordering::SeqCst) + 1;
         deny_pending(&app);
@@ -703,11 +708,13 @@ pub fn plain_text(markdown: &str) -> String {
 }
 
 fn paste_answer(app: &AppHandle) -> Result<(), String> {
+    let activity = app.state::<crate::updater::UpdateState>().activity()?;
     let answer = plain_text(&current_answer(app).ok_or("No answer to paste yet")?);
     hide_window(app);
     let keep = app.state::<AppState>().config.lock().unwrap().copy_to_clipboard;
     let app = app.clone();
     std::thread::spawn(move || {
+        let _activity = activity;
         if let Err(e) = crate::paste::paste_text(&app, &answer, keep) {
             report_error(&app, format!("Couldn't paste: {e}"));
         }

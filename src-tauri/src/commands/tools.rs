@@ -755,17 +755,44 @@ const OPENABLE: [&str; 44] = [
 /// Opens a document or folder in its default app. Allow-list, no app choice: injected text
 /// must not be able to run code ("open x.command", `open -a Terminal notes.txt`, .app bundles).
 fn open_path(path: &str) -> Result<String, String> {
-    let p = std::path::Path::new(path);
-    let meta = std::fs::metadata(p).map_err(|_| format!("{path} doesn't exist"))?;
+    let target = validated_open_path(path)?;
+    // Open exactly what was checked, not a link which LaunchServices/ShellExecute may follow.
+    tauri_plugin_opener::open_path(target, None::<&str>).map_err(|e| format!("Couldn't open {path}: {e}"))?;
+    Ok(format!("Opened {path}"))
+}
+
+fn validated_open_path(path: &str) -> Result<std::path::PathBuf, String> {
+    // dunce preserves the resolved target while making Windows paths usable by ShellExecute.
+    #[cfg(windows)]
+    let target = dunce::canonicalize(path);
+    #[cfg(not(windows))]
+    let target = std::fs::canonicalize(path);
+    let p = target.map_err(|_| format!("{path} doesn't exist"))?;
+    let meta = std::fs::symlink_metadata(&p).map_err(|_| format!("{path} doesn't exist"))?;
     let ext = p.extension().map(|e| e.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
     // macOS bundles (.app, .prefPane, .workflow…) are folders that launch.
-    let openable = if meta.is_dir() { !p.join("Contents").exists() && ext != "app" } else { OPENABLE.contains(&ext.as_str()) };
+    let openable = if meta.is_dir() { !p.join("Contents").exists() && ext != "app" }
+        else { meta.is_file() && OPENABLE.contains(&ext.as_str()) };
     if !openable {
         return Err(format!("I only open documents, media and folders, not {path}"));
     }
-    // No shell involved (ShellExecute on Windows, `open` on macOS).
-    tauri_plugin_opener::open_path(p, None::<&str>).map_err(|e| format!("Couldn't open {path}: {e}"))?;
-    Ok(format!("Opened {path}"))
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_foundation::{NSNumber, NSURL, NSURLIsAliasFileKey};
+        // Finder aliases are regular files, not POSIX symlinks. Fail closed if their type
+        // cannot be determined; opening one would let macOS pick a different target.
+        let is_alias = objc2::rc::autoreleasepool(|_| -> Result<bool, String> {
+            let url = NSURL::from_file_path(&p).ok_or_else(|| format!("Can't check {path}"))?;
+            let mut value = None;
+            // Foundation documents NSURLIsAliasFileKey as an NSNumber boolean.
+            unsafe { url.getResourceValue_forKey_error(&mut value, NSURLIsAliasFileKey) }
+                .map_err(|_| format!("Can't check whether {path} is a Finder alias"))?;
+            value.and_then(|v| v.downcast::<NSNumber>().ok()).map(|v| v.boolValue())
+                .ok_or_else(|| format!("Can't check whether {path} is a Finder alias"))
+        })?;
+        if is_alias { return Err(format!("I don't open Finder aliases; choose the original document instead of {path}")); }
+    }
+    Ok(p)
 }
 
 fn open_app(app: &str) -> Result<String, String> {
@@ -841,14 +868,85 @@ mod tests {
 
     #[test]
     fn open_refuses_anything_that_runs() {
-        let dir = std::env::temp_dir().join(format!("og-open-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("og-open-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(dir.join("Evil.app/Contents")).unwrap();
         std::fs::create_dir_all(dir.join("Tool.workflow/Contents")).unwrap();
+        std::fs::create_dir_all(dir.join("Empty.app")).unwrap();
+        std::fs::create_dir_all(dir.join("Documents")).unwrap();
         for f in ["run.command", "script", "notes.txt.sh"] {
             std::fs::write(dir.join(f), "").unwrap();
         }
-        for f in ["Evil.app", "Tool.workflow", "run.command", "script", "notes.txt.sh", "missing.pdf"] {
-            assert!(open_path(dir.join(f).to_str().unwrap()).is_err(), "{f}");
+        for f in ["note.txt", "photo.JPG", "report.pdf"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        for f in ["Evil.app", "Empty.app", "Tool.workflow", "run.command", "script", "notes.txt.sh", "missing.pdf"] {
+            assert!(validated_open_path(dir.join(f).to_str().unwrap()).is_err(), "{f}");
+        }
+        for f in ["Documents", "note.txt", "photo.JPG", "report.pdf"] {
+            assert_eq!(validated_open_path(dir.join(f).to_str().unwrap()).unwrap().canonicalize().unwrap(), std::fs::canonicalize(dir.join(f)).unwrap());
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn open_validates_symlink_targets_and_rejects_special_files() {
+        use std::os::unix::{fs::symlink, net::UnixListener};
+
+        let dir = std::env::temp_dir().join(format!("og-{}", uuid::Uuid::new_v4().simple()));
+        std::fs::create_dir_all(dir.join("Evil.app/Contents")).unwrap();
+        std::fs::create_dir_all(dir.join("Tool.workflow/Contents")).unwrap();
+        for f in ["run.command", "script.sh"] {
+            std::fs::write(dir.join(f), "").unwrap();
+        }
+        std::fs::write(dir.join("note.txt"), "document").unwrap();
+        for (link, target) in [
+            ("command.txt", "run.command"),
+            ("shell.txt", "script.sh"),
+            ("chain.txt", "command.txt"),
+            ("application.txt", "Evil.app"),
+            ("workflow.txt", "Tool.workflow"),
+            ("dangling.txt", "missing.txt"),
+            ("linked-folder", "."),
+            ("document.txt", "note.txt"),
+        ] {
+            symlink(target, dir.join(link)).unwrap();
+        }
+        let socket = UnixListener::bind(dir.join("s.txt")).unwrap();
+        for f in ["command.txt", "shell.txt", "chain.txt", "application.txt", "workflow.txt", "dangling.txt", "linked-folder/command.txt", "s.txt"] {
+            assert!(validated_open_path(dir.join(f).to_str().unwrap()).is_err(), "{f}");
+        }
+        assert_eq!(validated_open_path(dir.join("linked-folder").to_str().unwrap()).unwrap(), std::fs::canonicalize(&dir).unwrap());
+        let original = validated_open_path(dir.join("document.txt").to_str().unwrap()).unwrap();
+        assert_eq!(original, std::fs::canonicalize(dir.join("note.txt")).unwrap());
+        // The opener receives the resolved target, so retargeting the original link cannot redirect it.
+        std::fs::remove_file(dir.join("document.txt")).unwrap();
+        symlink("run.command", dir.join("document.txt")).unwrap();
+        assert_eq!(std::fs::read_to_string(original).unwrap(), "document");
+        assert!(validated_open_path(dir.join("document.txt").to_str().unwrap()).is_err());
+        drop(socket);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn open_rejects_native_finder_aliases_disguised_as_documents() {
+        use objc2_foundation::{NSString, NSURL, NSURLBookmarkCreationOptions};
+
+        let dir = std::env::temp_dir().join(format!("og-alias-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for (target, alias) in [("run.command", "script-alias.txt"), ("note.txt", "document-alias.txt")] {
+            let path = dir.join(target);
+            std::fs::write(&path, "").unwrap();
+            let target_url = NSURL::fileURLWithPath(&NSString::from_str(path.to_str().unwrap()));
+            let data = target_url.bookmarkDataWithOptions_includingResourceValuesForKeys_relativeToURL_error(
+                NSURLBookmarkCreationOptions::SuitableForBookmarkFile, None, None,
+            ).unwrap();
+            let alias_path = dir.join(alias);
+            let alias_url = NSURL::fileURLWithPath(&NSString::from_str(alias_path.to_str().unwrap()));
+            NSURL::writeBookmarkData_toURL_options_error(&data, &alias_url, 0).unwrap();
+            assert!(alias_path.is_file());
+            assert!(validated_open_path(alias_path.to_str().unwrap()).is_err(), "{alias}");
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }

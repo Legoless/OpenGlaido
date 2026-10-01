@@ -154,5 +154,10 @@
  "This recording is already being processed",
  "Couldn't save settings until API keys are secured in the system keychain",
  "Couldn't paste: The clipboard changed before pasting; the transcript was not pasted",
- "Couldn't paste: The focused app changed; the text is on the clipboard"
+ "Couldn't paste: The focused app changed; the text is on the clipboard",
+ "No public updates are available yet.",
+ "Couldn’t download a verified update. Try again later.",
+ "Couldn’t install the update. Try again later.",
+ "OpenGlaido is installing an update. Try again shortly.",
+ "Updates are available in packaged builds only."
 ]

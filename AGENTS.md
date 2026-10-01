@@ -29,6 +29,7 @@ OpenGlaido is an open-source, cross-platform (macOS & Windows 11) voice-layer ap
 6. **Snippets & Dictionary:** Spoken triggers expand to canned text; vocabulary and replacements bias and correct transcripts.
 7. **History:** Audio kept in `audio/<id>.wav`, target app icon + name per row, playback, retry that replaces the transcript, failed transcriptions kept with Retry, command answers with sources, ⌘K palette search.
 8. **App:** Dark / Light / System theme, 14 UI languages (`src/i18n.ts`, `src/locales/*.json`, checked by `bun run check:locales`), launch at login, menu bar / Dock toggles, mute background while recording, noise reduction and silence detection before upload.
+9. **Updates:** Tauri-signed updates from GitHub Releases, checked in the background or in Settings › General. Installation waits for recording, transcription, commands, paste, settings saves, and model downloads to finish and for app windows to close. Development builds cannot install updates. Releases are built, signed, and notarized locally, then uploaded as GitHub drafts; see `docs/releases.md`. No release builds or signing credentials belong in GitHub Actions.
 
 ## Getting Started
 

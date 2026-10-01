@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "Η μεταγραφή απέτυχε: διακόπηκε η σύνδεση της μεταγραφής σε πραγματικό χρόνο",
  "Transcription failed: the connection was too slow for live audio; retry from History": "Η μεταγραφή απέτυχε: η σύνδεση ήταν πολύ αργή για ζωντανό ήχο· δοκίμασε ξανά από το ιστορικό",
  "Transcription failed: invalid audio recording": "Η μεταγραφή απέτυχε: μη έγκυρη ηχογράφηση",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Οι υποδείξεις λεξικού αυξάνουν το κόστος του ElevenLabs κατά 20% (έως 50 σε πραγματικό χρόνο ή 100 μετά την εγγραφή)."
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Οι υποδείξεις λεξικού αυξάνουν το κόστος του ElevenLabs κατά 20% (έως 50 σε πραγματικό χρόνο ή 100 μετά την εγγραφή).",
+ "App updates": "Ενημερώσεις εφαρμογής",
+ "Check for updates": "Έλεγχος για ενημερώσεις",
+ "Checking for updates…": "Έλεγχος για ενημερώσεις…",
+ "OpenGlaido is up to date.": "Το OpenGlaido είναι ενημερωμένο.",
+ "Downloading update…": "Λήψη ενημέρωσης…",
+ "Installing update…": "Εγκατάσταση ενημέρωσης…",
+ "No public updates are available yet.": "Δεν υπάρχουν ακόμη διαθέσιμες δημόσιες ενημερώσεις.",
+ "Couldn’t check for updates. Try again later.": "Δεν ήταν δυνατός ο έλεγχος για ενημερώσεις. Δοκιμάστε ξανά αργότερα.",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "Οι ενημερώσεις εγκαθίστανται αυτόματα όταν το OpenGlaido είναι αδρανές και τα παράθυρά του είναι κλειστά.",
+ "Update ready. Close the main window to install when idle.": "Η ενημέρωση είναι έτοιμη. Κλείστε το κύριο παράθυρο για εγκατάσταση όταν η εφαρμογή είναι αδρανής.",
+ "Couldn’t download a verified update. Try again later.": "Δεν ήταν δυνατή η λήψη επαληθευμένης ενημέρωσης. Δοκιμάστε ξανά αργότερα.",
+ "Couldn’t install the update. Try again later.": "Δεν ήταν δυνατή η εγκατάσταση της ενημέρωσης. Δοκιμάστε ξανά αργότερα.",
+ "OpenGlaido is installing an update. Try again shortly.": "Το OpenGlaido εγκαθιστά μια ενημέρωση. Δοκιμάστε ξανά σε λίγο.",
+ "Updates are available in packaged builds only.": "Οι ενημερώσεις είναι διαθέσιμες μόνο σε πακεταρισμένες εκδόσεις της εφαρμογής."
 }

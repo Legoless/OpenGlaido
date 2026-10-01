@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "Transcriptie mislukt: de verbinding voor realtime transcriptie is onderbroken",
  "Transcription failed: the connection was too slow for live audio; retry from History": "Transcriptie mislukt: de verbinding was te traag voor live audio; probeer opnieuw vanuit de geschiedenis",
  "Transcription failed: invalid audio recording": "Transcriptie mislukt: ongeldige audio-opname",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Woordenboekhints verhogen de kosten van ElevenLabs met 20% (maximaal 50 in realtime of 100 na de opname)."
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Woordenboekhints verhogen de kosten van ElevenLabs met 20% (maximaal 50 in realtime of 100 na de opname).",
+ "App updates": "App-updates",
+ "Check for updates": "Zoeken naar updates",
+ "Checking for updates…": "Zoeken naar updates…",
+ "OpenGlaido is up to date.": "OpenGlaido is up-to-date.",
+ "Downloading update…": "Update downloaden…",
+ "Installing update…": "Update installeren…",
+ "No public updates are available yet.": "Er zijn nog geen openbare updates beschikbaar.",
+ "Couldn’t check for updates. Try again later.": "Zoeken naar updates is mislukt. Probeer het later opnieuw.",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "Updates worden automatisch geïnstalleerd wanneer OpenGlaido niet in gebruik is en de vensters gesloten zijn.",
+ "Update ready. Close the main window to install when idle.": "Update gereed. Sluit het hoofdvenster om de update te installeren wanneer de app niet in gebruik is.",
+ "Couldn’t download a verified update. Try again later.": "Een geverifieerde update kon niet worden gedownload. Probeer het later opnieuw.",
+ "Couldn’t install the update. Try again later.": "De update kon niet worden geïnstalleerd. Probeer het later opnieuw.",
+ "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido installeert een update. Probeer het zo opnieuw.",
+ "Updates are available in packaged builds only.": "Updates zijn alleen beschikbaar in verpakte appversies."
 }

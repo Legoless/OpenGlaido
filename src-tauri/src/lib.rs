@@ -11,6 +11,7 @@ pub mod secrets;
 pub mod setup;
 pub mod sound;
 pub mod transcribe;
+mod updater;
 
 use audio::{AudioRecorder, Recording};
 use db::{Database, DictionaryEntry, HistoryEntry, SnippetEntry};
@@ -509,6 +510,7 @@ fn write_config(path: &Path, config: &TranscriptionConfig) -> Result<(), String>
 
 /// Changes settings from the backend (MCP prefs, "always allow"), persists them and tells the UI.
 pub fn update_config(app: &AppHandle, f: impl FnOnce(&mut TranscriptionConfig)) -> Result<(), String> {
+    let _activity = app.state::<updater::UpdateState>().activity()?;
     let state = app.state::<AppState>();
     let _serialized = state.config_write.lock().unwrap();
     let mut updated = state.config.lock().unwrap().clone();
@@ -717,6 +719,9 @@ fn set_mode(app: &AppHandle, state: &AppState, mode: &mut Mode, next: Mode) {
 // Caller holds the mode lock. `started` = when the user asked (opening the mic can take a while).
 // Err (reported once by the caller) leaves the mode Idle, also when setup keeps it from starting.
 fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: Purpose) -> Result<(), Notice> {
+    if app.state::<updater::UpdateState>().is_installing() {
+        return Err(Notice::warning("OpenGlaido is installing an update."));
+    }
     if let Some(issue) = setup::blocker(app, purpose) {
         return Err(Notice::from_issue(issue));
     }
@@ -871,6 +876,9 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
     };
     let state = app.state::<AppState>();
     let mut mode = state.mode.lock().unwrap();
+    if app.state::<updater::UpdateState>().is_installing() {
+        return;
+    }
     // A dictation hotkey never stops a command recording (and vice versa); Esc/Enter apply to both.
     let current = state.session.lock().unwrap().as_ref().map(|s| s.purpose);
     let shared = matches!(event, HotkeyEvent::Cancel | HotkeyEvent::Submit);
@@ -1233,6 +1241,7 @@ async fn save_config(
     edited_search_provider: Option<String>,
     state: State<'_, AppState>,
 ) -> Result<TranscriptionConfig, String> {
+    let _activity = app.state::<updater::UpdateState>().activity()?;
     if !["bottom", "raised", "high"].contains(&new_config.bar_location.as_str()) {
         return Err(format!("Unknown dictation bar location “{}”", new_config.bar_location));
     }
@@ -1407,6 +1416,7 @@ fn get_audio_base64(id: String, state: State<'_, AppState>) -> Result<String, St
 /// Transcribes a record's audio again with the current settings and replaces its text.
 #[tauri::command]
 async fn retranscribe(app: AppHandle, id: String, state: State<'_, AppState>) -> Result<HistoryEntry, String> {
+    let _activity = app.state::<updater::UpdateState>().activity()?;
     let _retry = state.db.begin_retry(&id)?;
     job_started(&app);
     let result = retranscribe_entry(&app, &id, &state).await;
@@ -1541,6 +1551,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_autostart::init(MacosLauncher::LaunchAgent, None))
         .plugin(
             tauri_plugin_global_shortcut::Builder::new()
@@ -1564,6 +1575,7 @@ pub fn run() {
             if let Err(e) = db.mark_interrupted() {
                 eprintln!("Couldn't mark interrupted records: {e}");
             }
+            app.manage(updater::UpdateState::new(app.package_info().version.to_string()));
 
             // The engine's callback must not block: queue events for one worker thread, which
             // handles them in order (and may block on the audio thread / main thread).
@@ -1612,6 +1624,7 @@ pub fn run() {
                 })
                 .on_menu_event(|app, event| match event.id().as_ref() {
                     "show" => {
+                        let Ok(_activity) = app.state::<updater::UpdateState>().activity() else { return; };
                         if let Some(main) = app.get_webview_window("main") {
                             let _ = main.show();
                             let _ = main.set_focus();
@@ -1672,6 +1685,7 @@ pub fn run() {
                 }
             }
             update_hud(app.handle());
+            updater::start(app.handle());
 
             Ok(())
         })
@@ -1689,6 +1703,8 @@ pub fn run() {
             _ => {}
         })
         .invoke_handler(tauri::generate_handler![
+            updater::get_update_status,
+            updater::check_for_updates,
             get_recording_state,
             start_recording,
             stop_recording_and_process,
@@ -1752,24 +1768,26 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
         .run(|_app, _event| {
-            if let tauri::RunEvent::Exit = _event {
-                commands::shutdown(_app);
-                // ponytail: waits for a running local transcription (seconds); whisper's abort callback if that grows.
-                // A running local generation stops at its next token.
-                models::whisper::unload_now();
-                models::llama::unload_now();
-                if let Some(state) = _app.try_state::<AppState>() {
-                    output::restore(&state.db.app_dir);
-                }
-            }
+            if let tauri::RunEvent::Exit = _event { prepare_exit(_app); }
             #[cfg(target_os = "macos")]
             if let tauri::RunEvent::Reopen { .. } = _event {
+                let updates = _app.state::<updater::UpdateState>();
+                if updates.suppress_initial_reopen() { return; }
+                let Ok(_activity) = updates.activity() else { return; };
                 if let Some(main) = _app.get_webview_window("main") {
                     let _ = main.show();
                     let _ = main.set_focus();
                 }
             }
         });
+}
+
+fn prepare_exit(app: &AppHandle) {
+    commands::shutdown(app);
+    // ponytail: waits for a running local transcription; whisper's abort callback if that grows.
+    models::whisper::unload_now();
+    models::llama::unload_now();
+    if let Some(state) = app.try_state::<AppState>() { output::restore(&state.db.app_dir); }
 }
 
 #[cfg(test)]

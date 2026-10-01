@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "Transcrierea a eșuat: conexiunea pentru transcrierea în timp real a fost întreruptă",
  "Transcription failed: the connection was too slow for live audio; retry from History": "Transcrierea a eșuat: conexiunea a fost prea lentă pentru audio în timp real; reîncearcă din istoric",
  "Transcription failed: invalid audio recording": "Transcrierea a eșuat: înregistrare audio nevalidă",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Sugestiile din dicționar cresc costurile ElevenLabs cu 20% (până la 50 în timp real sau 100 după înregistrare)."
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Sugestiile din dicționar cresc costurile ElevenLabs cu 20% (până la 50 în timp real sau 100 după înregistrare).",
+ "App updates": "Actualizări ale aplicației",
+ "Check for updates": "Caută actualizări",
+ "Checking for updates…": "Se caută actualizări…",
+ "OpenGlaido is up to date.": "OpenGlaido este la zi.",
+ "Downloading update…": "Se descarcă actualizarea…",
+ "Installing update…": "Se instalează actualizarea…",
+ "No public updates are available yet.": "Nu sunt disponibile încă actualizări publice.",
+ "Couldn’t check for updates. Try again later.": "Nu s-au putut căuta actualizări. Încearcă din nou mai târziu.",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "Actualizările se instalează automat când OpenGlaido este inactiv și ferestrele sale sunt închise.",
+ "Update ready. Close the main window to install when idle.": "Actualizarea este pregătită. Închide fereastra principală pentru a o instala când aplicația este inactivă.",
+ "Couldn’t download a verified update. Try again later.": "Nu s-a putut descărca o actualizare verificată. Încearcă din nou mai târziu.",
+ "Couldn’t install the update. Try again later.": "Nu s-a putut instala actualizarea. Încearcă din nou mai târziu.",
+ "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido instalează o actualizare. Încearcă din nou în câteva momente.",
+ "Updates are available in packaged builds only.": "Actualizările sunt disponibile doar în versiunile împachetate ale aplicației."
 }

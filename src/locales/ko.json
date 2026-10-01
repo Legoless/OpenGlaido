@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "받아쓰기 실패: 실시간 받아쓰기 연결이 끊겼습니다",
  "Transcription failed: the connection was too slow for live audio; retry from History": "받아쓰기 실패: 연결이 너무 느려 실시간 오디오를 전송할 수 없습니다. 기록에서 다시 시도하세요",
  "Transcription failed: invalid audio recording": "받아쓰기 실패: 유효하지 않은 오디오 녹음입니다",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "사전 힌트를 사용하면 ElevenLabs 비용이 20% 추가됩니다(실시간 최대 50개, 녹음 후 최대 100개)."
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "사전 힌트를 사용하면 ElevenLabs 비용이 20% 추가됩니다(실시간 최대 50개, 녹음 후 최대 100개).",
+ "App updates": "앱 업데이트",
+ "Check for updates": "업데이트 확인",
+ "Checking for updates…": "업데이트 확인 중…",
+ "OpenGlaido is up to date.": "OpenGlaido가 최신 상태입니다.",
+ "Downloading update…": "업데이트 다운로드 중…",
+ "Installing update…": "업데이트 설치 중…",
+ "No public updates are available yet.": "아직 공개된 업데이트가 없습니다.",
+ "Couldn’t check for updates. Try again later.": "업데이트를 확인할 수 없습니다. 나중에 다시 시도해 주세요.",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "OpenGlaido를 사용하지 않고 창이 닫혀 있을 때 업데이트가 자동으로 설치됩니다.",
+ "Update ready. Close the main window to install when idle.": "업데이트가 준비되었습니다. 기본 창을 닫으면 앱을 사용하지 않을 때 설치됩니다.",
+ "Couldn’t download a verified update. Try again later.": "검증된 업데이트를 다운로드할 수 없습니다. 나중에 다시 시도해 주세요.",
+ "Couldn’t install the update. Try again later.": "업데이트를 설치할 수 없습니다. 나중에 다시 시도해 주세요.",
+ "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido가 업데이트를 설치하고 있습니다. 잠시 후 다시 시도해 주세요.",
+ "Updates are available in packaged builds only.": "업데이트는 패키징된 빌드에서만 사용할 수 있습니다."
 }

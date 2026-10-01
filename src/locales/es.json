@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "Error de transcripción: se interrumpió la conexión de transcripción en tiempo real",
  "Transcription failed: the connection was too slow for live audio; retry from History": "Error de transcripción: la conexión era demasiado lenta para audio en directo; vuelve a intentarlo desde el historial",
  "Transcription failed: invalid audio recording": "Error de transcripción: grabación de audio no válida",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Las sugerencias del diccionario aumentan un 20 % el coste de ElevenLabs (hasta 50 en tiempo real o 100 después de grabar)."
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Las sugerencias del diccionario aumentan un 20 % el coste de ElevenLabs (hasta 50 en tiempo real o 100 después de grabar).",
+ "App updates": "Actualizaciones de la app",
+ "Check for updates": "Buscar actualizaciones",
+ "Checking for updates…": "Buscando actualizaciones…",
+ "OpenGlaido is up to date.": "OpenGlaido está actualizado.",
+ "Downloading update…": "Descargando actualización…",
+ "Installing update…": "Instalando actualización…",
+ "No public updates are available yet.": "Aún no hay actualizaciones públicas disponibles.",
+ "Couldn’t check for updates. Try again later.": "No se pudieron buscar actualizaciones. Inténtalo de nuevo más tarde.",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "Las actualizaciones se instalan automáticamente cuando OpenGlaido está inactivo y sus ventanas están cerradas.",
+ "Update ready. Close the main window to install when idle.": "Actualización lista. Cierra la ventana principal para instalarla cuando la app esté inactiva.",
+ "Couldn’t download a verified update. Try again later.": "No se pudo descargar una actualización verificada. Inténtalo de nuevo más tarde.",
+ "Couldn’t install the update. Try again later.": "No se pudo instalar la actualización. Inténtalo de nuevo más tarde.",
+ "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido está instalando una actualización. Inténtalo de nuevo en unos instantes.",
+ "Updates are available in packaged builds only.": "Las actualizaciones solo están disponibles en versiones empaquetadas."
 }

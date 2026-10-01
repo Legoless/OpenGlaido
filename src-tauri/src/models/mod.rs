@@ -124,6 +124,7 @@ fn in_flight(progress: &DownloadProgress) -> bool {
 
 #[tauri::command]
 pub async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
+    let _activity = app.state::<crate::updater::UpdateState>().activity()?;
     let model = find(&id).ok_or("Unknown model")?;
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = |received, state: &str, error| DownloadProgress {

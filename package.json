@@ -8,6 +8,10 @@
     "build": "tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "release:build": "bun --env-file=.release.env.local scripts/release-build.ts",
+    "release:check": "bun scripts/release.ts check",
+    "release:verify": "bun scripts/release.ts verify",
+    "release:upload": "bun scripts/release.ts upload",
     "check:locales": "bun scripts/check-locales.ts"
   },
   "dependencies": {

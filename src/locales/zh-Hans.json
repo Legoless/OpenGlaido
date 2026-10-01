@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "转写失败：实时转写连接中断",
  "Transcription failed: the connection was too slow for live audio; retry from History": "转写失败：连接速度过慢，无法实时传输音频；请从历史记录重试",
  "Transcription failed: invalid audio recording": "转写失败：录音无效",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "词典提示会使 ElevenLabs 费用增加 20%（实时转写最多 50 条，录音后转写最多 100 条）。"
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "词典提示会使 ElevenLabs 费用增加 20%（实时转写最多 50 条，录音后转写最多 100 条）。",
+ "App updates": "应用更新",
+ "Check for updates": "检查更新",
+ "Checking for updates…": "正在检查更新…",
+ "OpenGlaido is up to date.": "OpenGlaido 已是最新版本。",
+ "Downloading update…": "正在下载更新…",
+ "Installing update…": "正在安装更新…",
+ "No public updates are available yet.": "暂无公开更新。",
+ "Couldn’t check for updates. Try again later.": "无法检查更新，请稍后重试。",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "OpenGlaido 空闲且所有窗口关闭时会自动安装更新。",
+ "Update ready. Close the main window to install when idle.": "更新已就绪。关闭主窗口后，将在应用空闲时安装。",
+ "Couldn’t download a verified update. Try again later.": "无法下载通过验证的更新，请稍后重试。",
+ "Couldn’t install the update. Try again later.": "无法安装更新，请稍后重试。",
+ "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido 正在安装更新，请稍后重试。",
+ "Updates are available in packaged builds only.": "更新仅适用于已打包的应用版本。"
 }

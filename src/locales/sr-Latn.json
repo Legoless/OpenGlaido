@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "Transkripcija nije uspela: veza za transkripciju u realnom vremenu je prekinuta",
  "Transcription failed: the connection was too slow for live audio; retry from History": "Transkripcija nije uspela: veza je bila prespora za zvuk uživo; pokušaj ponovo iz istorije",
  "Transcription failed: invalid audio recording": "Transkripcija nije uspela: nevažeći audio-snimak",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Smernice iz rečnika povećavaju cenu ElevenLabs usluge za 20% (do 50 u realnom vremenu ili 100 posle snimanja)."
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "Smernice iz rečnika povećavaju cenu ElevenLabs usluge za 20% (do 50 u realnom vremenu ili 100 posle snimanja).",
+ "App updates": "Ažuriranja aplikacije",
+ "Check for updates": "Proveri ažuriranja",
+ "Checking for updates…": "Provera ažuriranja…",
+ "OpenGlaido is up to date.": "OpenGlaido je ažuran.",
+ "Downloading update…": "Preuzimanje ažuriranja…",
+ "Installing update…": "Instaliranje ažuriranja…",
+ "No public updates are available yet.": "Javna ažuriranja još nisu dostupna.",
+ "Couldn’t check for updates. Try again later.": "Provera ažuriranja nije uspela. Pokušaj ponovo kasnije.",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "Ažuriranja se automatski instaliraju kada OpenGlaido nije u upotrebi i njegovi prozori su zatvoreni.",
+ "Update ready. Close the main window to install when idle.": "Ažuriranje je spremno. Zatvori glavni prozor da bi se instaliralo kada aplikacija nije u upotrebi.",
+ "Couldn’t download a verified update. Try again later.": "Nije moguće preuzeti provereno ažuriranje. Pokušaj ponovo kasnije.",
+ "Couldn’t install the update. Try again later.": "Nije moguće instalirati ažuriranje. Pokušaj ponovo kasnije.",
+ "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido instalira ažuriranje. Pokušaj ponovo za nekoliko trenutaka.",
+ "Updates are available in packaged builds only.": "Ažuriranja su dostupna samo u upakovanim verzijama aplikacije."
 }

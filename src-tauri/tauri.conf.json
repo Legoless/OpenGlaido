@@ -25,7 +25,7 @@
         "hiddenTitle": true,
         "backgroundColor": "#0d0d0d",
         "center": true,
-        "visible": true
+        "visible": false
       },
       {
         "label": "hud",
@@ -89,6 +89,18 @@
         "libs/libggml-metal.0.dylib"
       ],
       "entitlements": "Entitlements.plist"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDhDNTZFMzcwMTE0OTMzRTIKUldUaU0wa1JjT05XakZWZlVpYmZtd2R0OEUwTDhhZGIzQkNnQmwxZWdoTnhZOFZMd3dWZkpDL0oK",
+      "endpoints": [
+        "https://github.com/Legoless/OpenGlaido/releases/latest/download/latest.json"
+      ],
+      "requireSignedVersion": true,
+      "windows": {
+        "installMode": "passive"
+      }
     }
   }
 }

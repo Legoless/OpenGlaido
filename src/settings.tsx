@@ -29,6 +29,7 @@ import {
 import { CommandsHotkeySection } from "./commands-hotkeys";
 import { LOCALES, locale, t } from "./i18n";
 import { ModelSettings } from "./model-settings";
+import { UpdateSettings, useAppUpdates } from "./update-settings";
 import type {
   HotkeyField,
   HotkeyRow,
@@ -338,6 +339,7 @@ export function SettingsModal({
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [hotkeyChecks, setHotkeyChecks] = useState<Partial<Record<HotkeyField, CaptureResult>>>({});
   const [recording, setRecording] = useState<HotkeyField | null>(null);
+  const updates = useAppUpdates();
 
   useEffect(() => {
     invoke<string[]>("list_input_devices").then(setDevices).catch(console.error);
@@ -652,6 +654,7 @@ export function SettingsModal({
                 />
               </SettingsRow>
               <SettingsSection label={t("System")} />
+              <UpdateSettings {...updates} />
               <SettingsRow
                 icon={Power}
                 title={t("Launch app at login")}
@@ -712,7 +715,7 @@ export function SettingsModal({
 
       {/* Footer */}
       <div className="shrink-0 pt-[30px] pb-[22px] pl-[34px]">
-        <span className="gs-text-body-xs-regular text-text-disabled">{t("Version {v}", { v: "0.1.0" })}</span>
+        {updates.status && <span className="gs-text-body-xs-regular text-text-disabled">{t("Version {v}", { v: updates.status.current_version })}</span>}
       </div>
       {languagesOpen && (
         <LanguagePicker

@@ -442,5 +442,19 @@
  "Transcription failed: live transcription connection was interrupted": "文字起こしに失敗しました：リアルタイム文字起こしの接続が中断されました",
  "Transcription failed: the connection was too slow for live audio; retry from History": "文字起こしに失敗しました：接続が遅すぎて音声をリアルタイムで送信できませんでした。履歴から再試行してください",
  "Transcription failed: invalid audio recording": "文字起こしに失敗しました：録音データが無効です",
- "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "辞書のヒントを使用するとElevenLabsの料金が20%増加します（リアルタイムでは最大50件、録音後では最大100件）。"
+ "Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).": "辞書のヒントを使用するとElevenLabsの料金が20%増加します（リアルタイムでは最大50件、録音後では最大100件）。",
+ "App updates": "アプリの更新",
+ "Check for updates": "更新を確認",
+ "Checking for updates…": "更新を確認中…",
+ "OpenGlaido is up to date.": "OpenGlaido は最新です。",
+ "Downloading update…": "更新をダウンロード中…",
+ "Installing update…": "更新をインストール中…",
+ "No public updates are available yet.": "公開された更新はまだありません。",
+ "Couldn’t check for updates. Try again later.": "更新を確認できませんでした。後でもう一度お試しください。",
+ "Updates install automatically when OpenGlaido is idle and its windows are closed.": "OpenGlaido を使用しておらず、ウィンドウが閉じているときに更新を自動でインストールします。",
+ "Update ready. Close the main window to install when idle.": "更新の準備ができました。メインウィンドウを閉じると、アプリを使用していないときにインストールします。",
+ "Couldn’t download a verified update. Try again later.": "検証済みの更新をダウンロードできませんでした。後でもう一度お試しください。",
+ "Couldn’t install the update. Try again later.": "更新をインストールできませんでした。後でもう一度お試しください。",
+ "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido は更新をインストールしています。少し待ってからもう一度お試しください。",
+ "Updates are available in packaged builds only.": "更新はパッケージ化されたビルドでのみ利用できます。"
 }
