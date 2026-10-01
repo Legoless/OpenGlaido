@@ -142,8 +142,10 @@ function command(args: string[], input?: unknown, allowMissing = false): string 
   return output.trim();
 }
 
+export function repositoryApiPath(path: string) { return `repos/${REPOSITORY}${path ? `/${path}` : ""}`; }
+
 function github(path: string, method = "GET", body?: unknown, allowMissing = false) {
-  const args = ["gh", "api", "--hostname", "github.com", "--method", method, `repos/${REPOSITORY}/${path}`];
+  const args = ["gh", "api", "--hostname", "github.com", "--method", method, repositoryApiPath(path)];
   if (body !== undefined) args.push("--input", "-");
   const result = command(args, body, allowMissing);
   return result === null ? null : JSON.parse(result);

@@ -3,8 +3,13 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertDraft, assertNewRelease, assertSource, readBuilds, releaseManifest, releaseVersion, type BuildReceipt } from "./release";
+import { assertDraft, assertNewRelease, assertSource, readBuilds, releaseManifest, releaseVersion, repositoryApiPath, type BuildReceipt } from "./release";
 import { buildPlan } from "./release-build";
+
+test("GitHub repository lookup has no trailing slash while resource paths stay intact", () => {
+  expect(repositoryApiPath("")).toBe("repos/Legoless/OpenGlaido");
+  expect(repositoryApiPath("git/ref/heads/main")).toBe("repos/Legoless/OpenGlaido/git/ref/heads/main");
+});
 
 const version = "0.1.1";
 const repository = "Legoless/OpenGlaido";
