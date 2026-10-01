@@ -5,7 +5,7 @@ import { AudioLines, CircleAlert, TriangleAlert } from "lucide-react";
 import { resolveLocale, setLocale, t } from "./i18n";
 import type { TranscriptionConfig } from "./types";
 
-/** "dictation-error" payload: shown in the dictation bar and the main window's toast. */
+/** "dictation-error" payload: model failures reach the HUD; all notices reach the main toast. */
 export type BarMessage = { message: string; level: "error" | "warning"; vars?: Record<string, string> };
 
 // ------------------------------------------------------------------
@@ -84,7 +84,7 @@ export function Hud() {
       setVisible(true);
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setMessageOn(false), MESSAGE_MS[e.payload.level]);
-    });
+    }, { target: "hud" });
     return () => {
       window.clearTimeout(timer);
       unlistenLevel.then((f) => f());

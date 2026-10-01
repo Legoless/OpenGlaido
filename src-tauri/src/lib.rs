@@ -178,16 +178,22 @@ struct Notice {
     message: String,
     level: &'static str,
     vars: BTreeMap<String, String>,
+    model_failure: bool,
 }
 
 impl Notice {
     fn error(message: impl Into<String>) -> Self {
-        Self { message: message.into(), level: "error", vars: BTreeMap::new() }
+        Self { message: message.into(), level: "error", vars: BTreeMap::new(), model_failure: false }
     }
 
-    /// Blockers are errors on the bar even when the Home card shows the same issue as a warning.
+    fn model_error(message: impl Into<String>) -> Self {
+        Self { model_failure: true, ..Self::error(message) }
+    }
+
+    /// Only model setup failures reopen the bar; other blockers stay in the main window.
     fn from_issue(issue: setup::SetupIssue) -> Self {
-        Self { message: issue.title, level: "error", vars: issue.vars }
+        let model_failure = matches!(issue.id.as_str(), "stt" | "llm");
+        Self { message: issue.title, level: "error", vars: issue.vars, model_failure }
     }
 
     fn filled(&self) -> String {
@@ -199,29 +205,36 @@ fn fill(msg: &str, vars: &BTreeMap<String, String>) -> String {
     vars.iter().fold(msg.to_string(), |text, (k, v)| text.replace(&format!("{{{k}}}"), v))
 }
 
-/// Logs `msg` and shows it in the dictation bar as an error.
+/// Logs `msg` and shows it in the main window without reopening the dictation bar.
 pub fn report_error(app: &AppHandle, msg: impl AsRef<str>) {
-    report(app, msg.as_ref(), "error", Duration::from_millis(4500), &BTreeMap::new());
+    report(app, msg.as_ref(), "error", Duration::from_millis(4500), &BTreeMap::new(), false);
 }
 
-/// Like `report_error`, for something that worked, but not quite as asked.
-pub fn report_warning(app: &AppHandle, msg: impl AsRef<str>) {
-    report(app, msg.as_ref(), "warning", Duration::from_millis(3500), &BTreeMap::new());
+/// A model failure with a usable fallback, shown in the bar and the main window.
+pub fn report_model_warning(app: &AppHandle, msg: impl AsRef<str>) {
+    report(app, msg.as_ref(), "warning", Duration::from_millis(3500), &BTreeMap::new(), true);
 }
 
 fn report_notice(app: &AppHandle, notice: &Notice) {
     let duration = if notice.level == "warning" { 3500 } else { 4500 };
-    report(app, &notice.message, notice.level, Duration::from_millis(duration), &notice.vars);
+    report(app, &notice.message, notice.level, Duration::from_millis(duration), &notice.vars, notice.model_failure);
 }
 
-fn report(app: &AppHandle, msg: &str, level: &str, duration: Duration, vars: &BTreeMap<String, String>) {
+fn report(app: &AppHandle, msg: &str, level: &str, duration: Duration, vars: &BTreeMap<String, String>, model_failure: bool) {
     eprintln!("{}", fill(msg, vars));
-    // Before the bar appears, so it appears with the message. `message` is the translation key.
-    if let Err(e) = app.emit(
-        "dictation-error",
-        serde_json::json!({ "message": msg, "level": level, "vars": vars }),
-    ) {
+    let payload = serde_json::json!({ "message": msg, "level": level, "vars": vars });
+    // Only model failures reach the HUD listener. Other actionable issues remain in the main
+    // window, without restarting the bar's message animation or visibility timer.
+    let emitted = if model_failure {
+        app.emit("dictation-error", payload)
+    } else {
+        app.emit_to("main", "dictation-error", payload)
+    };
+    if let Err(e) = emitted {
         eprintln!("Failed to emit dictation-error: {}", e);
+    }
+    if !model_failure {
+        return;
     }
     if let Some(state) = app.try_state::<AppState>() {
         *state.error_until.lock().unwrap() = Some(Instant::now() + duration);
@@ -641,6 +654,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
             "warning",
             Duration::from_millis(3500),
             &vars,
+            false,
         );
     }
 
@@ -861,29 +875,28 @@ async fn finish_text(app: &AppHandle, db: &Database, raw: &str, config: &Transcr
 }
 
 /// Transcribes, pastes and saves a dictation from `end_capture` (which counted the job);
-/// failures are reported to the dictation bar.
+/// model failures are reported to the dictation bar; other failures stay in the main window.
 async fn process_recording(app: AppHandle, recording: Recording, duration_ms: i64, session: Session) {
     match transcribe_and_paste(&app, recording, duration_ms, session).await {
         Ok(Some(text)) => {
             let _ = app.emit("transcription-completed", text);
         }
         Ok(None) => {}
-        Err(e) => report_error(&app, e),
+        Err(e) => report_notice(&app, &e),
     }
     job_finished(&app);
 }
 
-/// Ok(None) = nothing pasted: no speech (reported) or handed over to a command (voice activation).
+/// Ok(None) = nothing pasted: no speech (silent) or handed over to a command (voice activation).
 async fn transcribe_and_paste(
     app: &AppHandle,
     recording: Recording,
     duration_ms: i64,
     session: Session,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, Notice> {
     let state = app.state::<AppState>();
-    let (wav, has_speech) = finish_recording(recording).await?;
+    let (wav, has_speech) = finish_recording(recording).await.map_err(Notice::error)?;
     if !has_speech {
-        report_warning(app, "No speech detected");
         return Ok(None);
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -919,7 +932,7 @@ async fn transcribe_and_paste(
                 let _ = state.db.update_history(&HistoryEntry { status: "failed".into(), error: Some(e.clone()), ..row });
                 history_updated(app);
             }
-            return Err(e);
+            return Err(Notice::model_error(e));
         }
     };
     if is_blank(&raw) {
@@ -929,7 +942,6 @@ async fn transcribe_and_paste(
         if audio_saved {
             let _ = fs::remove_file(&audio_file_path);
         }
-        report_warning(app, "No speech detected");
         return Ok(None);
     }
 
@@ -1609,6 +1621,29 @@ mod tests {
         assert_eq!(text, "Microphone “MacBook Pro Microphone” not found, using the system default");
         let notice = Notice::error("Couldn't start recording: busy");
         assert_eq!(notice.filled(), "Couldn't start recording: busy");
+    }
+
+    #[test]
+    fn only_model_failures_reopen_the_dictation_bar() {
+        assert!(Notice::model_error("Transcription failed: couldn't load the model").model_failure);
+        for message in ["Recording failed", "Couldn't paste", "Couldn't save to history"] {
+            assert!(!Notice::error(message).model_failure);
+        }
+        for id in ["stt", "llm", "accessibility", "microphone", "no_microphone", "hotkeys"] {
+            let notice = Notice::from_issue(setup::SetupIssue {
+                id: id.into(),
+                level: "error".into(),
+                title: "Setup issue".into(),
+                detail: String::new(),
+                vars: BTreeMap::new(),
+                action: None,
+            });
+            assert_eq!(notice.model_failure, matches!(id, "stt" | "llm"), "{id}");
+        }
+        for text in ["", "  ", "…", ". ! ?"] {
+            assert!(is_blank(text));
+        }
+        assert!(!is_blank("Hello"));
     }
 
     #[test]

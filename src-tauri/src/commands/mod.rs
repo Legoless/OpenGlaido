@@ -306,8 +306,6 @@ pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i6
         if open {
             let generation = c.run.lock().unwrap().generation;
             update(&app, generation, |r| r.error = Some("No speech detected".into()));
-        } else {
-            crate::report_warning(&app, "No speech detected");
         }
         return;
     }

@@ -529,7 +529,7 @@ pub async fn apply_formatting(app: &AppHandle, raw_text: &str, config: &Transcri
         Err(e) => {
             // For a local model llm_from only fails when it isn't downloaded; other failures stay silent.
             if config.llm_source == "local" {
-                crate::report_warning(app, "The language model isn't downloaded, so your text wasn't cleaned up");
+                crate::report_model_warning(app, "The language model isn't downloaded, so your text wasn't cleaned up");
             }
             Err(e)
         }
