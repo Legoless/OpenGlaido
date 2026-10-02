@@ -450,7 +450,7 @@ pub async fn transcribe_raw(
 ) -> Result<String, String> {
     if config.stt_source == "local" {
         let initial_prompt = (!vocabulary.is_empty()).then(|| vocabulary.join(", "));
-        return models::whisper::transcribe(app, &config.local_stt_model, wav_bytes, &config.languages, initial_prompt).await;
+        return models::stt::transcribe(app, &config.local_stt_model, wav_bytes, &config.languages, initial_prompt).await;
     }
     // History Retry still uses the selected model: feed the saved WAV through its live
     // protocol instead of sending a live-only model to the file transcription endpoint.

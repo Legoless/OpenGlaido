@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "Nie udało się pobrać zweryfikowanej aktualizacji. Spróbuj ponownie później.",
  "Couldn’t install the update. Try again later.": "Nie udało się zainstalować aktualizacji. Spróbuj ponownie później.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido instaluje aktualizację. Spróbuj ponownie za chwilę.",
- "Updates are available in packaged builds only.": "Aktualizacje są dostępne tylko w spakowanych wersjach aplikacji."
+ "Updates are available in packaged builds only.": "Aktualizacje są dostępne tylko w spakowanych wersjach aplikacji.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 języków; transkrybuje po zakończeniu nagrywania w OpenGlaido.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 języków. Wybierz język mówiony; automatyczne wykrywanie jest niedostępne.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 języków europejskich, w tym słoweński; wykrywa język mówiony.",
+ "30 languages with automatic detection.": "30 języków z automatycznym wykrywaniem.",
+ "Choose a language": "Wybierz język",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Wybierz język przed dyktowaniem. Ten model nie wykrywa go automatycznie.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Transkrypcja wielojęzyczna wymagająca większego pobrania; wykrywa język mówiony.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Ten model nie obsługuje wszystkich języków dyktowania. Wybierz inny model lub zmień języki dyktowania.",
+ "This model needs one spoken language.": "Ten model wymaga jednego języka mówionego.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe wymaga jednego języka. Wybierz go w Ustawienia › Model.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Ten model nie obsługuje wybranych języków dyktowania. Wybierz inny model lub zmień języki w Ustawieniach."
 }

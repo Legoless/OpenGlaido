@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "Nije moguće preuzeti provereno ažuriranje. Pokušaj ponovo kasnije.",
  "Couldn’t install the update. Try again later.": "Nije moguće instalirati ažuriranje. Pokušaj ponovo kasnije.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido instalira ažuriranje. Pokušaj ponovo za nekoliko trenutaka.",
- "Updates are available in packaged builds only.": "Ažuriranja su dostupna samo u upakovanim verzijama aplikacije."
+ "Updates are available in packaged builds only.": "Ažuriranja su dostupna samo u upakovanim verzijama aplikacije.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 jezika; transkribuje nakon snimanja u aplikaciji OpenGlaido.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 jezika. Izaberite govorni jezik; automatsko prepoznavanje nije dostupno.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 evropskih jezika, uključujući slovenački; prepoznaje govorni jezik.",
+ "30 languages with automatic detection.": "30 jezika sa automatskim prepoznavanjem.",
+ "Choose a language": "Izaberite jezik",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Izaberite jezik pre diktiranja. Ovaj model ga ne može automatski prepoznati.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Višejezična transkripcija sa većim preuzimanjem; prepoznaje govorni jezik.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Ovaj model ne podržava sve vaše jezike diktiranja. Izaberite drugi model ili promenite jezike diktiranja.",
+ "This model needs one spoken language.": "Ovaj model zahteva jedan govorni jezik.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe zahteva jedan jezik. Izaberite ga u Podešavanja › Model.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Ovaj model ne podržava izabrane jezike diktiranja. Izaberite drugi model ili promenite jezike u Podešavanjima."
 }

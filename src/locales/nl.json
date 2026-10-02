@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "Een geverifieerde update kon niet worden gedownload. Probeer het later opnieuw.",
  "Couldn’t install the update. Try again later.": "De update kon niet worden geïnstalleerd. Probeer het later opnieuw.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido installeert een update. Probeer het zo opnieuw.",
- "Updates are available in packaged builds only.": "Updates zijn alleen beschikbaar in verpakte appversies."
+ "Updates are available in packaged builds only.": "Updates zijn alleen beschikbaar in verpakte appversies.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 talen; transcribeert in OpenGlaido na de opname.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 talen. Kies de gesproken taal; automatische detectie is niet beschikbaar.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 Europese talen, waaronder Sloveens; herkent de gesproken taal.",
+ "30 languages with automatic detection.": "30 talen met automatische detectie.",
+ "Choose a language": "Kies een taal",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Kies een taal voordat je dicteert. Dit model kan deze niet automatisch herkennen.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Meertalige transcriptie met een grotere download; herkent de gesproken taal.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Dit model ondersteunt niet al je dicteertalen. Kies een ander model of wijzig je dicteertalen.",
+ "This model needs one spoken language.": "Dit model heeft één gesproken taal nodig.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe heeft één taal nodig. Kies deze bij Instellingen › Model.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Dit model ondersteunt de geselecteerde dicteertalen niet. Kies een ander model of wijzig de talen in Instellingen."
 }

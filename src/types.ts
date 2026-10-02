@@ -69,7 +69,7 @@ export interface TranscriptionConfig {
   custom_prompt: string;
   email_rule: FormattingRule;
   custom_rules: FormattingRule[];
-  /** Whisper ISO-639-1 codes: [] = auto-detect, exactly 1 = pinned, 2+ = auto-detect. */
+  /** ISO-639-1 codes: [] = auto-detect, exactly 1 = pinned, 2+ = auto-detect; model support varies. */
   languages: string[];
   mute_background: boolean;
   theme: "dark" | "light" | "system";
@@ -104,6 +104,7 @@ export interface DownloadProgress {
 export interface LocalModel {
   id: string;
   kind: "stt" | "llm";
+  backend: string;
   name: string;
   notes: string;
   file: string;
@@ -111,7 +112,10 @@ export interface LocalModel {
   size_bytes: number;
   sha256: string;
   english_only: boolean;
-  /** 1–5, relative on Apple Silicon. */
+  /** null means no model-specific restriction. */
+  supported_languages: string[] | null;
+  requires_language: boolean;
+  /** 1–5, relative on Apple Silicon; 0 means not measured. */
   speed: number;
   accuracy: number;
   recommended: boolean;

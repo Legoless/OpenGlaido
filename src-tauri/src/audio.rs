@@ -317,13 +317,14 @@ impl Waveform {
     }
 }
 
-/// -42 dBFS sits on the rest height, about -8 dBFS fills the bar. Normal speech lands in between,
-/// and room tone below the floor does not twitch the pill.
+/// Display-only normalization: retain quiet speech down to -60 dBFS and gently lift its
+/// visible range. A fixed floor/gain cap keeps stationary room noise from being amplified
+/// to full height as an automatic peak normalizer would. Recorded samples are untouched.
 fn perceptual(amplitude: f32) -> f32 {
-    if amplitude < 1.0e-5 {
+    if !amplitude.is_finite() || amplitude <= 0.001 {
         return 0.0;
     }
-    ((20.0 * amplitude.log10() + 42.0) / 34.0).clamp(0.0, 1.0)
+    ((20.0 * amplitude.log10() + 60.0) / 52.0).clamp(0.0, 1.0).powf(1.1)
 }
 
 /// Both humps are driven by the whole voice, so speech does not collapse into one arch in the
@@ -832,6 +833,37 @@ mod tests {
         let quiet: f32 = tone(freq, 0.04, 8, rate).into_iter().sum();
         let loud: f32 = tone(freq, 0.45, 8, rate).into_iter().sum();
         assert!(loud > quiet + 1.5, "loud {loud} quiet {quiet}");
+    }
+
+    #[test]
+    fn quiet_voice_is_visible_while_room_tone_stays_bounded() {
+        let quiet = tone(BAND_HZ[1], 0.005, 20, 48_000); // -46 dBFS, previously below the display floor
+        assert!(quiet[2] > 0.2, "quiet voice should visibly raise the bars: {quiet:?}");
+        let room = tone(BAND_HZ[1], 0.0008, 400, 48_000);
+        assert!(room.iter().all(|v| *v == 0.0), "noise must not gain itself up: {room:?}");
+        let noise = tone(BAND_HZ[1], 0.002, 400, 48_000);
+        assert!(noise.iter().copied().fold(0.0f32, f32::max) < 0.35, "stationary noise: {noise:?}");
+        assert_eq!(perceptual(f32::NAN), 0.0);
+        assert_eq!(perceptual(f32::INFINITY), 0.0);
+        assert_eq!(perceptual(1.0), 1.0);
+    }
+
+    #[test]
+    fn visual_normalization_does_not_change_recorded_or_streamed_samples() {
+        let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let mut feed = StreamFeed {
+            input: Some(StreamInput { tx, overflowed: Arc::new(AtomicBool::new(false)) }),
+            rate: 48_000,
+            skip: 0,
+            generation: 1,
+        };
+        let quiet = tone_samples(BAND_HZ[1], 0.005, 20, 48_000);
+        let meter = BarMeter::new();
+        record_chunk(&quiet, 1, |sample| sample, &samples, &mut Waveform::new(48_000), &meter, &mut feed);
+        assert_eq!(samples.lock().unwrap().samples, quiet);
+        assert_eq!(rx.try_recv().unwrap().samples, quiet);
+        assert!(meter.load()[2] > 0.2);
     }
 
     fn assert_two_peaks(bars: &[f32; BAR_COUNT], what: &str) {

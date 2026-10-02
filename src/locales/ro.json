@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "Nu s-a putut descărca o actualizare verificată. Încearcă din nou mai târziu.",
  "Couldn’t install the update. Try again later.": "Nu s-a putut instala actualizarea. Încearcă din nou mai târziu.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido instalează o actualizare. Încearcă din nou în câteva momente.",
- "Updates are available in packaged builds only.": "Actualizările sunt disponibile doar în versiunile împachetate ale aplicației."
+ "Updates are available in packaged builds only.": "Actualizările sunt disponibile doar în versiunile împachetate ale aplicației.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 limbi; transcrie după înregistrare în OpenGlaido.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 limbi. Alege limba vorbită; detectarea automată nu este disponibilă.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 de limbi europene, inclusiv slovena; detectează limba vorbită.",
+ "30 languages with automatic detection.": "30 de limbi cu detectare automată.",
+ "Choose a language": "Alege o limbă",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Alege o limbă înainte de a dicta. Acest model nu o poate detecta automat.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Transcriere multilingvă cu o descărcare mai mare; detectează limba vorbită.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Acest model nu acceptă toate limbile tale de dictare. Alege alt model sau modifică limbile de dictare.",
+ "This model needs one spoken language.": "Acest model necesită o singură limbă vorbită.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe necesită o singură limbă. Alege-o în Setări › Model.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Acest model nu acceptă limbile de dictare selectate. Alege alt model sau modifică limbile în Setări."
 }

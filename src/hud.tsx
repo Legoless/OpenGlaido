@@ -1,46 +1,63 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type RefObject } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AudioLines, CircleAlert, TriangleAlert } from "lucide-react";
 import { resolveLocale, setLocale, t } from "./i18n";
 import type { TranscriptionConfig } from "./types";
+import { hudView, IDLE_HUD, newestHudState, type HudState, type HudView } from "./hud-state";
 
 /** "dictation-error" payload: model failures reach the HUD; all notices reach the main toast. */
 export type BarMessage = { message: string; level: "error" | "warning"; vars?: Record<string, string> };
 
 // ------------------------------------------------------------------
 // HUD dictation bar (/#hud): one pill in a 420x72 window that morphs between
-// recording and a warning/error message. Release hides it immediately.
+// recording, processing and a model warning/error message.
 // ------------------------------------------------------------------
 const BAR_COUNT = 10;
 const MESSAGE_MS = { warning: 3500, error: 4500 };
 // Fraction of the remaining distance covered each frame. The microphone levels are already
 // eased; this only fills the steps between them, with no stored speed to ring past the level.
 const GLIDE = 0.22;
-type View = "recording" | BarMessage["level"];
 
 // Tint + 1px ring over the pill (tokens in index.css).
-const TONES: Record<View, string> = {
+const TONES: Record<HudView, string> = {
   recording: "inset-ring-border-default",
+  processing: "inset-ring-border-default",
   warning: "bg-warning-surface inset-ring-warning-border",
   error: "bg-error-surface inset-ring-error-border",
 };
 const ICON = "absolute inset-0 size-[18px] transition-[opacity,scale,filter] duration-300";
 const ICON_OFF = "scale-50 opacity-0 blur-[2px]";
 
+/** Processing occupies the icon + waveform width, with no microphone bars or implied percentage. */
+export function HudSignal({ processing, bars }: { processing: boolean; bars?: RefObject<Array<HTMLSpanElement | null>> }) {
+  if (processing) {
+    return (
+      <div role="progressbar" aria-label={t("Working…")} className="flex h-[18px] w-[92px] items-center">
+        <span className="gs-processing-shimmer h-1 w-full rounded-full bg-text-accent" />
+      </div>
+    );
+  }
+  return (
+    <div aria-hidden="true" className="flex h-[18px] items-center gap-1">
+      {Array.from({ length: BAR_COUNT }, (_, i) => (
+        <span key={i} ref={(el) => { if (bars) bars.current[i] = el; }} className="h-1 w-[3px] rounded-full bg-text-accent" />
+      ))}
+    </div>
+  );
+}
+
 export function Hud() {
-  const [isRecording, setIsRecording] = useState(false);
-  const recordingRef = useRef(false);
+  const [status, setStatus] = useState<HudState>(IDLE_HUD);
+  const statusRef = useRef<HudState>(IDLE_HUD);
   const targets = useRef<number[]>(Array(BAR_COUNT).fill(0));
   const pos = useRef<number[]>(Array(BAR_COUNT).fill(0));
   const barEls = useRef<Array<HTMLSpanElement | null>>(Array(BAR_COUNT).fill(null));
   // The last message stays rendered while the pill animates out; `messageOn` says it's current.
   const [message, setMessage] = useState<BarMessage | null>(null);
   const [messageOn, setMessageOn] = useState(false);
-  // The backend hides the native window at the same time as this event.
-  const [visible, setVisible] = useState(true);
   // What the pill shows; kept while it's hidden so it doesn't morph on the way out.
-  const [view, setView] = useState<View>("recording");
+  const [view, setView] = useState<HudView>("recording");
   // Size changes animate only once the pill is on screen (it appears at its final size).
   const [settled, setSettled] = useState(false);
   const pillRef = useRef<HTMLDivElement>(null);
@@ -50,26 +67,24 @@ export function Hud() {
     const applyConfig = (c: TranscriptionConfig) => setLocale(resolveLocale(c.app_language));
     invoke<TranscriptionConfig>("get_config").then(applyConfig).catch(console.error);
     const unlistenConfig = listen<TranscriptionConfig>("config-changed", (e) => applyConfig(e.payload));
-    const unlistenVisibility = listen<boolean>("hud-visibility", (e) => setVisible(e.payload));
-    const unlistenRec = listen<boolean>("recording-status", (e) => {
-      recordingRef.current = e.payload;
-      setIsRecording(e.payload);
-      if (e.payload) {
+    const applyStatus = (incoming: HudState) => {
+      const previous = statusRef.current;
+      const next = newestHudState(previous, incoming);
+      if (next === previous) return;
+      statusRef.current = next;
+      if (next.recording && !previous.recording) {
         targets.current.fill(0);
         pos.current.fill(0);
-        setVisible(true);
+        setMessageOn(false);
       }
-    });
-    invoke<boolean>("get_recording_state")
-      .then((recording) => {
-        recordingRef.current = recording;
-        setIsRecording(recording);
-      })
-      .catch(console.error);
+      setStatus(next);
+    };
+    // Register before reading: the revision prevents a slower read replacing a newer event.
+    const unlistenStatus = listen<HudState>("hud-state", (e) => applyStatus(e.payload));
+    unlistenStatus.then(() => invoke<HudState>("get_hud_state")).then(applyStatus).catch(console.error);
     return () => {
       unlistenConfig.then((f) => f());
-      unlistenVisibility.then((f) => f());
-      unlistenRec.then((f) => f());
+      unlistenStatus.then((f) => f());
     };
   }, []);
 
@@ -81,7 +96,6 @@ export function Hud() {
     const unlistenError = listen<BarMessage>("dictation-error", (e) => {
       setMessage(e.payload);
       setMessageOn(true);
-      setVisible(true);
       window.clearTimeout(timer);
       timer = window.setTimeout(() => setMessageOn(false), MESSAGE_MS[e.payload.level]);
     }, { target: "hud" });
@@ -97,17 +111,12 @@ export function Hud() {
   useEffect(() => {
     let raf = 0;
     const tick = () => {
-      const recording = recordingRef.current;
+      const { recording } = statusRef.current;
       for (let i = 0; i < BAR_COUNT; i++) {
         const el = barEls.current[i];
         if (!el) continue;
-        if (!recording) {
-          targets.current[i] = 0;
-          pos.current[i] = 0;
-          el.style.height = "4px";
-          continue;
-        }
-        let next = pos.current[i] + (targets.current[i] - pos.current[i]) * GLIDE;
+        const target = recording ? targets.current[i] : 0;
+        let next = pos.current[i] + (target - pos.current[i]) * GLIDE;
         if (next < 0) next = 0;
         else if (next > 1) next = 1;
         pos.current[i] = next;
@@ -131,10 +140,9 @@ export function Hud() {
     return () => observer.disconnect();
   }, []);
 
-  const live: View | null =
-    messageOn && message ? message.level : isRecording ? "recording" : null;
+  const live = hudView(status, messageOn && message ? message.level : null);
   if (live && live !== view) setView(live);
-  const shown = visible && live !== null;
+  const shown = live !== null;
   const isMessage = view === "warning" || view === "error";
 
   useEffect(() => {
@@ -162,28 +170,20 @@ export function Hud() {
           ref={contentRef}
           className="relative flex w-max shrink-0 items-center gap-2"
         >
-          <span className="relative size-[18px] shrink-0">
+          {view !== "processing" && <span className="relative size-[18px] shrink-0">
             <AudioLines className={`${ICON} text-text-accent ${isMessage ? ICON_OFF : ""}`} />
             <TriangleAlert className={`${ICON} text-text-warning ${view === "warning" ? "" : ICON_OFF}`} />
             <CircleAlert className={`${ICON} text-text-error ${view === "error" ? "" : ICON_OFF}`} />
-          </span>
+          </span>}
           {/* Waveform and message share one cell; the hidden one is 0x0 so only the shown one sizes the pill. */}
           <div className="grid items-center">
             <div className={`col-start-1 row-start-1 flex items-center ${isMessage ? "size-0" : ""}`}>
               <div
-                className={`flex h-[18px] shrink-0 origin-left items-center gap-1 transition-[opacity,scale] ${
+                className={`shrink-0 origin-left transition-[opacity,scale] ${
                   isMessage ? "scale-x-0 opacity-0 duration-150" : "delay-100 duration-200"
                 }`}
               >
-                {Array.from({ length: BAR_COUNT }, (_, i) => (
-                  <span
-                    key={i}
-                    ref={(el) => {
-                      barEls.current[i] = el;
-                    }}
-                    className="h-1 w-[3px] rounded-full bg-text-accent"
-                  />
-                ))}
+                <HudSignal processing={view === "processing"} bars={barEls} />
               </div>
             </div>
             <div className={`col-start-1 row-start-1 flex items-center ${isMessage ? "" : "size-0"}`}>

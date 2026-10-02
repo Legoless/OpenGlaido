@@ -129,6 +129,10 @@ Existing output directories are never overwritten. Nothing is uploaded.`);
     await run(["xcrun", "stapler", "validate", app]);
     await run(["spctl", "--assess", "--type", "execute", "--verbose=4", app]);
     await run(["lipo", "-verify_arch", "arm64", join(app, "Contents", "MacOS", "openglaido")]);
+    const speechHelper = join(app, "Contents", "MacOS", "openglaido-stt");
+    await run(["lipo", "-verify_arch", "arm64", speechHelper]);
+    await run(["codesign", "--verify", "--strict", speechHelper]);
+    await run([speechHelper, "--self-test"]);
     for (const library of config.bundle.macOS.frameworks as string[]) {
       await run(["lipo", "-verify_arch", "arm64", join(app, "Contents", "Frameworks", basename(library))]);
     }

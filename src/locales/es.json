@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "No se pudo descargar una actualización verificada. Inténtalo de nuevo más tarde.",
  "Couldn’t install the update. Try again later.": "No se pudo instalar la actualización. Inténtalo de nuevo más tarde.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido está instalando una actualización. Inténtalo de nuevo en unos instantes.",
- "Updates are available in packaged builds only.": "Las actualizaciones solo están disponibles en versiones empaquetadas."
+ "Updates are available in packaged builds only.": "Las actualizaciones solo están disponibles en versiones empaquetadas.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 idiomas; transcribe después de grabar en OpenGlaido.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 idiomas. Elige el idioma hablado; la detección automática no está disponible.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 idiomas europeos, incluido el esloveno; detecta el idioma hablado.",
+ "30 languages with automatic detection.": "30 idiomas con detección automática.",
+ "Choose a language": "Elige un idioma",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Elige un idioma antes de dictar. Este modelo no puede detectarlo automáticamente.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Transcripción multilingüe con una descarga más grande; detecta el idioma hablado.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Este modelo no admite todos tus idiomas de dictado. Elige otro modelo o cambia tus idiomas de dictado.",
+ "This model needs one spoken language.": "Este modelo necesita un idioma hablado.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe necesita un idioma. Elígelo en Ajustes › Modelo.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Este modelo no admite los idiomas de dictado seleccionados. Elige otro modelo o cambia los idiomas en Ajustes."
 }

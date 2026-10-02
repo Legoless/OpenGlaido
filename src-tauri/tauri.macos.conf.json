@@ -1,0 +1,6 @@
+{
+  "bundle": {
+    "externalBin": ["binaries/openglaido-stt"],
+    "resources": {"../native-stt/THIRD-PARTY-NOTICES.txt": "native-stt-licenses.txt"}
+  }
+}

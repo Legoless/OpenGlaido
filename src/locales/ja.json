@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "検証済みの更新をダウンロードできませんでした。後でもう一度お試しください。",
  "Couldn’t install the update. Try again later.": "更新をインストールできませんでした。後でもう一度お試しください。",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido は更新をインストールしています。少し待ってからもう一度お試しください。",
- "Updates are available in packaged builds only.": "更新はパッケージ化されたビルドでのみ利用できます。"
+ "Updates are available in packaged builds only.": "更新はパッケージ化されたビルドでのみ利用できます。",
+ "13 languages; transcribes after recording in OpenGlaido.": "13言語に対応。OpenGlaidoでは録音後に文字起こしします。",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14言語に対応。話す言語を選択してください。自動検出は利用できません。",
+ "25 European languages, including Slovenian; detects the spoken language.": "スロベニア語を含むヨーロッパの25言語に対応。話している言語を検出します。",
+ "30 languages with automatic detection.": "30言語に対応し、言語を自動検出します。",
+ "Choose a language": "言語を選択",
+ "Choose a language before dictating. This model cannot detect it automatically.": "音声入力の前に言語を選択してください。このモデルは言語を自動検出できません。",
+ "Multilingual transcription with a larger download; detects the spoken language.": "多言語の文字起こしに対応し、ダウンロードサイズは大きめです。話している言語を検出します。",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "このモデルは、設定された音声入力の言語の一部に対応していません。別のモデルを選ぶか、音声入力の言語を変更してください。",
+ "This model needs one spoken language.": "このモデルでは、話す言語を1つ指定する必要があります。",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribeでは言語を1つ指定する必要があります。「設定」›「モデル」で選択してください。",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "このモデルは選択された音声入力の言語に対応していません。別のモデルを選ぶか、「設定」で言語を変更してください。"
 }

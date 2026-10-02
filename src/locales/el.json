@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "Δεν ήταν δυνατή η λήψη επαληθευμένης ενημέρωσης. Δοκιμάστε ξανά αργότερα.",
  "Couldn’t install the update. Try again later.": "Δεν ήταν δυνατή η εγκατάσταση της ενημέρωσης. Δοκιμάστε ξανά αργότερα.",
  "OpenGlaido is installing an update. Try again shortly.": "Το OpenGlaido εγκαθιστά μια ενημέρωση. Δοκιμάστε ξανά σε λίγο.",
- "Updates are available in packaged builds only.": "Οι ενημερώσεις είναι διαθέσιμες μόνο σε πακεταρισμένες εκδόσεις της εφαρμογής."
+ "Updates are available in packaged builds only.": "Οι ενημερώσεις είναι διαθέσιμες μόνο σε πακεταρισμένες εκδόσεις της εφαρμογής.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 γλώσσες· μεταγράφει μετά την εγγραφή στο OpenGlaido.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 γλώσσες. Επιλέξτε την ομιλούμενη γλώσσα· η αυτόματη ανίχνευση δεν είναι διαθέσιμη.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 ευρωπαϊκές γλώσσες, συμπεριλαμβανομένων των σλοβενικών· ανιχνεύει την ομιλούμενη γλώσσα.",
+ "30 languages with automatic detection.": "30 γλώσσες με αυτόματη ανίχνευση.",
+ "Choose a language": "Επιλέξτε γλώσσα",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Επιλέξτε γλώσσα πριν υπαγορεύσετε. Αυτό το μοντέλο δεν μπορεί να την ανιχνεύσει αυτόματα.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Πολύγλωσση μεταγραφή με μεγαλύτερη λήψη· ανιχνεύει την ομιλούμενη γλώσσα.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Αυτό το μοντέλο δεν υποστηρίζει όλες τις γλώσσες υπαγόρευσής σας. Επιλέξτε άλλο μοντέλο ή αλλάξτε τις γλώσσες υπαγόρευσης.",
+ "This model needs one spoken language.": "Αυτό το μοντέλο απαιτεί μία ομιλούμενη γλώσσα.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Το Cohere Transcribe απαιτεί μία γλώσσα. Επιλέξτε την στις Ρυθμίσεις › Μοντέλο.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Αυτό το μοντέλο δεν υποστηρίζει τις επιλεγμένες γλώσσες υπαγόρευσης. Επιλέξτε άλλο μοντέλο ή αλλάξτε τις γλώσσες στις Ρυθμίσεις."
 }

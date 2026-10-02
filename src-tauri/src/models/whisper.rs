@@ -75,13 +75,12 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    #[cfg(test)]
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::Ordering;
     use std::sync::{Mutex, MutexGuard, PoisonError};
     use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
-
-    const RATE: u32 = 16_000;
 
     /// The loaded model and its path; the lock also serializes transcriptions.
     static CONTEXT: Mutex<Option<(PathBuf, WhisperContext)>> = Mutex::new(None);
@@ -137,7 +136,7 @@ mod imp {
             eprintln!("Whisper failed: {e}");
             "Transcription failed: the local model couldn't process the audio".to_string()
         };
-        let pcm = decode_wav(wav)?;
+        let pcm = super::super::stt::decode_wav(wav, None)?;
         if pcm.is_empty() {
             return Ok(String::new());
         }
@@ -192,23 +191,6 @@ mod imp {
         allowed.iter().copied().max_by(|a, b| prob(a).total_cmp(&prob(b))).unwrap_or("auto")
     }
 
-    /// Mono f32 samples at 16 kHz from any PCM WAV (downmixed and resampled when needed).
-    fn decode_wav(wav: &[u8]) -> Result<Vec<f32>, String> {
-        let bad = |e: hound::Error| format!("Transcription failed: unreadable audio ({e})");
-        let mut reader = hound::WavReader::new(Cursor::new(wav)).map_err(bad)?;
-        let spec = reader.spec();
-        let samples: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Float => reader.samples::<f32>().collect::<Result<_, _>>().map_err(bad)?,
-            hound::SampleFormat::Int => {
-                let scale = (1u64 << (spec.bits_per_sample - 1)) as f32;
-                reader.samples::<i32>().map(|s| s.map(|s| s as f32 / scale)).collect::<Result<_, _>>().map_err(bad)?
-            }
-        };
-        let channels = spec.channels.max(1) as usize;
-        let mono: Vec<f32> = samples.chunks(channels).map(|c| c.iter().sum::<f32>() / c.len() as f32).collect();
-        Ok(crate::audio::resample(&mono, spec.sample_rate, RATE))
-    }
-
     /// Drops whisper's non-speech markers from a segment: any `[...]` (e.g. `[BLANK_AUDIO]`, `[Music]`) and a
     /// segment that is only a `(...)` or `*...*` note (e.g. `(music)`, `*laughs*`). Dictated parentheses mid-text stay.
     fn strip_markers(segment: &str) -> String {
@@ -259,10 +241,10 @@ mod imp {
                 writer.write_sample(0i16).unwrap();
             }
             writer.finalize().unwrap();
-            let pcm = decode_wav(&cursor.into_inner()).unwrap();
+            let pcm = super::super::super::stt::decode_wav(&cursor.into_inner(), None).unwrap();
             assert_eq!(pcm.len(), 1600);
             assert!(pcm.iter().all(|s| (s - 0.25).abs() < 1e-4));
-            assert!(decode_wav(b"not a wav").is_err());
+            assert!(super::super::super::stt::decode_wav(b"not a wav", None).is_err());
         }
 
         #[test]

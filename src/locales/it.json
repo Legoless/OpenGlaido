@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "Impossibile scaricare un aggiornamento verificato. Riprova più tardi.",
  "Couldn’t install the update. Try again later.": "Impossibile installare l’aggiornamento. Riprova più tardi.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido sta installando un aggiornamento. Riprova tra poco.",
- "Updates are available in packaged builds only.": "Gli aggiornamenti sono disponibili solo nelle versioni distribuite come pacchetto."
+ "Updates are available in packaged builds only.": "Gli aggiornamenti sono disponibili solo nelle versioni distribuite come pacchetto.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 lingue; trascrive dopo la registrazione in OpenGlaido.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 lingue. Scegli la lingua parlata; il rilevamento automatico non è disponibile.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 lingue europee, incluso lo sloveno; rileva la lingua parlata.",
+ "30 languages with automatic detection.": "30 lingue con rilevamento automatico.",
+ "Choose a language": "Scegli una lingua",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Scegli una lingua prima di dettare. Questo modello non può rilevarla automaticamente.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Trascrizione multilingue con un download più grande; rileva la lingua parlata.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Questo modello non supporta tutte le tue lingue di dettatura. Scegli un altro modello o modifica le lingue di dettatura.",
+ "This model needs one spoken language.": "Questo modello richiede una sola lingua parlata.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe richiede una sola lingua. Sceglila in Impostazioni › Modello.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Questo modello non supporta le lingue di dettatura selezionate. Scegli un altro modello o modifica le lingue nelle Impostazioni."
 }

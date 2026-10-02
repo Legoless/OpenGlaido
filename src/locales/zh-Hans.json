@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "无法下载通过验证的更新，请稍后重试。",
  "Couldn’t install the update. Try again later.": "无法安装更新，请稍后重试。",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido 正在安装更新，请稍后重试。",
- "Updates are available in packaged builds only.": "更新仅适用于已打包的应用版本。"
+ "Updates are available in packaged builds only.": "更新仅适用于已打包的应用版本。",
+ "13 languages; transcribes after recording in OpenGlaido.": "支持13种语言；在OpenGlaido中于录音结束后转写。",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "支持14种语言。请选择所说的语言；不支持自动检测。",
+ "25 European languages, including Slovenian; detects the spoken language.": "支持包括斯洛文尼亚语在内的25种欧洲语言，可检测所说的语言。",
+ "30 languages with automatic detection.": "支持30种语言，可自动检测语言。",
+ "Choose a language": "选择语言",
+ "Choose a language before dictating. This model cannot detect it automatically.": "请在听写前选择语言。此模型无法自动检测语言。",
+ "Multilingual transcription with a larger download; detects the spoken language.": "支持多语言转写，下载体积较大；可检测所说的语言。",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "此模型不支持你设置的所有听写语言。请选择其他模型或更改听写语言。",
+ "This model needs one spoken language.": "此模型需要指定一种所说的语言。",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe需要指定一种语言。请在“设置”›“模型”中选择。",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "此模型不支持所选的听写语言。请选择其他模型或在“设置”中更改语言。"
 }

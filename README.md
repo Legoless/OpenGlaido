@@ -14,7 +14,7 @@ Press your shortcut, speak naturally, and messy speech is converted to clean, fo
   - Groq Whisper (ultra-fast ~200ms latency)
   - Self-hosted [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)
   - Speaches, vLLM, RunPod, Modal, or OpenAI
-  - Or on your Mac, offline: download a Whisper model in Settings › Model (whisper.cpp with Metal)
+  - Or on your Mac, offline: download Whisper, Parakeet Ultra, ARK-ASR, Qwen3-ASR, Cohere Transcribe, or Voxtral Realtime in Settings › Model. New models require macOS 12+ and transcribe after recording stops; see [sizes, languages and dictionary support](docs/local-transcription-models.md).
 - 🎯 **App Styles & Writing Modes** (VoiceInk Power Modes / Glaido Styles):
   - **Standard Clean-up:** Removes filler words (*um*, *uh*), fixes punctuation and capitalization.
   - **Email Mode:** Formats professional email prose with polite phrasing.
@@ -43,7 +43,7 @@ Press your shortcut, speak naturally, and messy speech is converted to clean, fo
 ### Prerequisites
 - [Rust](https://rustup.rs/) (1.91+)
 - [Bun](https://bun.sh/) (or Node.js / pnpm)
-- On macOS: [CMake](https://cmake.org/) (`brew install cmake`), which builds whisper.cpp and llama.cpp
+- On macOS: [CMake](https://cmake.org/) (`brew install cmake`), which builds whisper.cpp, llama.cpp, and the bundled native speech helper. The first build downloads its pinned, checksum-verified source archive.
 
 ### Running Locally
 ```bash

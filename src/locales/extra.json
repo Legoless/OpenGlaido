@@ -159,5 +159,12 @@
  "Couldn’t download a verified update. Try again later.",
  "Couldn’t install the update. Try again later.",
  "OpenGlaido is installing an update. Try again shortly.",
- "Updates are available in packaged builds only."
+ "Updates are available in packaged builds only.",
+ "25 European languages, including Slovenian; detects the spoken language.",
+ "Multilingual transcription with a larger download; detects the spoken language.",
+ "30 languages with automatic detection.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.",
+ "13 languages; transcribes after recording in OpenGlaido.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings."
 ]

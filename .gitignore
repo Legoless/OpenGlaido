@@ -13,6 +13,7 @@ dist-ssr
 *.local
 target/
 src-tauri/target/
+src-tauri/binaries/
 data/
 release-artifacts/
 

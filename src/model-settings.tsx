@@ -214,7 +214,6 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
 
   const onMac = supported ? [{ value: "local", label: t("On this Mac") } as const] : [];
   const sttModel = models.find((m) => m.id === config.local_stt_model);
-  const englishOnly = config.stt_source === "local" && sttModel?.english_only && config.languages.some((l) => l !== "en");
 
   return (
     <>
@@ -223,16 +222,7 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
         icon={AudioLines}
         title={t("Transcription")}
         description={t("Turns your voice into text.")}
-        note={
-          <>
-            {errorNote("stt_source")}
-            {englishOnly && (
-              <NoteText tone="warning">
-                {t("This model only understands English. Pick a multilingual model for your other dictation languages.")}
-              </NoteText>
-            )}
-          </>
-        }
+        note={errorNote("stt_source")}
       >
         <Segmented
           label={t("Transcription")}
@@ -242,7 +232,10 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
         />
       </SettingsRow>
       {supported && config.stt_source === "local" ? (
-        modelList("stt")
+        <>
+          {modelList("stt")}
+          {sttModel && <LocalModelLanguageSettings model={sttModel} languages={config.languages} save={save} error={errorNote("languages")} />}
+        </>
       ) : (
         <CloudSettings kind="stt" config={config} save={save} errorNote={errorNote} />
       )}
@@ -279,6 +272,51 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
         supported && config.llm_source === "local" && modelList("llm")
       )}
     </>
+  );
+}
+
+/** Some local engines cannot infer the language; preserve the user's preference until they choose. */
+export function LocalModelLanguageSettings({ model, languages, save, error }: {
+  model: Pick<LocalModel, "english_only" | "supported_languages" | "requires_language">;
+  languages: string[];
+  save: SaveConfig;
+  error?: ReactNode;
+}) {
+  const supported = model.supported_languages;
+  if (!model.requires_language) {
+    const englishOnly = model.english_only && languages.some((language) => language !== "en");
+    const unsupported = supported && languages.some((language) => !supported.includes(language));
+    if (!englishOnly && !unsupported) return null;
+    return (
+      <div className="px-3 pt-3">
+        <NoteText tone="warning">
+          {englishOnly
+            ? t("This model only understands English. Pick a multilingual model for your other dictation languages.")
+            : t("This model does not support all your dictation languages. Choose another model or change your dictation languages.")}
+        </NoteText>
+      </div>
+    );
+  }
+  const selected = languages.length === 1 && supported?.includes(languages[0]) ? languages[0] : "";
+  const names = new Intl.DisplayNames([locale()], { type: "language" });
+  const options = (supported ?? []).map((value) => {
+    const name = names.of(value) ?? value;
+    return { value, label: name.charAt(0).toLocaleUpperCase(locale()) + name.slice(1) };
+  }).sort((a, b) => a.label.localeCompare(b.label, locale()));
+  return (
+    <SettingsRow
+      icon={Globe}
+      title={t("Dictation language")}
+      description={t("This model needs one spoken language.")}
+      note={<>{error}{!selected && <NoteText tone="warning">{t("Choose a language before dictating. This model cannot detect it automatically.")}</NoteText>}</>}
+    >
+      <Dropdown
+        value={selected}
+        options={[...(!selected ? [{ value: "", label: t("Choose a language") }] : []), ...options]}
+        onChange={(value) => value && save({ languages: [value] })}
+        className="w-[200px] max-w-full"
+      />
+    </SettingsRow>
   );
 }
 
@@ -554,6 +592,7 @@ function Badge({ accent, children }: { accent?: boolean; children: ReactNode }) 
 
 /** 1–5 dots. */
 function Meter({ label, value }: { label: string; value: number }) {
+  if (value <= 0) return null;
   return (
     <span role="img" aria-label={`${label} ${value}/5`} className="flex items-center gap-1.5">
       <span className="gs-text-body-xs-regular text-text-disabled">{label}</span>

@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "검증된 업데이트를 다운로드할 수 없습니다. 나중에 다시 시도해 주세요.",
  "Couldn’t install the update. Try again later.": "업데이트를 설치할 수 없습니다. 나중에 다시 시도해 주세요.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido가 업데이트를 설치하고 있습니다. 잠시 후 다시 시도해 주세요.",
- "Updates are available in packaged builds only.": "업데이트는 패키징된 빌드에서만 사용할 수 있습니다."
+ "Updates are available in packaged builds only.": "업데이트는 패키징된 빌드에서만 사용할 수 있습니다.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13개 언어를 지원하며, OpenGlaido에서는 녹음 후 전사합니다.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14개 언어를 지원합니다. 말할 언어를 선택하세요. 자동 감지는 지원하지 않습니다.",
+ "25 European languages, including Slovenian; detects the spoken language.": "슬로베니아어를 포함한 유럽 25개 언어를 지원하며, 사용 중인 언어를 감지합니다.",
+ "30 languages with automatic detection.": "30개 언어 및 자동 언어 감지를 지원합니다.",
+ "Choose a language": "언어 선택",
+ "Choose a language before dictating. This model cannot detect it automatically.": "받아쓰기 전에 언어를 선택하세요. 이 모델은 언어를 자동으로 감지할 수 없습니다.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "다국어 전사를 지원하며 다운로드 용량이 큽니다. 사용 중인 언어를 감지합니다.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "이 모델은 설정된 받아쓰기 언어를 모두 지원하지 않습니다. 다른 모델을 선택하거나 받아쓰기 언어를 변경하세요.",
+ "This model needs one spoken language.": "이 모델은 하나의 음성 언어를 지정해야 합니다.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe는 하나의 언어를 지정해야 합니다. 설정 › 모델에서 선택하세요.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "이 모델은 선택한 받아쓰기 언어를 지원하지 않습니다. 다른 모델을 선택하거나 설정에서 언어를 변경하세요."
 }

@@ -1,8 +1,10 @@
-//! Local models: the download catalog, the downloader and the whisper.cpp / llama.cpp runtimes.
+//! Local models: verified downloads, Whisper/llama runtimes and the isolated native speech helper.
 
 mod catalog;
 pub mod llama;
 pub mod whisper;
+pub mod stt;
+mod native;
 
 pub use catalog::CATALOG;
 
@@ -23,8 +25,9 @@ use tokio::io::AsyncWriteExt;
 #[derive(Debug, Clone, Serialize)]
 pub struct CatalogModel {
     pub id: &'static str,
-    /// "stt" (whisper.cpp ggml) or "llm" (GGUF for llama.cpp).
+    /// "stt" or "llm"; the backend determines the file format.
     pub kind: &'static str,
+    pub backend: &'static str,
     pub name: &'static str,
     pub notes: &'static str,
     pub file: &'static str,
@@ -32,7 +35,7 @@ pub struct CatalogModel {
     pub size_bytes: u64,
     pub sha256: &'static str,
     pub english_only: bool,
-    /// 1–5, relative on Apple Silicon.
+    /// 1–5, relative on Apple Silicon; 0 means not measured.
     pub speed: u8,
     pub accuracy: u8,
     pub recommended: bool,
@@ -56,6 +59,8 @@ pub struct DownloadProgress {
 pub struct LocalModel {
     #[serde(flatten)]
     pub model: CatalogModel,
+    pub supported_languages: Option<&'static [&'static str]>,
+    pub requires_language: bool,
     pub downloaded: bool,
     /// Bytes of an unfinished download kept for resuming (0 = none).
     pub partial_bytes: u64,
@@ -106,6 +111,8 @@ pub fn list_local_models(app: AppHandle) -> Vec<LocalModel> {
         .iter()
         .map(|m| LocalModel {
             model: m.clone(),
+            supported_languages: native::supported_languages(m.id),
+            requires_language: native::requires_language(m.id),
             downloaded: path_if_downloaded(&app, m.id).is_some(),
             partial_bytes: std::fs::metadata(part_path(&dir.join(m.file))).map_or(0, |f| f.len()),
             download: downloads.get(m.id).map(|(p, _)| p.clone()),
@@ -317,7 +324,7 @@ pub fn delete_model(app: AppHandle, id: String) -> Result<(), String> {
     }
     let path = models_dir(&app).join(model.file);
     match model.kind {
-        "stt" => whisper::unload_path(&path),
+        "stt" => stt::unload_path(&path),
         _ => llama::unload_path(&path),
     }
     for file in [part_path(&path), path] {
@@ -585,7 +592,7 @@ mod tests {
     #[test]
     fn local_models_serialize_flat_for_the_ui() {
         // src/types.ts LocalModel: the catalog fields at the top level, without the prompt template.
-        let model = LocalModel { model: CATALOG[0].clone(), downloaded: true, partial_bytes: 0, download: None };
+        let model = LocalModel { model: CATALOG[0].clone(), supported_languages: None, requires_language: false, downloaded: true, partial_bytes: 0, download: None };
         let json = serde_json::to_value(model).unwrap();
         assert_eq!((json["id"].as_str(), json["size_bytes"].as_u64()), (Some(CATALOG[0].id), Some(CATALOG[0].size_bytes)));
         assert!(json["downloaded"] == true && json["download"].is_null());

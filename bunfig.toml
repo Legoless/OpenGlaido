@@ -1,0 +1,3 @@
+[test]
+# All app tests live here; Cargo's dependency source trees contain unrelated JS tests.
+root = "./scripts"

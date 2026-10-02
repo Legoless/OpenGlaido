@@ -102,7 +102,7 @@ pub struct AppState {
     pub db: Arc<Database>,
     /// Hotkey and tray events with the time they happened, handled in order on one worker thread.
     pub events: Sender<(HotkeyEvent, Instant)>,
-    /// Transcriptions in flight; processing must not keep the recording bar visible.
+    /// Transcriptions in flight; the bar stays visible until the last response finishes.
     pub jobs: AtomicUsize,
     /// The dictation bar stays visible until then to show a message.
     pub error_until: Mutex<Option<Instant>>,
@@ -291,22 +291,45 @@ pub fn show_passive(window: &tauri::WebviewWindow) -> Result<(), String> {
     window.show().map_err(|e| e.to_string())
 }
 
-/// The dictation bar's visibility; `changes` invalidates queued shows after a release.
+/// One ordered snapshot keeps recording, processing and native visibility in sync.
+#[derive(Clone, serde::Serialize)]
+struct HudSnapshot {
+    recording: bool,
+    processing: bool,
+    visible: bool,
+    revision: u64,
+}
+
+/// `changes` invalidates queued native shows only when visibility changes.
+#[derive(Default)]
 pub struct HudVisibility {
     shown: bool,
     hidden: bool,
     changes: u64,
+    recording: bool,
+    processing: bool,
+    revision: u64,
 }
 
 impl HudVisibility {
-    fn update(&mut self, recording: bool, showing_error: bool) -> bool {
-        let show = recording || showing_error;
-        if self.shown == show {
+    fn update(&mut self, recording: bool, jobs: usize, showing_error: bool) -> bool {
+        let processing = jobs > 0;
+        let show = recording || processing || showing_error;
+        if (self.shown, self.recording, self.processing) == (show, recording, processing) {
             return false;
         }
+        if self.shown != show {
+            self.changes += 1;
+        }
         self.shown = show;
-        self.changes += 1;
+        self.recording = recording;
+        self.processing = processing;
+        self.revision += 1;
         true
+    }
+
+    fn snapshot(&self) -> HudSnapshot {
+        HudSnapshot { recording: self.recording, processing: self.processing, visible: self.shown, revision: self.revision }
     }
 
     fn can_show(&self, change: u64) -> bool {
@@ -314,18 +337,18 @@ impl HudVisibility {
     }
 }
 
-/// Shows the dictation bar while recording or showing a message, on the display with the
-/// pointer. Release hides it immediately; transcription continues without keeping it visible.
+/// Keeps the bar on the pointer's display through recording, transcription and formatting.
+/// Cancels and empty results hide it; model errors retain their existing message lifetime.
 pub fn update_hud(app: &AppHandle) {
     let (Some(state), Some(hud)) = (app.try_state::<AppState>(), app.get_webview_window("hud")) else { return };
     let mut bar = state.hud.lock().unwrap();
     let showing_error = state.error_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
-    let changed = bar.update(state.recording.load(Ordering::SeqCst), showing_error);
+    let changed = bar.update(state.recording.load(Ordering::SeqCst), state.jobs.load(Ordering::SeqCst), showing_error);
     if changed {
         // Under the lock, so the HUD hears the changes in order.
-        let _ = app.emit("hud-visibility", bar.shown);
+        let _ = app.emit_to("hud", "hud-state", bar.snapshot());
     }
-    if bar.shown {
+    if bar.shown && (changed || bar.hidden) {
         let appear = std::mem::take(&mut bar.hidden);
         let change = bar.changes;
         drop(bar);
@@ -357,19 +380,14 @@ pub fn update_hud(app: &AppHandle) {
     }
 }
 
-/// Counts transcriptions in flight independently of recording/HUD visibility.
+/// Reserve processing before ending recording, so microphone teardown cannot flash the bar off.
 pub fn job_started(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    if state.jobs.fetch_add(1, Ordering::SeqCst) == 0 {
-        let _ = app.emit("processing-status", true);
-    }
+    app.state::<AppState>().jobs.fetch_add(1, Ordering::SeqCst);
+    update_hud(app);
 }
 
 pub fn job_finished(app: &AppHandle) {
-    let state = app.state::<AppState>();
-    if state.jobs.fetch_sub(1, Ordering::SeqCst) == 1 {
-        let _ = app.emit("processing-status", false);
-    }
+    app.state::<AppState>().jobs.fetch_sub(1, Ordering::SeqCst);
     update_hud(app);
 }
 
@@ -534,8 +552,8 @@ pub(crate) fn load_local_models(app: &AppHandle, config: &TranscriptionConfig, o
     std::thread::spawn(move || {
         if old_stt.as_ref() != Some(&stt) {
             match stt {
-                Some(id) => models::whisper::preload(&app, &id),
-                None => models::whisper::unload(),
+                Some(id) => models::stt::preload(&app, &id),
+                None => models::stt::unload(),
             }
         }
         if old_llm.as_ref() != Some(&llm) {
@@ -750,7 +768,6 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     // arrive; the start chime still means the microphone is ready.
     *state.recording_start.lock().unwrap() = Some(started);
     state.recording.store(true, Ordering::SeqCst);
-    let _ = app.emit("recording-status", true);
     update_hud(app);
     let fell_back = match state.recorder.start_recording_streamed(
         device.as_deref(), input, if sound_on { CHIME_TRIM_MS } else { 0 },
@@ -790,15 +807,15 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     Ok(())
 }
 
-// Hide before microphone teardown or output restoration can block the hotkey worker.
+// Switch to processing before microphone teardown or output restoration can block the worker.
 fn end_recording_feedback(app: &AppHandle, state: &AppState) {
     state.recording.store(false, Ordering::SeqCst);
-    let _ = app.emit("recording-status", false);
     update_hud(app);
 }
 
 // Caller holds the mode lock. Returns the recording, its duration and its session.
 fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Session), String> {
+    job_started(app);
     end_recording_feedback(app, state);
     let mut session = state.session.lock().unwrap().take().unwrap_or_else(|| Session {
         purpose: Purpose::Dictation,
@@ -838,7 +855,9 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         if session.purpose == Purpose::Dictation {
             session.delivery = Some(paste::reserve_delivery());
         }
-        job_started(app);
+    } else {
+        // No processing task will be spawned when stopping the input fails.
+        job_finished(app);
     }
     recording
         .map(|r| (r, duration_ms, session))
@@ -1176,8 +1195,8 @@ async fn transcribe_and_paste(
 }
 
 #[tauri::command]
-async fn get_recording_state(state: State<'_, AppState>) -> Result<bool, String> {
-    Ok(*state.mode.lock().unwrap() != Mode::Idle)
+async fn get_hud_state(state: State<'_, AppState>) -> Result<HudSnapshot, String> {
+    Ok(state.hud.lock().unwrap().snapshot())
 }
 
 // Async commands below run off the main thread; see `AppState::mode`.
@@ -1606,7 +1625,7 @@ pub fn run() {
                 events,
                 jobs: AtomicUsize::new(0),
                 error_until: Mutex::new(None),
-                hud: Mutex::new(HudVisibility { shown: false, hidden: true, changes: 0 }),
+                hud: Mutex::new(HudVisibility { hidden: true, ..HudVisibility::default() }),
                 config_write: Mutex::new(()),
                 pending_start: Mutex::new(None),
                 start_token: std::sync::atomic::AtomicU64::new(0),
@@ -1705,7 +1724,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             updater::get_update_status,
             updater::check_for_updates,
-            get_recording_state,
+            get_hud_state,
             start_recording,
             stop_recording_and_process,
             cancel_recording,
@@ -1785,7 +1804,7 @@ pub fn run() {
 fn prepare_exit(app: &AppHandle) {
     commands::shutdown(app);
     // ponytail: waits for a running local transcription; whisper's abort callback if that grows.
-    models::whisper::unload_now();
+    models::stt::unload_now();
     models::llama::unload_now();
     if let Some(state) = app.try_state::<AppState>() { output::restore(&state.db.app_dir); }
 }
@@ -1799,25 +1818,49 @@ mod tests {
     const LONG: Duration = Duration::from_millis(900);
 
     #[test]
-    fn releasing_recording_hides_hud_and_invalidates_queued_shows() {
-        let mut hud = HudVisibility { shown: false, hidden: true, changes: 0 };
-        assert!(hud.update(true, false));
-        let first_recording = hud.changes;
-        assert!(hud.can_show(first_recording));
-        assert!(hud.update(false, false));
-        assert!(!hud.shown);
-        assert!(!hud.can_show(first_recording));
-        // Background job completions cannot make a stopped recording visible again.
-        assert!(!hud.update(false, false));
-        assert!(!hud.shown);
-        // A quick new recording has its own show; the old queued one stays invalid.
-        assert!(hud.update(true, false));
-        assert!(!hud.can_show(first_recording));
-        assert!(hud.can_show(hud.changes));
-        // Errors still appear after release, and disappear when their lifetime ends.
-        assert!(!hud.update(false, true));
+    fn hud_keeps_processing_until_every_response_finishes_and_recording_takes_priority() {
+        let mut hud = HudVisibility { hidden: true, ..HudVisibility::default() };
+        assert!(hud.update(true, 0, false));
+        let queued_show = hud.changes;
+        assert!(hud.update(true, 1, false)); // processing reserved before release
+        assert!(hud.update(false, 1, false));
+        assert!(hud.shown && hud.processing && !hud.recording);
+        assert!(hud.can_show(queued_show)); // the initial position/show is still valid
+        assert!(hud.update(true, 1, false)); // another recording during the first response
+        assert!(hud.recording && hud.processing);
+        assert!(!hud.update(true, 2, false));
+        assert!(hud.update(false, 2, false));
+        assert!(!hud.update(false, 1, false)); // first response cannot hide the second
         assert!(hud.shown);
-        assert!(hud.update(false, false));
+        assert!(hud.update(false, 0, false));
+        assert!(!hud.shown && !hud.processing);
+        assert!(!hud.can_show(queued_show));
+        assert!(!hud.update(false, 0, false)); // a late completion cannot reopen the bar
+    }
+
+    #[test]
+    fn hud_cancellation_empty_results_and_failures_end_without_stale_shows() {
+        let mut hud = HudVisibility { hidden: true, ..HudVisibility::default() };
+        hud.update(true, 0, false);
+        let cancelled_show = hud.changes;
+        hud.update(false, 0, false); // cancelled recording creates no job
+        assert!(!hud.shown && !hud.can_show(cancelled_show));
+        hud.update(true, 0, false);
+        assert!(!hud.can_show(cancelled_show));
+        hud.update(true, 1, false);
+        hud.update(false, 1, false);
+        hud.update(false, 0, false); // stop failure, no speech or blank response
+        assert!(!hud.shown);
+        hud.update(false, 1, false);
+        hud.update(false, 0, true); // only model failures extend visibility
+        assert!(hud.shown && !hud.processing);
+        hud.update(false, 0, false); // message expires
+        assert!(!hud.shown);
+        // Cancelling a newer recording preserves an older outstanding response.
+        hud.update(true, 1, false);
+        hud.update(false, 1, false);
+        assert!(hud.shown && hud.processing);
+        hud.update(false, 0, false);
         assert!(!hud.shown);
     }
 

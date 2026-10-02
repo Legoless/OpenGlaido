@@ -4,6 +4,7 @@ fn main() {
     let macos = env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     if macos {
         stage_llama_dylibs();
+        stage_native_stt();
     }
     // With bundle.macOS.frameworks set, this copies libs/*.dylib to target/Frameworks and adds the
     // @executable_path/../Frameworks rpath. That covers both `tauri dev` and the bundled .app.
@@ -27,6 +28,26 @@ fn main() {
         // `cargo test` binaries run from target/<profile>/deps, where llama-cpp-sys-2 also links the dylibs.
         println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path");
     }
+}
+
+// Keep the additional GGML engine in its own executable: its symbols must never
+// be linked into the process already hosting whisper-rs and llama.cpp.
+fn stage_native_stt() {
+    for path in ["../native-stt", "../scripts/build-native-stt.sh", "tauri.macos.conf.json"] {
+        println!("cargo:rerun-if-changed={path}");
+    }
+    let target = env::var("TARGET").unwrap();
+    // Share the Release C++ build across cargo check, clippy, test and app profiles.
+    // Cargo's target-directory lock serializes the builds using this cache.
+    let output = env::var("OUT_DIR").unwrap();
+    let cache = Path::new(&output).ancestors().nth(4).unwrap().join("native-stt").join(&target);
+    let status = Command::new("/bin/bash")
+        .arg("../scripts/build-native-stt.sh")
+        .arg(target)
+        .arg(cache)
+        .status()
+        .expect("Could not start the native speech helper build");
+    assert!(status.success(), "Native speech helper build failed");
 }
 
 // llama-cpp-2 "dynamic-link" builds libllama/libggml*.dylib. whisper-rs keeps its own ggml static, and two

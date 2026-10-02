@@ -456,5 +456,16 @@
  "Couldn’t download a verified update. Try again later.": "Не удалось загрузить проверенное обновление. Повторите попытку позже.",
  "Couldn’t install the update. Try again later.": "Не удалось установить обновление. Повторите попытку позже.",
  "OpenGlaido is installing an update. Try again shortly.": "OpenGlaido устанавливает обновление. Повторите попытку через несколько секунд.",
- "Updates are available in packaged builds only.": "Обновления доступны только в собранных установочных пакетах приложения."
+ "Updates are available in packaged builds only.": "Обновления доступны только в собранных установочных пакетах приложения.",
+ "13 languages; transcribes after recording in OpenGlaido.": "13 языков; транскрибирует в OpenGlaido после завершения записи.",
+ "14 languages. Choose the spoken language; automatic detection is unavailable.": "14 языков. Выберите язык речи; автоматическое определение недоступно.",
+ "25 European languages, including Slovenian; detects the spoken language.": "25 европейских языков, включая словенский; определяет язык речи.",
+ "30 languages with automatic detection.": "30 языков с автоматическим определением.",
+ "Choose a language": "Выберите язык",
+ "Choose a language before dictating. This model cannot detect it automatically.": "Выберите язык перед диктовкой. Эта модель не может определить его автоматически.",
+ "Multilingual transcription with a larger download; detects the spoken language.": "Многоязычная транскрипция с большим объёмом загрузки; определяет язык речи.",
+ "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Эта модель поддерживает не все ваши языки диктовки. Выберите другую модель или измените языки диктовки.",
+ "This model needs one spoken language.": "Для этой модели нужно выбрать один язык речи.",
+ "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Для Cohere Transcribe нужно выбрать один язык. Выберите его в разделе Настройки › Модель.",
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Эта модель не поддерживает выбранные языки диктовки. Выберите другую модель или измените языки в Настройках."
 }

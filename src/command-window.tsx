@@ -201,7 +201,7 @@ export function CommandWindow() {
           {state?.text ? (
             <Markdown text={state.text === "What can I help you with?" ? t(state.text) : state.text} />
           ) : (
-            working && <p className="gs-text-body-md-regular gs-waveform-processing text-text-subdued">{t(WORKING[phase])}</p>
+            working && <p className="gs-text-body-md-regular gs-processing-shimmer text-text-subdued">{t(WORKING[phase])}</p>
           )}
           {state?.error && (
             <p className="gs-text-body-md-regular flex items-center gap-2 text-text-error">
