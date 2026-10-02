@@ -62,14 +62,15 @@ pub fn recover(dir: &Path) {
 }
 
 #[cfg(target_os = "macos")]
-mod platform {
+pub(crate) mod platform {
     use std::ffi::c_void;
 
+    /// CoreAudio AudioObjectPropertyAddress (also used by audio.rs's device watcher).
     #[repr(C)]
-    struct Address {
-        selector: u32,
-        scope: u32,
-        element: u32,
+    pub(crate) struct Address {
+        pub(crate) selector: u32,
+        pub(crate) scope: u32,
+        pub(crate) element: u32,
     }
 
     #[link(name = "CoreAudio", kind = "framework")]
@@ -78,10 +79,10 @@ mod platform {
         fn AudioObjectSetPropertyData(id: u32, addr: *const Address, qs: u32, q: *const c_void, size: u32, data: *const c_void) -> i32;
     }
 
-    const fn fourcc(s: &[u8; 4]) -> u32 {
+    pub(crate) const fn fourcc(s: &[u8; 4]) -> u32 {
         u32::from_be_bytes(*s)
     }
-    const SYSTEM_OBJECT: u32 = 1;
+    pub(crate) const SYSTEM_OBJECT: u32 = 1;
 
     fn get_u32(id: u32, addr: &Address) -> Option<u32> {
         let (mut value, mut size) = (0u32, 4u32);

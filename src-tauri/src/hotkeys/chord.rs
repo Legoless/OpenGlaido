@@ -260,6 +260,11 @@ pub struct State {
     pub pairs: [Pair; 2],
     /// Esc → Cancel while set.
     pub recording: bool,
+    /// Screen rect (x, y, width, height in points) of the dictation bar's cancel "x" while a
+    /// hands-free recording shows it. A left click there → Cancel, and the click is swallowed.
+    pub cancel_area: Option<[f64; 4]>,
+    /// The cancel click's button-up still has to be swallowed.
+    swallow_up: bool,
     /// Enter → Submit while set.
     pub submit: bool,
     /// Command window open: Esc → CommandEscape (dictation arming wins).
@@ -285,6 +290,26 @@ impl State {
 
     pub fn capturing(&self) -> bool {
         self.capturing
+    }
+
+    /// Left button down/up at screen point (x, y). Returns (Cancel event, swallow): a click on the
+    /// bar's cancel "x" cancels like Esc, and both of its halves are kept from the app underneath.
+    pub fn click(&mut self, down: bool, x: f64, y: f64) -> (Option<Output>, bool) {
+        if !down {
+            return (None, std::mem::take(&mut self.swallow_up));
+        }
+        let hit = self.recording
+            && self.cancel_area.is_some_and(|[left, top, w, h]| x >= left && x < left + w && y >= top && y < top + h);
+        self.swallow_up = hit;
+        if hit {
+            // Like Esc: the recording ends, and a held toggle modifier must not start another.
+            for pair in &mut self.pairs {
+                pair.hold_active = false;
+                pair.tap_spoiled = true;
+                pair.tap_armed = false;
+            }
+        }
+        (hit.then_some(Output::Event(Cancel)), hit)
     }
 
     pub fn set_bindings(&mut self, hold: Option<Binding>, toggle: Option<Binding>) {
@@ -852,5 +877,38 @@ mod tests {
         // Back to normal afterwards.
         st.set_capture(false);
         assert_eq!(run(&mut st, vec![down(FN), up(FN)]).0, vec![HoldPressed, HoldReleased]);
+    }
+
+    #[test]
+    fn bar_cancel_click_cancels_and_swallows_only_its_own_click() {
+        let mut st = State::default();
+        let x = [1000.0, 800.0, 30.0, 38.0];
+        // Nothing armed: every click passes through.
+        assert_eq!(st.click(true, 1010.0, 820.0), (None, false));
+        assert_eq!(st.click(false, 1010.0, 820.0), (None, false));
+        st.cancel_area = Some(x);
+        assert_eq!(st.click(true, 1010.0, 820.0), (None, false), "not recording");
+        st.recording = true;
+        assert_eq!(st.click(true, 999.0, 820.0), (None, false), "left of the x");
+        assert_eq!(st.click(true, 1010.0, 838.0), (None, false), "below the x");
+        assert_eq!(st.click(false, 1010.0, 820.0), (None, false), "its button-up passes too");
+        assert_eq!(st.click(true, 1010.0, 820.0), (Some(Output::Event(Cancel)), true));
+        // The button-up is swallowed wherever the pointer went, once.
+        assert_eq!(st.click(false, 0.0, 0.0), (None, true));
+        assert_eq!(st.click(false, 1010.0, 820.0), (None, false));
+        st.cancel_area = None;
+        assert_eq!(st.click(true, 1010.0, 820.0), (None, false), "x hidden");
+    }
+
+    #[test]
+    fn bar_cancel_click_spoils_a_held_toggle_tap_like_esc() {
+        let mut st = state("Fn", "AltRight");
+        st.recording = true;
+        st.cancel_area = Some([0.0, 0.0, 10.0, 10.0]);
+        run(&mut st, vec![down(ALT_RIGHT)]);
+        assert_eq!(st.click(true, 5.0, 5.0).0, Some(Output::Event(Cancel)));
+        st.click(false, 5.0, 5.0);
+        st.recording = false;
+        assert_eq!(run(&mut st, vec![up(ALT_RIGHT)]).0, vec![], "no new hands-free recording");
     }
 }

@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "Μόνο {language}, για την καλύτερη ακρίβεια",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "Το {model} δεν υπάρχει ακόμα σε αυτό το Mac, οπότε οι υπαγορεύσεις δεν διορθώνονται.",
  "{model} isn't on this Mac yet.": "Το {model} δεν υπάρχει ακόμα σε αυτό το Mac.",
- "{name} (unavailable)": "{name} (μη διαθέσιμο)",
  "{n} days": "{n} ημέρες",
  "{n} wpm": "{n} λ/λεπτό",
  "{provider} API key could not be verified. Check it in Settings › Model.": "Δεν ήταν δυνατή η επαλήθευση του κλειδιού API για {provider}. Ελέγξτε το στις Ρυθμίσεις › Μοντέλο.",

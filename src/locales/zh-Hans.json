@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "仅限{language}，准确度最佳",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "这台 Mac 上还没有 {model}，因此听写文本未经润色。",
  "{model} isn't on this Mac yet.": "这台 Mac 上还没有 {model}。",
- "{name} (unavailable)": "{name}（不可用）",
  "{n} days": "{n} 天",
  "{n} wpm": "{n} 词/分钟",
  "{provider} API key could not be verified. Check it in Settings › Model.": "无法验证 {provider} API 密钥。请在“设置 › 模型”中检查。",

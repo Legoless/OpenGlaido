@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "{language}만 사용(최고 정확도)",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "{model}이(가) 아직 이 Mac에 없어 받아쓴 텍스트가 정리되지 않습니다.",
  "{model} isn't on this Mac yet.": "{model}이(가) 아직 이 Mac에 없습니다.",
- "{name} (unavailable)": "{name}(사용 불가)",
  "{n} days": "{n}일",
  "{n} wpm": "분당 {n}단어",
  "{provider} API key could not be verified. Check it in Settings › Model.": "{provider} API 키를 확인할 수 없습니다. 설정 › 모델에서 확인하세요.",

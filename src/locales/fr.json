@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "{language} uniquement, pour une précision optimale",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "{model} n'est pas encore sur ce Mac, les dictées ne sont donc pas nettoyées.",
  "{model} isn't on this Mac yet.": "{model} n'est pas encore sur ce Mac.",
- "{name} (unavailable)": "{name} (indisponible)",
  "{n} days": "{n} jours",
  "{n} wpm": "{n} mots/min",
  "{provider} API key could not be verified. Check it in Settings › Model.": "Impossible de vérifier la clé API de {provider}. Vérifiez-la dans Réglages › Modèle.",

@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "Alleen {language}, voor de beste nauwkeurigheid",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "{model} staat nog niet op deze Mac, dus dictaten worden niet opgeschoond.",
  "{model} isn't on this Mac yet.": "{model} staat nog niet op deze Mac.",
- "{name} (unavailable)": "{name} (niet beschikbaar)",
  "{n} days": "{n} dagen",
  "{n} wpm": "{n} wpm",
  "{provider} API key could not be verified. Check it in Settings › Model.": "De API-sleutel voor {provider} kon niet worden geverifieerd. Controleer deze in Instellingen › Model.",

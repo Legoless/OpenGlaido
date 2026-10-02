@@ -84,8 +84,12 @@ fn transition(mode: Mode, event: HotkeyEvent, held: Duration, pending: bool) -> 
     }
 }
 
+fn is_hands_free(mode: Mode) -> bool {
+    matches!(mode, Mode::HandsFree | Mode::HandsFreeHoldDown)
+}
+
 fn submit_enabled(mode: Mode, config: &TranscriptionConfig) -> bool {
-    config.enter_to_stop && matches!(mode, Mode::HandsFree | Mode::HandsFreeHoldDown)
+    config.enter_to_stop && is_hands_free(mode)
 }
 
 pub struct AppState {
@@ -95,6 +99,10 @@ pub struct AppState {
     pub mode: Mutex<Mode>,
     /// Mirror of `mode != Idle` that can be read without the mode lock (dictation bar).
     pub recording: AtomicBool,
+    /// The current or most recent capture is a Commands recording (bar icon).
+    pub command: AtomicBool,
+    /// `mode` is hands-free, readable without the mode lock (the bar's cancel button).
+    pub hands_free: AtomicBool,
     pub recording_start: Mutex<Option<Instant>>,
     /// What the current recording is for and what was captured when it started.
     pub session: Mutex<Option<Session>>,
@@ -161,18 +169,19 @@ impl Session {
 pub struct TrayLabels(Mutex<[String; 4]>);
 
 /// Glaido's menu bar menu: Microphone ▸ (System Default, the input devices), Show OpenGlaido, Quit.
-/// Rebuilt when the pointer reaches the icon, so the device list is current.
-fn refresh_tray(app: &AppHandle) {
+/// Rebuilt when the pointer reaches the icon and when microphones come or go (`devices`).
+fn refresh_tray(app: &AppHandle, devices: &[String]) {
     let result = (|| -> tauri::Result<()> {
         let Some(tray) = app.tray_by_id(TRAY_ID) else { return Ok(()) };
         let [microphone, system_default, show, quit] = app.state::<TrayLabels>().0.lock().unwrap().clone();
         let selected = app.state::<AppState>().config.lock().unwrap().input_device.clone();
+        let in_use = mic_in_use(selected.as_deref(), devices);
         let mics = Submenu::with_id(app, "mic", &microphone, true)?;
-        mics.append(&CheckMenuItem::with_id(app, "mic-default", &system_default, true, selected.is_none(), None::<&str>)?)?;
+        mics.append(&CheckMenuItem::with_id(app, "mic-default", &system_default, true, in_use.is_none(), None::<&str>)?)?;
         mics.append(&PredefinedMenuItem::separator(app)?)?;
-        for name in audio::list_input_devices() {
-            let checked = selected.as_deref() == Some(name.as_str());
-            mics.append(&CheckMenuItem::with_id(app, format!("mic:{name}"), &name, true, checked, None::<&str>)?)?;
+        for name in devices {
+            let checked = in_use == Some(name.as_str());
+            mics.append(&CheckMenuItem::with_id(app, format!("mic:{name}"), name, true, checked, None::<&str>)?)?;
         }
         let menu = Menu::with_items(
             app,
@@ -189,6 +198,12 @@ fn refresh_tray(app: &AppHandle) {
     if let Err(e) = result {
         eprintln!("Failed to build the menu bar menu: {e}");
     }
+}
+
+/// The microphone recording uses: the chosen one while it is connected, else the system default
+/// (None). A disconnected choice stays saved and is used again once it is back.
+fn mic_in_use<'a>(selected: Option<&'a str>, devices: &[String]) -> Option<&'a str> {
+    selected.filter(|name| devices.iter().any(|device| device == name))
 }
 
 const CHIME_TRIM_MS: u32 = 150;
@@ -298,6 +313,8 @@ struct HudSnapshot {
     processing: bool,
     visible: bool,
     revision: u64,
+    command: bool,
+    hands_free: bool,
 }
 
 /// `changes` invalidates queued native shows only when visibility changes.
@@ -309,32 +326,61 @@ pub struct HudVisibility {
     recording: bool,
     processing: bool,
     revision: u64,
+    command: bool,
+    hands_free: bool,
 }
 
 impl HudVisibility {
-    fn update(&mut self, recording: bool, jobs: usize, showing_error: bool) -> bool {
+    fn update(&mut self, recording: bool, jobs: usize, showing_error: bool, command: bool, hands_free: bool) -> bool {
         let processing = jobs > 0;
         let show = recording || processing || showing_error;
-        if (self.shown, self.recording, self.processing) == (show, recording, processing) {
+        let next = (show, recording, processing, command, recording && hands_free);
+        if (self.shown, self.recording, self.processing, self.command, self.hands_free) == next {
             return false;
         }
         if self.shown != show {
             self.changes += 1;
         }
-        self.shown = show;
-        self.recording = recording;
-        self.processing = processing;
+        (self.shown, self.recording, self.processing, self.command, self.hands_free) = next;
         self.revision += 1;
         true
     }
 
     fn snapshot(&self) -> HudSnapshot {
-        HudSnapshot { recording: self.recording, processing: self.processing, visible: self.shown, revision: self.revision }
+        HudSnapshot {
+            recording: self.recording,
+            processing: self.processing,
+            visible: self.shown,
+            revision: self.revision,
+            command: self.command,
+            hands_free: self.hands_free,
+        }
     }
 
     fn can_show(&self, change: u64) -> bool {
         self.shown && self.changes == change
     }
+}
+
+/// Where the cancel "x" sits in the 420x72 bar window during a hands-free recording (logical px):
+/// the 134x38 pill is centred with its bottom 17 px up (src/hud.tsx), and the x is at its right
+/// end after the waveform (x 249..269). A little margin, but inside the pill's rounded corners.
+#[cfg(target_os = "macos")]
+const CANCEL_HIT: [f64; 4] = [247.0, 21.0, 26.0, 30.0];
+
+/// Main thread, under the hud lock. Arms the hotkey tap's cancel click on the "x" while a
+/// hands-free recording shows it, at the bar's place: `placed` = the origin just set (setting a
+/// position applies asynchronously), otherwise the current frame (also after a move).
+#[cfg(target_os = "macos")]
+fn arm_cancel(app: &AppHandle, bar: &HudVisibility, window: &tauri::WebviewWindow, placed: Option<(f64, f64)>) {
+    let current = || {
+        let scale = window.scale_factor().ok()?;
+        let origin = window.outer_position().ok()?.to_logical::<f64>(scale);
+        Some((origin.x, origin.y))
+    };
+    let origin = if bar.shown && bar.recording && bar.hands_free { placed.or_else(current) } else { None };
+    let [x, y, w, h] = CANCEL_HIT;
+    app.state::<HotkeyEngine>().set_cancel_area(origin.map(|(left, top)| [left + x, top + y, w, h]));
 }
 
 /// Keeps the bar on the pointer's display through recording, transcription and formatting.
@@ -343,10 +389,23 @@ pub fn update_hud(app: &AppHandle) {
     let (Some(state), Some(hud)) = (app.try_state::<AppState>(), app.get_webview_window("hud")) else { return };
     let mut bar = state.hud.lock().unwrap();
     let showing_error = state.error_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
-    let changed = bar.update(state.recording.load(Ordering::SeqCst), state.jobs.load(Ordering::SeqCst), showing_error);
+    let changed = bar.update(
+        state.recording.load(Ordering::SeqCst),
+        state.jobs.load(Ordering::SeqCst),
+        showing_error,
+        state.command.load(Ordering::SeqCst),
+        // The cancel "x" works through the macOS hotkey tap only; elsewhere it isn't shown.
+        cfg!(target_os = "macos") && state.hands_free.load(Ordering::SeqCst),
+    );
     if changed {
         // Under the lock, so the HUD hears the changes in order.
         let _ = app.emit_to("hud", "hud-state", bar.snapshot());
+        // macOS only: elsewhere the engine can wait on the main thread, which may wait on `hud`.
+        if cfg!(target_os = "macos") && !(bar.shown && bar.recording && bar.hands_free) {
+            if let Some(engine) = app.try_state::<HotkeyEngine>() {
+                engine.set_cancel_area(None);
+            }
+        }
     }
     if bar.shown && (changed || bar.hidden) {
         let appear = std::mem::take(&mut bar.hidden);
@@ -363,12 +422,14 @@ pub fn update_hud(app: &AppHandle) {
             if !bar.can_show(change) {
                 return;
             }
-            if let Some(location) = location {
-                position_hud_now(&app, &location);
-            }
+            let placed = location.and_then(|location| position_hud_now(&app, &location));
             if let Err(e) = show_passive(&window) {
                 eprintln!("Failed to show the dictation bar: {}", e);
             }
+            #[cfg(target_os = "macos")]
+            arm_cancel(&app, &bar, &window, placed);
+            #[cfg(not(target_os = "macos"))]
+            let _ = placed;
         }) {
             eprintln!("Failed to show the dictation bar: {}", e);
         }
@@ -639,14 +700,17 @@ fn position_hud(app: &AppHandle, bar_location: &str) {
     if on_main_thread() {
         let app = app.clone();
         let bar_location = bar_location.to_string();
-        std::thread::spawn(move || position_hud_now(&app, &bar_location));
+        std::thread::spawn(move || {
+            position_hud_now(&app, &bar_location);
+        });
     } else {
         position_hud_now(app, bar_location);
     }
 }
 
-fn position_hud_now(app: &AppHandle, bar_location: &str) {
-    let Some(hud) = app.get_webview_window("hud") else { return };
+/// Returns the origin it set, in logical points on macOS (for the cancel "x"), else None.
+fn position_hud_now(app: &AppHandle, bar_location: &str) -> Option<(f64, f64)> {
+    let hud = app.get_webview_window("hud")?;
     let primary = app.primary_monitor().ok().flatten();
     #[cfg(target_os = "macos")]
     let pointer = display_point_under_cursor();
@@ -654,7 +718,8 @@ fn position_hud_now(app: &AppHandle, bar_location: &str) {
     let pointer = app.cursor_position().ok().map(|p| (p.x, p.y));
     let monitor = pointer.and_then(|(x, y)| app.monitor_from_point(x, y).ok().flatten()).or(primary);
     let (Some(monitor), Ok(size), Ok(scale)) = (monitor, hud.outer_size(), hud.scale_factor()) else {
-        return eprintln!("Failed to position the dictation bar: no display");
+        eprintln!("Failed to position the dictation bar: no display");
+        return None;
     };
     // Each display measures in its own pixels, so the bar's size is converted to the target display's.
     let size = size.to_logical::<f64>(scale).to_physical(monitor.scale_factor());
@@ -664,7 +729,12 @@ fn position_hud_now(app: &AppHandle, bar_location: &str) {
     let origin = origin.to_logical::<f64>(monitor.scale_factor());
     if let Err(e) = hud.set_position(origin) {
         eprintln!("Failed to position the dictation bar: {}", e);
+        return None;
     }
+    #[cfg(target_os = "macos")]
+    return Some((origin.x, origin.y));
+    #[cfg(not(target_os = "macos"))]
+    None
 }
 
 /// Tray, Dock and dictation bar placement. `old` = None applies everything (startup).
@@ -688,7 +758,7 @@ fn apply_ui_settings(app: &AppHandle, config: &TranscriptionConfig, old: Option<
     }
 }
 
-// Emits "mic-level" (ten bar levels, 0..1) to the HUD at ~60 Hz until that recording ends.
+// Emits "mic-level" (one loudness, 0..1) to the HUD at ~60 Hz until that recording ends.
 fn spawn_level_meter(app: &AppHandle, started: Instant) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
@@ -699,7 +769,7 @@ fn spawn_level_meter(app: &AppHandle, started: Instant) {
                 tauri::async_runtime::spawn_blocking(move || interrupt_capture(&app, started));
                 break;
             }
-            let _ = app.emit_to("hud", "mic-level", state.recorder.bars());
+            let _ = app.emit_to("hud", "mic-level", state.recorder.level());
             tokio::time::sleep(Duration::from_millis(16)).await;
         }
     });
@@ -732,11 +802,24 @@ fn set_mode(app: &AppHandle, state: &AppState, mode: &mut Mode, next: Mode) {
     engine.set_recording(next != Mode::Idle);
     let submit = submit_enabled(next, &state.config.lock().unwrap());
     engine.set_submit_enabled(submit);
+    // A Fn hold upgraded with Space shows its cancel button. Only once the bar shows the
+    // recording: during a hold's delayed start, `recording` is already set but the bar is hidden.
+    let hands_free = is_hands_free(next);
+    if state.hands_free.swap(hands_free, Ordering::SeqCst) != hands_free && state.hud.lock().unwrap().recording {
+        update_hud(app);
+    }
+}
+
+// Caller holds the mode lock. Idle first, so a bar message does not appear as a recording.
+fn fail_start(app: &AppHandle, state: &AppState, mode: &mut Mode, notice: &Notice) {
+    set_mode(app, state, mode, Mode::Idle);
+    report_notice(app, notice);
 }
 
 // Caller holds the mode lock. `started` = when the user asked (opening the mic can take a while).
 // Err (reported once by the caller) leaves the mode Idle, also when setup keeps it from starting.
-fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: Purpose) -> Result<(), Notice> {
+// `next` = the mode this capture records in, so the bar's first frame already matches it.
+fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: Purpose, next: Mode) -> Result<(), Notice> {
     if app.state::<updater::UpdateState>().is_installing() {
         return Err(Notice::warning("OpenGlaido is installing an update."));
     }
@@ -768,6 +851,8 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     // arrive; the start chime still means the microphone is ready.
     *state.recording_start.lock().unwrap() = Some(started);
     state.recording.store(true, Ordering::SeqCst);
+    state.command.store(purpose == Purpose::Command, Ordering::SeqCst);
+    state.hands_free.store(is_hands_free(next), Ordering::SeqCst);
     update_hud(app);
     let fell_back = match state.recorder.start_recording_streamed(
         device.as_deref(), input, if sound_on { CHIME_TRIM_MS } else { 0 },
@@ -936,18 +1021,16 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
                     return;
                 }
                 *state.pending_start.lock().unwrap() = None;
-                if let Err(e) = begin_capture(&app, &state, at, purpose) {
-                    report_notice(&app, &e);
-                    set_mode(&app, &state, &mut mode, Mode::Idle);
+                if let Err(e) = begin_capture(&app, &state, at, purpose, *mode) {
+                    fail_start(&app, &state, &mut mode, &e);
                 }
             });
         }
         Effect::Start => {
             // A confirmed toggle chord needn't wait; taking its token above disarms the timer.
             let started = if not_started { started.unwrap_or(at) } else { at };
-            if let Err(e) = begin_capture(app, &state, started, purpose) {
-                set_mode(app, &state, &mut mode, Mode::Idle);
-                report_notice(app, &e);
+            if let Err(e) = begin_capture(app, &state, started, purpose, next) {
+                fail_start(app, &state, &mut mode, &e);
                 return;
             }
         }
@@ -1206,9 +1289,10 @@ async fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(
     if *mode != Mode::Idle {
         return Ok(());
     }
-    begin_capture(&app, &state, Instant::now(), Purpose::Dictation)
-        .inspect_err(|e| report_notice(&app, e))
-        .map_err(|e| e.filled())?;
+    if let Err(e) = begin_capture(&app, &state, Instant::now(), Purpose::Dictation, Mode::HandsFree) {
+        fail_start(&app, &state, &mut mode, &e);
+        return Err(e.filled());
+    }
     set_mode(&app, &state, &mut mode, Mode::HandsFree);
     Ok(())
 }
@@ -1437,6 +1521,14 @@ fn get_audio_base64(id: String, state: State<'_, AppState>) -> Result<String, St
 async fn retranscribe(app: AppHandle, id: String, state: State<'_, AppState>) -> Result<HistoryEntry, String> {
     let _activity = app.state::<updater::UpdateState>().activity()?;
     let _retry = state.db.begin_retry(&id)?;
+    // A retry is dictation, unless the bar is showing a Commands recording right now. Under the
+    // mode lock, so a capture starting at the same moment can't lose its chevrons.
+    {
+        let _mode = state.mode.lock().unwrap();
+        if !state.recording.load(Ordering::SeqCst) {
+            state.command.store(false, Ordering::SeqCst);
+        }
+    }
     job_started(&app);
     let result = retranscribe_entry(&app, &id, &state).await;
     job_finished(&app);
@@ -1527,7 +1619,7 @@ async fn get_app_icon(bundle_id: String) -> Option<String> {
 #[tauri::command]
 fn set_tray_labels(app: AppHandle, microphone: String, system_default: String, show: String, quit: String) {
     *app.state::<TrayLabels>().0.lock().unwrap() = [microphone, system_default, show, quit];
-    refresh_tray(&app);
+    refresh_tray(&app, &audio::list_input_devices());
 }
 
 #[tauri::command]
@@ -1618,6 +1710,8 @@ pub fn run() {
                 recorder: AudioRecorder::new(),
                 mode: Mutex::new(Mode::Idle),
                 recording: AtomicBool::new(false),
+                command: AtomicBool::new(false),
+                hands_free: AtomicBool::new(false),
                 recording_start: Mutex::new(None),
                 session: Mutex::new(None),
                 config: Mutex::new(config.clone()),
@@ -1633,12 +1727,17 @@ pub fn run() {
 
             // Menu bar icon; its menu is built by refresh_tray (English until the frontend sends translations).
             app.manage(TrayLabels(Mutex::new(["Microphone", "System Default", "Show OpenGlaido", "Quit"].map(String::from))));
+            #[cfg(target_os = "macos")]
+            let tray_icon = tauri::include_image!("icons/tray.png");
+            #[cfg(not(target_os = "macos"))]
+            let tray_icon = app.default_window_icon().unwrap().clone();
             let _tray = TrayIconBuilder::with_id(TRAY_ID)
-                .icon(app.default_window_icon().unwrap().clone())
+                .icon(tray_icon)
+                .icon_as_template(true)
                 .tooltip("OpenGlaido")
                 .on_tray_icon_event(|tray, event| {
                     if let tauri::tray::TrayIconEvent::Enter { .. } = event {
-                        refresh_tray(tray.app_handle());
+                        refresh_tray(tray.app_handle(), &audio::list_input_devices());
                     }
                 })
                 .on_menu_event(|app, event| match event.id().as_ref() {
@@ -1663,12 +1762,26 @@ pub fn run() {
                             if let Err(e) = update_config(&app, |c| c.input_device = device) {
                                 report_error(&app, e);
                             }
-                            refresh_tray(&app);
+                            refresh_tray(&app, &audio::list_input_devices());
                         });
                     }
                 })
                 .build(app)?;
-            refresh_tray(app.handle());
+            refresh_tray(app.handle(), &audio::list_input_devices());
+            // Microphones coming and going update the menu bar menu and Settings right away.
+            #[cfg(target_os = "macos")]
+            {
+                let app = app.handle().clone();
+                let mut last = Vec::new();
+                audio::watch_devices(move || {
+                    let devices = audio::list_input_devices();
+                    if devices != last {
+                        let _ = app.emit_to("main", "input-devices", &devices);
+                        refresh_tray(&app, &devices);
+                        last = devices;
+                    }
+                });
+            }
 
             // Apply the persisted settings. Failures are reported but never stop the app.
             if let Err(e) = engine.set_bindings(&config.hotkey_hold, &config.hotkey_toggle) {
@@ -1718,6 +1831,15 @@ pub fn run() {
                 // Off the main thread: on the plugin backend the engine may be waiting on it.
                 let engine = window.state::<HotkeyEngine>().inner().clone();
                 std::thread::spawn(move || engine.stop_capture());
+            }
+            // The cancel "x" follows the bar when it moves during a recording (Bar position
+            // setting, display changes). Main thread, and the frame is current here.
+            #[cfg(target_os = "macos")]
+            WindowEvent::Moved(_) | WindowEvent::ScaleFactorChanged { .. } if window.label() == "hud" => {
+                let app = window.app_handle();
+                if let (Some(state), Some(hud)) = (app.try_state::<AppState>(), app.get_webview_window("hud")) {
+                    arm_cancel(app, &state.hud.lock().unwrap(), &hud, None);
+                }
             }
             _ => {}
         })
@@ -1820,48 +1942,78 @@ mod tests {
     #[test]
     fn hud_keeps_processing_until_every_response_finishes_and_recording_takes_priority() {
         let mut hud = HudVisibility { hidden: true, ..HudVisibility::default() };
-        assert!(hud.update(true, 0, false));
+        assert!(hud.update(true, 0, false, false, false));
         let queued_show = hud.changes;
-        assert!(hud.update(true, 1, false)); // processing reserved before release
-        assert!(hud.update(false, 1, false));
+        assert!(hud.update(true, 1, false, false, false)); // processing reserved before release
+        assert!(hud.update(false, 1, false, false, false));
         assert!(hud.shown && hud.processing && !hud.recording);
         assert!(hud.can_show(queued_show)); // the initial position/show is still valid
-        assert!(hud.update(true, 1, false)); // another recording during the first response
+        assert!(hud.update(true, 1, false, false, false)); // another recording during the first response
         assert!(hud.recording && hud.processing);
-        assert!(!hud.update(true, 2, false));
-        assert!(hud.update(false, 2, false));
-        assert!(!hud.update(false, 1, false)); // first response cannot hide the second
+        assert!(!hud.update(true, 2, false, false, false));
+        assert!(hud.update(false, 2, false, false, false));
+        assert!(!hud.update(false, 1, false, false, false)); // first response cannot hide the second
         assert!(hud.shown);
-        assert!(hud.update(false, 0, false));
+        assert!(hud.update(false, 0, false, false, false));
         assert!(!hud.shown && !hud.processing);
         assert!(!hud.can_show(queued_show));
-        assert!(!hud.update(false, 0, false)); // a late completion cannot reopen the bar
+        assert!(!hud.update(false, 0, false, false, false)); // a late completion cannot reopen the bar
     }
 
     #[test]
     fn hud_cancellation_empty_results_and_failures_end_without_stale_shows() {
         let mut hud = HudVisibility { hidden: true, ..HudVisibility::default() };
-        hud.update(true, 0, false);
+        hud.update(true, 0, false, false, false);
         let cancelled_show = hud.changes;
-        hud.update(false, 0, false); // cancelled recording creates no job
+        hud.update(false, 0, false, false, false); // cancelled recording creates no job
         assert!(!hud.shown && !hud.can_show(cancelled_show));
-        hud.update(true, 0, false);
+        hud.update(true, 0, false, false, false);
         assert!(!hud.can_show(cancelled_show));
-        hud.update(true, 1, false);
-        hud.update(false, 1, false);
-        hud.update(false, 0, false); // stop failure, no speech or blank response
+        hud.update(true, 1, false, false, false);
+        hud.update(false, 1, false, false, false);
+        hud.update(false, 0, false, false, false); // stop failure, no speech or blank response
         assert!(!hud.shown);
-        hud.update(false, 1, false);
-        hud.update(false, 0, true); // only model failures extend visibility
+        hud.update(false, 1, false, false, false);
+        hud.update(false, 0, true, false, false); // only model failures extend visibility
         assert!(hud.shown && !hud.processing);
-        hud.update(false, 0, false); // message expires
+        hud.update(false, 0, false, false, false); // message expires
         assert!(!hud.shown);
         // Cancelling a newer recording preserves an older outstanding response.
-        hud.update(true, 1, false);
-        hud.update(false, 1, false);
+        hud.update(true, 1, false, false, false);
+        hud.update(false, 1, false, false, false);
         assert!(hud.shown && hud.processing);
-        hud.update(false, 0, false);
+        hud.update(false, 0, false, false, false);
         assert!(!hud.shown);
+    }
+
+    #[test]
+    fn the_chosen_mic_is_used_while_connected_and_returns_after_a_disconnect() {
+        let devices = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let connected = devices(&["MacBook Pro Microphone", "Mikme Microphone"]);
+        assert_eq!(mic_in_use(Some("Mikme Microphone"), &connected), Some("Mikme Microphone"));
+        assert_eq!(mic_in_use(None, &connected), None, "System Default");
+        // Unplugged: System Default is in use, and the choice itself is untouched.
+        assert_eq!(mic_in_use(Some("Mikme Microphone"), &devices(&["MacBook Pro Microphone"])), None);
+        assert_eq!(mic_in_use(Some("Mikme"), &connected), None, "names match exactly");
+    }
+
+    #[test]
+    fn hud_publishes_command_and_hands_free_changes() {
+        let mut hud = HudVisibility { hidden: true, ..HudVisibility::default() };
+        assert!(hud.update(true, 0, false, true, false)); // a Commands hold
+        let shown = hud.changes;
+        let revision = hud.revision;
+        assert!(hud.update(true, 0, false, true, true)); // upgraded to hands-free with Space
+        assert!(hud.snapshot().command && hud.snapshot().hands_free && hud.revision == revision + 1);
+        assert!(!hud.update(true, 0, false, true, true));
+        assert!(hud.update(true, 0, false, false, true)); // a new dictation recording
+        assert!(!hud.snapshot().command);
+        assert!(hud.can_show(shown)); // neither field changes visibility
+        assert!(hud.update(false, 1, false, false, true)); // processing never shows the cancel button
+        assert!(!hud.snapshot().hands_free && hud.snapshot().processing);
+        assert!(!hud.update(false, 1, false, false, false));
+        assert!(hud.update(false, 1, false, true, false)); // the icon follows the latest capture
+        assert!(hud.can_show(shown));
     }
 
     #[test]

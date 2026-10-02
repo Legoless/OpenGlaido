@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "Doar {language}, pentru cea mai bună acuratețe",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "{model} nu este încă pe acest Mac, așa că dictările nu sunt curățate.",
  "{model} isn't on this Mac yet.": "{model} nu este încă pe acest Mac.",
- "{name} (unavailable)": "{name} (indisponibil)",
  "{n} days": "{n} zile",
  "{n} wpm": "{n} cuv./min",
  "{provider} API key could not be verified. Check it in Settings › Model.": "Nu s-a putut verifica cheia API pentru {provider}. Verific-o în Configurări › Model.",

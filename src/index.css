@@ -191,7 +191,7 @@ body {
   line-height: 14px;
 }
 
-/* ---- Dictation bar processing shimmer (from docs-all.css) ---- */
+/* ---- Dictation bar processing shimmer over the resting dot row (from docs-all.css) ---- */
 @keyframes gs-shimmer-sweep {
   0% {
     -webkit-mask-position: 250% 0;
@@ -226,7 +226,7 @@ body {
     animation: none !important;
     -webkit-mask-image: none;
     mask-image: none;
-    opacity: 0.7;
+    opacity: 0.7; /* still dots: dimmed, so processing doesn't look like warm-up */
   }
   .hud-pill,
   .hud-pill * {

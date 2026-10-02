@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "{language}のみ（最高の精度）",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "{model}はまだこのMacにないため、音声入力は整えられません。",
  "{model} isn't on this Mac yet.": "{model}はまだこのMacにありません。",
- "{name} (unavailable)": "{name}（使用不可）",
  "{n} days": "{n}日",
  "{n} wpm": "毎分{n}語",
  "{provider} API key could not be verified. Check it in Settings › Model.": "{provider}のAPIキーを確認できませんでした。設定 › モデルで確認してください。",

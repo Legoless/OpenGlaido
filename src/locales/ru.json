@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "Только {language} — для максимальной точности",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "{model} ещё нет на этом Mac, поэтому диктовки не обрабатываются.",
  "{model} isn't on this Mac yet.": "{model} ещё нет на этом Mac.",
- "{name} (unavailable)": "{name} (недоступно)",
  "{n} days": "{n} дн.",
  "{n} wpm": "{n} сл/мин",
  "{provider} API key could not be verified. Check it in Settings › Model.": "Не удалось проверить ключ API для {provider}. Проверьте его в Настройки › Модель.",

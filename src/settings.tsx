@@ -59,6 +59,14 @@ import {
 
 export type CaptureResult = { binding: string; warning?: string | null; error?: string };
 
+/** Microphones to list and the one shown as chosen. A disconnected choice leaves the list and
+ *  System default (what recording then uses) shows instead; the choice stays saved and comes
+ *  back when the microphone does. Before the first device list arrives, show the saved choice. */
+export function micChoice(devices: string[] | null, selected: string | null | undefined) {
+  if (devices === null) return { devices: selected ? [selected] : [], value: selected ?? null };
+  return { devices, value: selected && devices.includes(selected) ? selected : null };
+}
+
 // start/stop_hotkey_capture are async commands; keep them in call order (StrictMode runs the
 // recorder's effect twice in dev: start, stop, start).
 let captureQueue: Promise<unknown> = Promise.resolve();
@@ -335,17 +343,23 @@ export function SettingsModal({
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [languagesOpen, setLanguagesOpen] = useState(false);
   const [errors, setErrors] = useState<Partial<Record<keyof TranscriptionConfig, string>>>({});
-  const [devices, setDevices] = useState<string[]>([]);
+  const [devices, setDevices] = useState<string[] | null>(null);
   const [hotkeyStatus, setHotkeyStatus] = useState<HotkeyStatus | null>(null);
   const [hotkeyChecks, setHotkeyChecks] = useState<Partial<Record<HotkeyField, CaptureResult>>>({});
   const [recording, setRecording] = useState<HotkeyField | null>(null);
   const updates = useAppUpdates();
 
   useEffect(() => {
-    invoke<string[]>("list_input_devices").then(setDevices).catch(console.error);
+    // Microphones come and go: macOS reports changes; elsewhere the list refreshes on focus.
+    const loadDevices = () => invoke<string[]>("list_input_devices").then(setDevices).catch(console.error);
+    loadDevices();
+    window.addEventListener("focus", loadDevices);
+    const unlistenDevices = listen<string[]>("input-devices", (e) => setDevices(e.payload));
     invoke<HotkeyStatus>("get_hotkey_status").then(setHotkeyStatus).catch(console.error);
     const unlisten = listen<HotkeyStatus>("hotkey-status", (e) => setHotkeyStatus(e.payload));
     return () => {
+      window.removeEventListener("focus", loadDevices);
+      unlistenDevices.then((f) => f());
       unlisten.then((f) => f());
     };
   }, []);
@@ -391,13 +405,11 @@ export function SettingsModal({
     { id: "model", label: t("Model"), icon: Cpu },
   ];
 
+  const mic = micChoice(devices, config.input_device);
   const deviceOptions = [
     { value: null, label: t("System default") },
-    ...devices.map((d) => ({ value: d, label: d })),
+    ...mic.devices.map((d) => ({ value: d, label: d })),
   ];
-  if (config.input_device && !devices.includes(config.input_device)) {
-    deviceOptions.push({ value: config.input_device, label: t("{name} (unavailable)", { name: config.input_device }) });
-  }
 
   const hotkeyRow: HotkeyRow = (field, icon, title, description) => {
     const check = hotkeyChecks[field];
@@ -500,7 +512,8 @@ export function SettingsModal({
                 note={errorNote("input_device")}
               >
                 <Dropdown
-                  value={config.input_device ?? null}
+                  value={mic.value}
+                  saved={config.input_device ?? null}
                   options={deviceOptions}
                   onChange={(v) => save({ input_device: v })}
                   className="w-[346px] max-w-full"

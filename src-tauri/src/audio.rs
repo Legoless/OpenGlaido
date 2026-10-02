@@ -174,190 +174,120 @@ fn encode_wav(samples: &[f32], sample_rate: u32) -> Result<Vec<u8>, String> {
     Ok(cursor.into_inner())
 }
 
-/// Bars in the dictation pill. Each one follows a different part of the voice.
-const BAR_COUNT: usize = 10;
-/// Samples per level update. 256 at 48 kHz is about 5 ms.
-const HOP: usize = 256;
-/// Band centers from the fundamental up to sibilants. Spaced a little over an octave apart.
-const BAND_HZ: [f32; 5] = [170.0, 420.0, 1_050.0, 2_600.0, 6_200.0];
-const BAND_Q: f32 = 1.35;
-/// Long enough that one pitch pulse does not kick a bar, short enough that a syllable still arrives.
-const ATTACK_MS: f32 = 40.0;
-/// Close together on purpose: lows linger a little, and the row rises and falls as one shape.
-const RELEASE_MS: [f32; 5] = [250.0, 230.0, 210.0, 190.0, 175.0];
+/// Seconds of audio per loudness update.
+const LEVEL_HOP_S: f32 = 0.016;
+/// Strips DC offset and handling rumble before measuring.
+const HIGH_PASS_HZ: f32 = 80.0;
+/// The noise floor drops quickly into pauses and creeps up under steady noise.
+const FLOOR_FALL_S: f32 = 0.5;
+const FLOOR_RISE_S: f32 = 5.0;
+/// The ceiling catches a louder voice within a syllable, then relaxes over a few seconds.
+const CEIL_RISE_S: f32 = 0.08;
+const CEIL_FALL_S: f32 = 2.5;
+/// Smallest floor-to-ceiling span: at least 0.004 linear RMS (about -48 dBFS) and at least the
+/// floor itself (6 dB), so room noise, even a loud fan, never fills the bar.
+const MIN_RANGE: f32 = 0.004;
+/// Hops (~320 ms) a freshly seeded floor falls fast: the mic may open mid-word, seeding it on voice.
+const SETTLE_HOPS: u32 = 20;
+/// Levels below this ease towards zero, flattening noise flicker.
+const KNEE: f32 = 0.1;
 
 pub struct AudioRecorder {
     tx: Sender<AudioCommand>,
-    /// Latest bar levels (0..1, f32 bits), written by the audio callback.
-    meter: Arc<BarMeter>,
+    /// Latest display loudness (0..1, f32 bits), written by the audio callback.
+    level: Arc<AtomicU32>,
     capture: Arc<Mutex<CaptureState>>,
 }
 
-struct BarMeter {
-    bars: [AtomicU32; BAR_COUNT],
+/// Auto-gained loudness for the dictation bar: ~0 for room tone, towards 1 for speech at any
+/// normal volume. Display only; recorded samples are untouched.
+struct Loudness {
+    hop: usize,
+    /// One-pole high-pass: coefficient, previous input and output.
+    hp: f32,
+    hp_in: f32,
+    hp_out: f32,
+    /// Sum of squares and sample count in the current hop.
+    sum: f32,
+    count: usize,
+    /// Per-hop smoothing factors for the time constants above.
+    floor_fall: f32,
+    floor_rise: f32,
+    ceil_rise: f32,
+    ceil_fall: f32,
+    /// Unknown until the first full hop of signal (digital silence says nothing about the room).
+    floor: Option<f32>,
+    /// One hop with signal seen since digital silence: it may be partly zeros, so it can't seed `floor`.
+    primed: bool,
+    /// Hops since `floor` was seeded (see SETTLE_HOPS).
+    age: u32,
+    ceil: f32,
 }
 
-impl BarMeter {
-    fn new() -> Self {
-        Self {
-            bars: std::array::from_fn(|_| AtomicU32::new(0)),
-        }
-    }
-
-    fn clear(&self) {
-        for bar in &self.bars {
-            bar.store(0, Ordering::Relaxed);
-        }
-    }
-
-    fn store(&self, bars: [f32; BAR_COUNT]) {
-        for (bar, value) in self.bars.iter().zip(bars) {
-            bar.store(value.clamp(0.0, 1.0).to_bits(), Ordering::Relaxed);
-        }
-    }
-
-    fn load(&self) -> [f32; BAR_COUNT] {
-        std::array::from_fn(|i| f32::from_bits(self.bars[i].load(Ordering::Relaxed)))
-    }
-}
-
-/// One bandpass (Audio EQ Cookbook, peak gain 0 dB). A sine at the center frequency
-/// comes back out at the same amplitude, so the bars track how loud that part of the voice is.
-struct Biquad {
-    b0: f32,
-    b2: f32,
-    a1: f32,
-    a2: f32,
-    x1: f32,
-    x2: f32,
-    y1: f32,
-    y2: f32,
-}
-
-impl Biquad {
-    fn bandpass(rate: u32, freq: f32, q: f32) -> Self {
-        let nyquist = rate as f32 * 0.45;
-        let freq = freq.clamp(1.0, nyquist.max(1.0));
-        let w0 = 2.0 * std::f32::consts::PI * freq / rate as f32;
-        let alpha = w0.sin() / (2.0 * q);
-        let a0 = 1.0 + alpha;
-        Self {
-            b0: alpha / a0,
-            b2: -alpha / a0,
-            a1: -2.0 * w0.cos() / a0,
-            a2: (1.0 - alpha) / a0,
-            x1: 0.0,
-            x2: 0.0,
-            y1: 0.0,
-            y2: 0.0,
-        }
-    }
-
-    fn tick(&mut self, x: f32) -> f32 {
-        let y = self.b0 * x + self.b2 * self.x2 - self.a1 * self.y1 - self.a2 * self.y2;
-        self.x2 = self.x1;
-        self.x1 = x;
-        self.y2 = self.y1;
-        self.y1 = y;
-        y
-    }
-}
-
-/// Streaming voice visualizer. Five overlapping bands follow the voice. A normal syllable draws
-/// two humps — warmth taller on the left, brightness taller on the right — with a valley between
-/// them. Attack and release are eased, and a light blend keeps each hump round.
-struct Waveform {
-    bands: [Biquad; 5],
-    env: [f32; 5],
-    /// Sum of absolute band output over the current hop.
-    energy: [f32; 5],
-    attack: f32,
-    release: [f32; 5],
-    done: usize,
-    left: usize,
-}
-
-impl Waveform {
+impl Loudness {
     fn new(rate: u32) -> Self {
-        let rate = rate.max(1);
-        let coeff = |ms: f32| (-(HOP as f32) / (rate as f32 * ms / 1000.0)).exp();
+        let rate = rate.max(1) as f32;
+        let hop = ((rate * LEVEL_HOP_S) as usize).max(1);
+        let keep = |seconds: f32| (-(hop as f32) / (rate * seconds)).exp();
         Self {
-            bands: std::array::from_fn(|i| Biquad::bandpass(rate, BAND_HZ[i], BAND_Q)),
-            env: [0.0; 5],
-            energy: [0.0; 5],
-            attack: coeff(ATTACK_MS),
-            release: std::array::from_fn(|i| coeff(RELEASE_MS[i])),
-            done: 0,
-            left: HOP,
+            hop,
+            hp: 1.0 / (1.0 + std::f32::consts::TAU * HIGH_PASS_HZ / rate),
+            hp_in: 0.0,
+            hp_out: 0.0,
+            sum: 0.0,
+            count: 0,
+            floor_fall: keep(FLOOR_FALL_S),
+            floor_rise: keep(FLOOR_RISE_S),
+            ceil_rise: keep(CEIL_RISE_S),
+            ceil_fall: keep(CEIL_FALL_S),
+            floor: None,
+            primed: false,
+            age: 0,
+            ceil: 0.0,
         }
     }
 
-    fn push(&mut self, samples: &[f32], meter: &BarMeter) {
-        while self.done < samples.len() {
-            let x = samples[self.done];
-            self.done += 1;
-            for (band, energy) in self.bands.iter_mut().zip(self.energy.iter_mut()) {
-                *energy += band.tick(x).abs();
-            }
-            self.left -= 1;
-            if self.left == 0 {
-                self.left = HOP;
-                // π/2 times the mean absolute value equals the amplitude of a sine, and it
-                // ignores a one-sample spike that a peak meter would draw at full height.
-                let scale = std::f32::consts::FRAC_PI_2 / HOP as f32;
-                for i in 0..self.env.len() {
-                    let level = perceptual(self.energy[i] * scale);
-                    let coeff = if level >= self.env[i] { self.attack } else { self.release[i] };
-                    self.env[i] = level + (self.env[i] - level) * coeff;
-                    self.energy[i] = 0.0;
-                }
-                meter.store(soften(&layout(&self.env)));
+    fn push(&mut self, samples: &[f32], level: &AtomicU32) {
+        for &x in samples {
+            let x = if x.is_finite() { x } else { 0.0 };
+            self.hp_out = self.hp * (self.hp_out + x - self.hp_in);
+            self.hp_in = x;
+            self.sum += self.hp_out * self.hp_out;
+            self.count += 1;
+            if self.count == self.hop {
+                let rms = (self.sum / self.hop as f32).sqrt();
+                (self.sum, self.count) = (0.0, 0);
+                level.store(self.update(rms).to_bits(), Ordering::Relaxed);
             }
         }
     }
-}
 
-/// Display-only normalization: retain quiet speech down to -60 dBFS and gently lift its
-/// visible range. A fixed floor/gain cap keeps stationary room noise from being amplified
-/// to full height as an automatic peak normalizer would. Recorded samples are untouched.
-fn perceptual(amplitude: f32) -> f32 {
-    if !amplitude.is_finite() || amplitude <= 0.001 {
-        return 0.0;
+    fn update(&mut self, rms: f32) -> f32 {
+        if rms < 1e-6 {
+            (self.floor, self.primed) = (None, false);
+            return 0.0;
+        }
+        // The first hop after silence can be mostly zeros: seeding the floor that low would show
+        // room tone as a voice for seconds while the floor creeps up.
+        if self.floor.is_none() && !std::mem::replace(&mut self.primed, true) {
+            return 0.0;
+        }
+        let ease = |from: f32, keep: f32| rms + (from - rms) * keep;
+        if self.floor.is_none() {
+            self.age = 0;
+        }
+        self.age = self.age.saturating_add(1);
+        // Settling: both bounds fall fast, so a floor seeded on a voice (and the ceiling it pushed
+        // up) drop to the room and the voice's real peaks within a syllable or two.
+        let settling = self.age <= SETTLE_HOPS;
+        let floor = self.floor.get_or_insert(rms);
+        *floor = ease(*floor, if rms >= *floor { self.floor_rise } else if settling { self.ceil_rise } else { self.floor_fall });
+        let floor = *floor;
+        let ceil_keep = if rms > self.ceil || settling { self.ceil_rise } else { self.ceil_fall };
+        self.ceil = ease(self.ceil, ceil_keep).max(floor + MIN_RANGE.max(floor));
+        let level = ((rms - floor) / (self.ceil - floor)).clamp(0.0, 1.0);
+        level * (level / KNEE).min(1.0)
     }
-    ((20.0 * amplitude.log10() + 60.0) / 52.0).clamp(0.0, 1.0).powf(1.1)
-}
-
-/// Both humps are driven by the whole voice, so speech does not collapse into one arch in the
-/// middle. Warmth leans the left hump up, brightness the right. `env` is already 0..1.
-fn layout(env: &[f32; 5]) -> [f32; BAR_COUNT] {
-    let [low, body, mid, presence, air] = *env;
-    let voice = (low * 0.50 + body * 0.85 + mid * 0.70 + presence * 0.40 + air * 0.22).clamp(0.0, 1.0);
-    let left = (voice * (0.90 + low * 0.16 + body * 0.08 - air * 0.10)).clamp(0.0, 1.0);
-    let right = (voice * (0.86 + presence * 0.14 + air * 0.20 - low * 0.06)).clamp(0.0, 1.0);
-    [
-        left * 0.40,
-        left * 0.72,
-        left,
-        left * 0.70,
-        left * 0.40 + right * 0.06,
-        right * 0.38 + left * 0.06,
-        right * 0.72,
-        right,
-        right * 0.70,
-        right * 0.38,
-    ]
-    .map(|bar| bar.clamp(0.0, 1.0))
-}
-
-/// One light blend toward each neighbor. Enough to round a hump, light enough that the valley
-/// between the two peaks stays.
-fn soften(bars: &[f32; BAR_COUNT]) -> [f32; BAR_COUNT] {
-    let prev = bars;
-    std::array::from_fn(|i| {
-        let left = if i == 0 { prev[1] } else { prev[i - 1] };
-        let right = if i + 1 == BAR_COUNT { prev[BAR_COUNT - 2] } else { prev[i + 1] };
-        left * 0.12 + prev[i] * 0.76 + right * 0.12
-    })
 }
 
 /// Names of the available input devices (cpal names, as stored in `input_device`).
@@ -366,6 +296,43 @@ pub fn list_input_devices() -> Vec<String> {
         .input_devices()
         .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
         .unwrap_or_default()
+}
+
+/// Calls `changed` on its own thread whenever audio devices come or go (a burst of changes is
+/// one call, once things settle). macOS: CoreAudio notifies; elsewhere the lists refresh on
+/// focus and when the menu bar menu opens.
+#[cfg(target_os = "macos")]
+pub fn watch_devices(mut changed: impl FnMut() + Send + 'static) {
+    use crate::output::platform::{fourcc, Address, SYSTEM_OBJECT};
+    use std::ffi::c_void;
+    use std::time::Duration;
+
+    type Listener = extern "C" fn(u32, u32, *const Address, *mut c_void) -> i32;
+    #[link(name = "CoreAudio", kind = "framework")]
+    extern "C" {
+        fn AudioObjectAddPropertyListener(object: u32, address: *const Address, listener: Listener, client: *mut c_void) -> i32;
+    }
+    extern "C" fn notify(_: u32, _: u32, _: *const Address, client: *mut c_void) -> i32 {
+        let _ = unsafe { &*(client as *const Sender<()>) }.send(());
+        0
+    }
+
+    let (tx, rx) = channel::<()>();
+    // CoreAudio keeps calling back for the app's lifetime, so the sender is never freed.
+    let client = Box::into_raw(Box::new(tx)).cast();
+    // The system object's kAudioHardwarePropertyDevices, global scope, main element.
+    let devices = Address { selector: fourcc(b"dev#"), scope: fourcc(b"glob"), element: 0 };
+    let status = unsafe { AudioObjectAddPropertyListener(SYSTEM_OBJECT, &devices, notify, client) };
+    if status != 0 {
+        return eprintln!("Couldn't watch audio devices: CoreAudio error {status}");
+    }
+    thread::spawn(move || {
+        while rx.recv().is_ok() {
+            // A device arriving or leaving reports several changes in a row.
+            while rx.recv_timeout(Duration::from_millis(300)).is_ok() {}
+            changed();
+        }
+    });
 }
 
 /// Whether there is a microphone to record from (listing the devices takes 150+ ms on macOS).
@@ -383,14 +350,14 @@ fn is_input_config(config: &Result<cpal::SupportedStreamConfig, cpal::DefaultStr
     }
 }
 
-// Downmixes one callback chunk to mono, appends it and updates the bar levels.
+// Downmixes one callback chunk to mono, appends it and updates the display level.
 fn record_chunk<T: Copy>(
     data: &[T],
     channels: usize,
     to_f32: fn(T) -> f32,
     capture: &Mutex<CaptureState>,
-    wave: &mut Waveform,
-    meter: &BarMeter,
+    meter: &mut Loudness,
+    level: &AtomicU32,
     feed: &mut StreamFeed,
 ) {
     let mut capture = capture.lock().unwrap();
@@ -401,7 +368,7 @@ fn record_chunk<T: Copy>(
         data.chunks(channels)
             .map(|frame| frame.iter().map(|&x| to_f32(x)).sum::<f32>() / channels as f32),
     );
-    wave.push(s, meter);
+    meter.push(&s[start..], level);
     feed.push(&s[start..]);
 }
 
@@ -409,19 +376,19 @@ impl AudioRecorder {
     #[allow(clippy::new_without_default)] // spawns the audio thread; not a plain default value
     pub fn new() -> Self {
         let (tx, rx) = channel::<AudioCommand>();
-        let meter = Arc::new(BarMeter::new());
-        let loop_meter = Arc::clone(&meter);
+        let level = Arc::new(AtomicU32::new(0));
+        let loop_level = Arc::clone(&level);
         let capture = Arc::new(Mutex::new(CaptureState::default()));
         let loop_capture = Arc::clone(&capture);
 
         thread::spawn(move || {
-            Self::event_loop(rx, loop_meter, loop_capture);
+            Self::event_loop(rx, loop_level, loop_capture);
         });
 
-        Self { tx, meter, capture }
+        Self { tx, level, capture }
     }
 
-    fn event_loop(rx: Receiver<AudioCommand>, meter: Arc<BarMeter>, capture: Arc<Mutex<CaptureState>>) {
+    fn event_loop(rx: Receiver<AudioCommand>, level: Arc<AtomicU32>, capture: Arc<Mutex<CaptureState>>) {
         let mut current_stream: Option<cpal::Stream> = None;
         let mut sample_rate = 16000;
 
@@ -436,7 +403,7 @@ impl AudioRecorder {
                     eprintln!("Failed to stop audio stream: {e}");
                 }
             }
-            meter.clear();
+            level.store(0, Ordering::Relaxed);
             let Ok(cmd) = cmd else { break };
             match cmd {
                 AudioCommand::Start(device_name, stream_input, skip_ms, reply) => {
@@ -489,7 +456,7 @@ impl AudioRecorder {
                         }
                     };
                     let samples_clone = Arc::clone(&capture);
-                    let meter_clone = Arc::clone(&meter);
+                    let level_clone = Arc::clone(&level);
                     let mut feed = StreamFeed {
                         input: stream_input,
                         rate: sample_rate,
@@ -500,8 +467,8 @@ impl AudioRecorder {
                     let stream_res = match supported_config.sample_format() {
                         cpal::SampleFormat::F32 => {
                             let samples_clone = Arc::clone(&samples_clone);
-                            let meter_clone = Arc::clone(&meter_clone);
-                            let mut wave = Waveform::new(sample_rate);
+                            let level_clone = Arc::clone(&level_clone);
+                            let mut meter = Loudness::new(sample_rate);
                             device.build_input_stream(
                                 &supported_config.clone().into(),
                                 move |data: &[f32], _| {
@@ -510,8 +477,8 @@ impl AudioRecorder {
                                         channels,
                                         |x| x,
                                         &samples_clone,
-                                        &mut wave,
-                                        &meter_clone,
+                                        &mut meter,
+                                        &level_clone,
                                         &mut feed,
                                     )
                                 },
@@ -520,7 +487,7 @@ impl AudioRecorder {
                             )
                         }
                         cpal::SampleFormat::I16 => {
-                            let mut wave = Waveform::new(sample_rate);
+                            let mut meter = Loudness::new(sample_rate);
                             device.build_input_stream(
                                 &supported_config.into(),
                                 move |data: &[i16], _| {
@@ -529,8 +496,8 @@ impl AudioRecorder {
                                         channels,
                                         |x| x as f32 / 32768.0,
                                         &samples_clone,
-                                        &mut wave,
-                                        &meter_clone,
+                                        &mut meter,
+                                        &level_clone,
                                         &mut feed,
                                     )
                                 },
@@ -633,9 +600,9 @@ impl AudioRecorder {
         if capture.active { capture.interruption.clone() } else { None }
     }
 
-    /// Current bar levels, each 0..1. Zeros when not recording.
-    pub fn bars(&self) -> [f32; BAR_COUNT] {
-        self.meter.load()
+    /// Current display loudness, 0..1. Zero when not recording.
+    pub fn level(&self) -> f32 {
+        f32::from_bits(self.level.load(Ordering::Relaxed))
     }
 }
 
@@ -648,12 +615,12 @@ mod tests {
         let capture = Mutex::new(CaptureState::default());
         let generation = capture.lock().unwrap().begin();
         let mut feed = StreamFeed { input: None, rate: 16000, skip: 0, generation };
-        let meter = BarMeter::new();
-        let mut wave = Waveform::new(16000);
-        record_chunk(&[0.25, 0.5], 1, |x| x, &capture, &mut wave, &meter, &mut feed);
+        let level = AtomicU32::new(0);
+        let mut meter = Loudness::new(16000);
+        record_chunk(&[0.25, 0.5], 1, |x| x, &capture, &mut meter, &level, &mut feed);
         assert!(capture.lock().unwrap().interrupt(generation, "device disconnected".into()));
         assert!(!capture.lock().unwrap().interrupt(generation, "later error".into()));
-        record_chunk(&[0.75], 1, |x| x, &capture, &mut wave, &meter, &mut feed);
+        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &mut feed);
         // Stop deactivates before pausing CPAL, whose expected teardown errors are ignored.
         capture.lock().unwrap().active = false;
         assert!(!capture.lock().unwrap().interrupt(generation, "teardown".into()));
@@ -667,18 +634,18 @@ mod tests {
         assert_ne!(generation, next);
         assert!(capture.lock().unwrap().interruption.is_none());
         assert!(!capture.lock().unwrap().interrupt(generation, "old stream".into()));
-        record_chunk(&[0.75], 1, |x| x, &capture, &mut wave, &meter, &mut feed);
+        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &mut feed);
         assert!(capture.lock().unwrap().samples.is_empty());
         feed.generation = next;
-        let mut wave = Waveform::new(16000);
-        record_chunk(&[0.125], 1, |x| x, &capture, &mut wave, &meter, &mut feed);
+        let mut meter = Loudness::new(16000);
+        record_chunk(&[0.125], 1, |x| x, &capture, &mut meter, &level, &mut feed);
         assert_eq!(capture.lock().unwrap().samples, [0.125]);
         assert!(capture.lock().unwrap().interrupt(next, "new failure".into()));
         capture.lock().unwrap().cancel();
         assert!(capture.lock().unwrap().samples.is_empty());
         assert!(capture.lock().unwrap().interruption.is_none());
         assert!(!capture.lock().unwrap().interrupt(next, "cancel teardown".into()));
-        record_chunk(&[0.5], 1, |x| x, &capture, &mut wave, &meter, &mut feed);
+        record_chunk(&[0.5], 1, |x| x, &capture, &mut meter, &level, &mut feed);
         assert!(capture.lock().unwrap().samples.is_empty());
     }
 
@@ -711,15 +678,15 @@ mod tests {
             generation: 1,
         };
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
-        let mut wave = Waveform::new(1000);
-        let meter = BarMeter::new();
+        let mut meter = Loudness::new(1000);
+        let level = AtomicU32::new(0);
         let mut streamed = Vec::new();
         for data in [
             [0.2, 0.4, 0.6, 0.8],
             [0.1, 0.3, 0.5, 0.7],
             [0.2, 0.2, 0.4, 0.4],
         ] {
-            record_chunk(&data, 2, |x| x, &samples, &mut wave, &meter, &mut feed);
+            record_chunk(&data, 2, |x| x, &samples, &mut meter, &level, &mut feed);
             while let Ok(chunk) = rx.try_recv() {
                 assert_eq!(chunk.rate, 1000);
                 streamed.extend(chunk.samples);
@@ -743,15 +710,15 @@ mod tests {
             generation: 1,
         };
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
-        let mut wave = Waveform::new(16000);
-        let meter = BarMeter::new();
+        let mut meter = Loudness::new(16000);
+        let level = AtomicU32::new(0);
         for sample in [16384i16, 8192] {
-            record_chunk(&[sample], 1, |x| x as f32 / 32768.0, &samples, &mut wave, &meter, &mut feed);
+            record_chunk(&[sample], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &mut feed);
         }
         assert!(overflowed.load(Ordering::Acquire));
         assert!(feed.input.is_none());
         assert_eq!(rx.try_recv().unwrap().samples, vec![0.5]);
-        record_chunk(&[0i16], 1, |x| x as f32 / 32768.0, &samples, &mut wave, &meter, &mut feed);
+        record_chunk(&[0i16], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &mut feed);
         assert!(rx.try_recv().is_err());
         assert_eq!(samples.lock().unwrap().samples, vec![0.5, 0.25, 0.0]);
     }
@@ -808,48 +775,103 @@ mod tests {
         assert_eq!(&wav[..4], b"RIFF");
     }
 
-    fn tone(freq: f32, amp: f32, hops: usize, rate: u32) -> [f32; BAR_COUNT] {
-        let n = HOP * hops;
-        let samples: Vec<f32> = (0..n)
-            .map(|i| amp * (2.0 * std::f32::consts::PI * freq * i as f32 / rate as f32).sin())
+    /// White noise at `db` dBFS RMS (xorshift).
+    fn noise(db: f32, n: usize, seed: u64) -> Vec<f32> {
+        let mut x = seed;
+        let amp = 10f32.powf(db / 20.0) * 3f32.sqrt();
+        (0..n)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 7;
+                x ^= x << 17;
+                ((x >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * amp
+            })
+            .collect()
+    }
+
+    /// A voiced vowel: 140 Hz harmonics with a 4 Hz syllable envelope, at `db` dBFS RMS.
+    fn speech(db: f32, n: usize, rate: u32) -> Vec<f32> {
+        let tau = std::f32::consts::TAU;
+        let raw: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / rate as f32;
+                let voice: f32 = (1..=25).map(|h| (tau * 140.0 * h as f32 * t).sin() / h as f32).sum();
+                voice * (0.5 - 0.5 * (tau * 4.0 * t).cos())
+            })
             .collect();
-        let mut wave = Waveform::new(rate);
-        let meter = BarMeter::new();
-        wave.push(&samples, &meter);
-        meter.load()
+        let rms = (raw.iter().map(|x| x * x).sum::<f32>() / n as f32).sqrt();
+        let gain = 10f32.powf(db / 20.0) / rms;
+        raw.into_iter().map(|x| x * gain).collect()
+    }
+
+    /// The level after each ~10 ms callback.
+    fn levels(samples: &[f32], rate: u32) -> Vec<f32> {
+        let mut meter = Loudness::new(rate);
+        let level = AtomicU32::new(0);
+        samples
+            .chunks(rate as usize / 100)
+            .map(|chunk| {
+                meter.push(chunk, &level);
+                f32::from_bits(level.load(Ordering::Relaxed))
+            })
+            .collect()
+    }
+
+    fn peak(levels: &[f32]) -> f32 {
+        levels.iter().copied().fold(0.0, f32::max)
     }
 
     #[test]
-    fn silence_holds_the_bars_down() {
-        let meter = BarMeter::new();
-        Waveform::new(48_000).push(&vec![0.0; HOP * 6], &meter);
-        assert!(meter.load().iter().all(|v| *v == 0.0), "{:?}", meter.load());
+    fn silence_and_room_noise_stay_flat() {
+        for rate in [16_000, 48_000] {
+            let ms = |ms: usize| rate as usize * ms / 1000;
+            assert_eq!(peak(&levels(&vec![0.0; ms(2000)], rate)), 0.0);
+            let room = levels(&noise(-60.0, ms(3000), 0x0bad_cafe), rate);
+            assert!(peak(&room[50..]) < 0.05, "{rate} Hz room {}", peak(&room[50..]));
+            let fan = levels(&noise(-50.0, ms(6000), 0x1234_5678), rate);
+            assert!(peak(&fan[300..]) <= 0.1, "{rate} Hz fan {}", peak(&fan[300..]));
+            // Steady noise stays flat from the very first hop, even while the meter settles.
+            for db in [-45.0, -35.0, -25.0] {
+                let start = levels(&noise(db, ms(1000), 42), rate);
+                assert!(peak(&start) <= 0.15, "{rate} Hz {db} dB noise at start {}", peak(&start));
+            }
+            // A loud fan right next to the mic still settles flat.
+            let loud_fan = levels(&noise(-25.0, ms(8000), 0x2468_ace0), rate);
+            assert!(peak(&loud_fan[500..]) <= 0.15, "{rate} Hz loud fan {}", peak(&loud_fan[500..]));
+            // Mic warm-up zeros that end mid-hop, then room tone: no phantom voice.
+            let mut start = vec![0.0; ms(29)]; // the first signal hop is mostly zeros at 16 and 48 kHz
+            start.extend(noise(-45.0, ms(6000), 0x0f0f_0f0f));
+            let warm = levels(&start, rate);
+            assert!(peak(&warm[30..]) < 0.15, "{rate} Hz warm-up into room tone {}", peak(&warm[30..]));
+        }
     }
 
     #[test]
-    fn louder_speech_raises_the_bars() {
-        let rate = 48_000;
-        let freq = BAND_HZ[1];
-        let quiet: f32 = tone(freq, 0.04, 8, rate).into_iter().sum();
-        let loud: f32 = tone(freq, 0.45, 8, rate).into_iter().sum();
-        assert!(loud > quiet + 1.5, "loud {loud} quiet {quiet}");
+    fn speech_fills_the_bar_at_any_normal_volume_and_releases_promptly() {
+        for rate in [16_000, 48_000] {
+            let ms = |ms: usize| rate as usize * ms / 1000;
+            for db in [-42.0, -18.0] {
+                let mut samples = noise(-60.0, ms(500), 7);
+                samples.extend(speech(db, ms(1500), rate).iter().zip(noise(-60.0, ms(1500), 8)).map(|(s, n)| s + n));
+                samples.extend(noise(-60.0, ms(1000), 9));
+                let trace = levels(&samples, rate);
+                assert!(trace.iter().all(|l| (0.0..=1.0).contains(l)), "{rate} Hz {db} dB {trace:?}");
+                let first_second = peak(&trace[50..150]);
+                assert!(first_second >= 0.6, "{rate} Hz {db} dB onset {first_second}");
+                let after = peak(&trace[230..]);
+                assert!(after < 0.05, "{rate} Hz {db} dB release {after}");
+            }
+            // Already talking when the mic opens (mid-syllable): the floor seeds on the voice and
+            // must drop out of it within a few hundred ms.
+            let mut talking = vec![0.0; ms(40)];
+            talking.extend_from_slice(&speech(-25.0, ms(2000), rate)[ms(110)..]);
+            let onset = peak(&levels(&talking, rate)[..39]);
+            assert!(onset >= 0.5, "{rate} Hz mid-word start {onset}");
+        }
     }
 
     #[test]
-    fn quiet_voice_is_visible_while_room_tone_stays_bounded() {
-        let quiet = tone(BAND_HZ[1], 0.005, 20, 48_000); // -46 dBFS, previously below the display floor
-        assert!(quiet[2] > 0.2, "quiet voice should visibly raise the bars: {quiet:?}");
-        let room = tone(BAND_HZ[1], 0.0008, 400, 48_000);
-        assert!(room.iter().all(|v| *v == 0.0), "noise must not gain itself up: {room:?}");
-        let noise = tone(BAND_HZ[1], 0.002, 400, 48_000);
-        assert!(noise.iter().copied().fold(0.0f32, f32::max) < 0.35, "stationary noise: {noise:?}");
-        assert_eq!(perceptual(f32::NAN), 0.0);
-        assert_eq!(perceptual(f32::INFINITY), 0.0);
-        assert_eq!(perceptual(1.0), 1.0);
-    }
-
-    #[test]
-    fn visual_normalization_does_not_change_recorded_or_streamed_samples() {
+    fn display_level_does_not_change_recorded_or_streamed_samples() {
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let mut feed = StreamFeed {
@@ -858,169 +880,17 @@ mod tests {
             skip: 0,
             generation: 1,
         };
-        let quiet = tone_samples(BAND_HZ[1], 0.005, 20, 48_000);
-        let meter = BarMeter::new();
-        record_chunk(&quiet, 1, |sample| sample, &samples, &mut Waveform::new(48_000), &meter, &mut feed);
+        let quiet = speech(-45.0, 18_000, 48_000); // 375 ms: ends on a syllable peak, not a pause
+        let level = AtomicU32::new(0);
+        record_chunk(&quiet, 1, |sample| sample, &samples, &mut Loudness::new(48_000), &level, &mut feed);
         assert_eq!(samples.lock().unwrap().samples, quiet);
         assert_eq!(rx.try_recv().unwrap().samples, quiet);
-        assert!(meter.load()[2] > 0.2);
-    }
-
-    fn assert_two_peaks(bars: &[f32; BAR_COUNT], what: &str) {
-        let left = bars[2];
-        let right = bars[7];
-        let valley = (bars[4] + bars[5]) * 0.5;
-        let edge = (bars[0] + bars[9]) * 0.5;
-        // Relative, so a quiet sibilant has to show the same valley as a loud vowel.
-        assert!(left > valley * 1.25 + 0.015, "{what} left {left} valley {valley} {bars:?}");
-        assert!(right > valley * 1.25 + 0.015, "{what} right {right} valley {valley} {bars:?}");
-        assert!(left > edge && right > edge, "{what} edge {edge} {bars:?}");
-    }
-
-    #[test]
-    fn warmth_and_brightness_lean_opposite_peaks() {
-        let rate = 48_000;
-        let low = tone(BAND_HZ[0], 0.5, 20, rate);
-        let high = tone(BAND_HZ[4], 0.5, 20, rate);
-        assert_two_peaks(&low, "low");
-        assert_two_peaks(&high, "high");
-        assert!(low[2] > low[7], "warmth should lean left {low:?}");
-        assert!(high[7] > high[2], "brightness should lean right {high:?}");
-    }
-
-    /// A vowel is not a sine parked on a band center. Harmonics between the centers still have
-    /// to raise both humps.
-    #[test]
-    fn a_vowel_forms_two_peaks() {
-        let rate = 48_000;
-        let n = HOP * 16;
-        let mut raw = vec![0.0f32; n];
-        for h in 1..28 {
-            let freq = 137.0 * h as f32;
-            if freq >= 8_000.0 {
-                break;
-            }
-            let weight = 1.0 / h as f32;
-            for (i, sample) in raw.iter_mut().enumerate() {
-                *sample +=
-                    weight * (2.0 * std::f32::consts::PI * freq * i as f32 / rate as f32).sin();
-            }
-        }
-        let peak = raw.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        for sample in &mut raw {
-            *sample = *sample / peak * 0.16;
-        }
-        let mut wave = Waveform::new(rate);
-        let meter = BarMeter::new();
-        wave.push(&raw, &meter);
-        let bars = meter.load();
-        assert_two_peaks(&bars, "vowel");
-        assert!(bars[2] > 0.35, "left hump {bars:?}");
-    }
-
-    /// Sibilants are noise, not a tone. They still draw two humps, with the right one taller.
-    #[test]
-    fn hiss_leans_on_the_right_peak() {
-        let mut state = 0x1234_5678u32;
-        let mut prev = 0.0f32;
-        let mut raw = Vec::with_capacity(HOP * 20);
-        for _ in 0..HOP * 20 {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let white = ((state >> 8) & 0x00ff_ffff) as f32 / 16_777_215.0 * 2.0 - 1.0;
-            raw.push(white - prev);
-            prev = white;
-        }
-        let peak = raw.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        for sample in &mut raw {
-            *sample = *sample / peak * 0.15;
-        }
-        let mut wave = Waveform::new(48_000);
-        let meter = BarMeter::new();
-        wave.push(&raw, &meter);
-        let bars = meter.load();
-        assert_two_peaks(&bars, "hiss");
-        assert!(bars[7] > bars[2], "right hump should lead {bars:?}");
-    }
-
-    #[test]
-    fn the_row_moves_as_one_curve() {
-        let bars = tone(BAND_HZ[0], 0.5, 20, 48_000);
-        let step = bars.windows(2).fold(0.0f32, |m, w| m.max((w[0] - w[1]).abs()));
-        assert!(step < 0.28, "step {step} {bars:?}");
-    }
-
-    /// A steady hiss used to twitch, because each hop kept its loudest sample.
-    #[test]
-    fn steady_noise_holds_its_shape() {
-        let mut state = 0x89ab_cdefu32;
-        let mut prev = 0.0f32;
-        let mut raw = Vec::with_capacity(HOP * 48);
-        for _ in 0..HOP * 48 {
-            state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-            let white = ((state >> 8) & 0x00ff_ffff) as f32 / 16_777_215.0 * 2.0 - 1.0;
-            let sample = (white - prev) * 0.08;
-            prev = white;
-            raw.push(sample);
-        }
-        let mut wave = Waveform::new(48_000);
-        let meter = BarMeter::new();
-        let mut worst = 0.0f32;
-        let mut last = [0.0f32; BAR_COUNT];
-        for hop in 0..48 {
-            let start = hop * HOP;
-            wave.push(&raw[start..start + HOP], &meter);
-            let bars = meter.load();
-            if hop >= 30 {
-                for i in 0..BAR_COUNT {
-                    worst = worst.max((bars[i] - last[i]).abs());
-                }
-            }
-            last = bars;
-        }
-        assert!(worst < 0.05, "step {worst} {last:?}");
-    }
-
-    #[test]
-    fn a_syllable_releases_instead_of_sticking() {
-        let rate = 48_000;
-        let freq = BAND_HZ[2];
-        // Long enough for the eased attack to arrive, then a pause long enough to settle.
-        let mut samples = tone_samples(freq, 0.5, 16, rate);
-        let spoken = {
-            let meter = BarMeter::new();
-            let mut wave = Waveform::new(rate);
-            wave.push(&samples, &meter);
-            meter.load().into_iter().sum::<f32>()
-        };
-        samples.extend(std::iter::repeat_n(0.0, HOP * 80));
-        let meter = BarMeter::new();
-        let mut wave = Waveform::new(rate);
-        wave.push(&samples, &meter);
-        let after: f32 = meter.load().into_iter().sum();
-        assert!(spoken > 2.0, "spoken {spoken}");
-        assert!(after < spoken * 0.35, "after {after} spoken {spoken}");
-    }
-
-    fn tone_samples(freq: f32, amp: f32, hops: usize, rate: u32) -> Vec<f32> {
-        let n = HOP * hops;
-        (0..n)
-            .map(|i| amp * (2.0 * std::f32::consts::PI * freq * i as f32 / rate as f32).sin())
-            .collect()
+        assert!(f32::from_bits(level.load(Ordering::Relaxed)) > 0.0);
     }
 
     #[test]
     fn steady_hiss_is_not_speech() {
-        // 10 s of white noise at -38 dBFS (xorshift): scattered voice-like frames, never a run.
-        let mut x = 0x0bad_cafe_1234_5678u64;
-        let amp = 10f32.powf(-38.0 / 20.0) * 3f32.sqrt();
-        let hiss: Vec<f32> = (0..48_000 * 10)
-            .map(|_| {
-                x ^= x << 13;
-                x ^= x >> 7;
-                x ^= x << 17;
-                ((x >> 40) as f32 / (1u64 << 24) as f32 * 2.0 - 1.0) * amp
-            })
-            .collect();
-        assert!(!denoise(&hiss, 48_000).1);
+        // 10 s of white noise at -38 dBFS: scattered voice-like frames, never a run.
+        assert!(!denoise(&noise(-38.0, 48_000 * 10, 0x0bad_cafe_1234_5678), 48_000).1);
     }
 }

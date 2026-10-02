@@ -401,10 +401,13 @@ export function Dropdown({
   className = "",
   buttonLabel,
   search,
+  saved = value,
 }: {
   value: string | null;
   options: { value: string | null; label: string }[];
   onChange: (v: string | null) => void;
+  /** The saved value, when the shown `value` stands in for one that isn't listed: picking it saves nothing. */
+  saved?: string | null;
   className?: string;
   buttonLabel?: string;
   /** Placeholder of a filter field on top of the menu, shown when it lists more than 12 options. */
@@ -424,7 +427,7 @@ export function Dropdown({
   const shown = filtering && q ? options.filter((o) => o.label.toLowerCase().includes(q)) : options;
   const pick = (o: { value: string | null }) => {
     setMenu(null);
-    if (o.value !== value) onChange(o.value);
+    if (o.value !== saved) onChange(o.value);
   };
   const openMenu = (e: React.MouseEvent<HTMLButtonElement>) => {
     // Remain inside the top-layer dialog while escaping the blurred/scrolling settings panel.

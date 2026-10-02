@@ -422,7 +422,6 @@
  "{language} only, for the best accuracy": "Samo {language}, radi najveće tačnosti",
  "{model} isn't on this Mac yet, so dictations aren't cleaned up.": "{model} još nije na ovom Macu, pa diktiranja nisu doterana.",
  "{model} isn't on this Mac yet.": "{model} još nije na ovom Macu.",
- "{name} (unavailable)": "{name} (nedostupno)",
  "{n} days": "{n} dana",
  "{n} wpm": "{n} reči/min",
  "{provider} API key could not be verified. Check it in Settings › Model.": "Nije moguće proveriti API ključ za {provider}. Proverite ga u Podešavanja › Model.",

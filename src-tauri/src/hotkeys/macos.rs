@@ -20,6 +20,9 @@ const FLAGS_CHANGED: u32 = 12;
 /// Clicks and scrolls abort modifier-only holds (⌥-drag must not start a command).
 // Left/right/other mouse down. Not scrolling: trackpad momentum keeps scrolling after the fingers lift.
 const POINTER_EVENTS: [u32; 3] = [1, 3, 25];
+/// Left button: a click on the dictation bar's cancel "x" (see `State::click`).
+const LEFT_MOUSE_DOWN: u32 = 1;
+const LEFT_MOUSE_UP: u32 = 2;
 const TAP_DISABLED_BY_TIMEOUT: u32 = 0xFFFF_FFFE;
 const TAP_DISABLED_BY_USER_INPUT: u32 = 0xFFFF_FFFF;
 const FIELD_AUTOREPEAT: u32 = 8;
@@ -57,6 +60,7 @@ extern "C" {
     fn CGEventTapEnable(tap: Ref, enable: bool);
     fn CGEventGetIntegerValueField(event: Ref, field: u32) -> i64;
     fn CGEventGetFlags(event: Ref) -> u64;
+    fn CGEventGetLocation(event: Ref) -> CGPoint;
     fn CGEventSourceKeyState(state: i32, key: u16) -> bool;
 }
 
@@ -102,6 +106,13 @@ pub fn trusted(prompt: bool) -> bool {
     }
 }
 
+/// Global display coordinates in points, origin at the top left of the main display.
+#[repr(C)]
+struct CGPoint {
+    x: f64,
+    y: f64,
+}
+
 struct Ctx {
     state: Arc<Mutex<State>>,
     send: Box<dyn Fn(Output) + Send>,
@@ -124,7 +135,8 @@ pub fn spawn(
             }
         }
         let ctx = Box::into_raw(Box::new(Ctx { state, send: Box::new(send), tap: null_mut() }));
-        let mask = POINTER_EVENTS.iter().fold((1u64 << KEY_DOWN) | (1 << KEY_UP) | (1 << FLAGS_CHANGED), |m, t| m | (1 << t));
+        let keys = (1u64 << KEY_DOWN) | (1 << KEY_UP) | (1 << FLAGS_CHANGED) | (1 << LEFT_MOUSE_UP);
+        let mask = POINTER_EVENTS.iter().fold(keys, |m, t| m | (1 << t));
         unsafe {
             // Session tap, head insert, active (can swallow events).
             let tap = CGEventTapCreate(1, 0, 0, mask, callback, ctx.cast());
@@ -161,6 +173,19 @@ extern "C" fn callback(_proxy: Ref, ty: u32, event: Ref, ctx: *mut c_void) -> Re
             (ctx.send)(output);
         }
         return event;
+    }
+    if ty == LEFT_MOUSE_DOWN || ty == LEFT_MOUSE_UP {
+        let at = unsafe { CGEventGetLocation(event) };
+        let (cancel, swallow) = ctx.state.lock().unwrap_or_else(|e| e.into_inner()).click(ty == LEFT_MOUSE_DOWN, at.x, at.y);
+        if let Some(output) = cancel {
+            (ctx.send)(output);
+        }
+        if swallow {
+            return null_mut();
+        }
+        if ty == LEFT_MOUSE_UP {
+            return event;
+        }
     }
     if POINTER_EVENTS.contains(&ty) {
         let outputs = ctx.state.lock().unwrap_or_else(|e| e.into_inner()).handle(Input::Pointer).0;
