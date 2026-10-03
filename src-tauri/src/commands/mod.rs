@@ -10,7 +10,8 @@ use crate::audio::Recording;
 use crate::db::{HistoryEntry, Source};
 use crate::frontmost::AppContext;
 use crate::hotkeys::{HotkeyEngine, HotkeyEvent};
-use crate::transcribe::{transcribe_raw, TranscriptionConfig};
+use crate::processing::{Cancellation, Job, CANCELLED};
+use crate::transcribe::{transcribe_raw_cancellable, TranscriptionConfig};
 use crate::{history_updated, report_error, AppState, Session};
 use llm::Llm;
 use serde::Serialize;
@@ -80,7 +81,7 @@ pub struct Commands {
     generation: AtomicU64,
     /// Closing the window revokes private reads, even if it is reopened before they finish.
     private_epoch: AtomicU64,
-    approvals: Mutex<HashMap<String, oneshot::Sender<String>>>,
+    approvals: Mutex<HashMap<String, (u64, oneshot::Sender<String>)>>,
     pub mcp: mcp::Manager,
 }
 
@@ -173,7 +174,7 @@ fn update(app: &AppHandle, generation: u64, f: impl FnOnce(&mut Run)) {
     let c = commands(app);
     {
         let mut run = c.run.lock().unwrap();
-        if run.generation != generation {
+        if run.generation != generation || c.generation.load(Ordering::SeqCst) != generation {
             return;
         }
         f(&mut run);
@@ -206,12 +207,20 @@ fn position_window(app: &AppHandle, window: &tauri::WebviewWindow) {
     let _ = window.set_position(PhysicalPosition::new(x, y.max(area.position.y)));
 }
 
-fn show_window(app: &AppHandle) {
+fn show_window(app: &AppHandle, generation: u64, cancellation: &Cancellation) {
     let Some(window) = app.get_webview_window("command") else { return };
     position_window(app, &window);
+    let c = commands(app);
+    let mut open = c.open.lock().unwrap();
+    let run = c.run.lock().unwrap();
+    if cancellation.is_cancelled() || run.generation != generation || c.generation.load(Ordering::SeqCst) != generation {
+        return;
+    }
     let _ = window.set_ignore_cursor_events(false);
     let _ = crate::show_passive(&window);
-    *commands(app).open.lock().unwrap() = true;
+    *open = true;
+    drop(run);
+    drop(open);
     let _ = app.emit("command-window", json!({ "open": true }));
     arm_keys(app);
 }
@@ -229,9 +238,74 @@ fn hide_window(app: &AppHandle) {
 }
 
 fn deny_pending(app: &AppHandle) {
-    for (_, tx) in commands(app).approvals.lock().unwrap().drain() {
+    for (_, (_, tx)) in commands(app).approvals.lock().unwrap().drain() {
         let _ = tx.send("deny".into());
     }
+}
+
+fn deny_older_pending(app: &AppHandle, generation: u64) {
+    // Dropping the sender resolves its receiver as denied; keep newer cards untouched.
+    commands(app).approvals.lock().unwrap().retain(|_, (owner, _)| *owner >= generation);
+}
+
+fn deny_generation(approvals: &mut HashMap<String, (u64, oneshot::Sender<String>)>, generation: u64) {
+    approvals.retain(|_, (owner, _)| *owner != generation);
+}
+
+/// Called while holding the shown-run lock, before changing any visible state.
+fn reserve_generation(generation: &AtomicU64, expected: u64) -> Result<u64, String> {
+    generation.compare_exchange(expected, expected + 1, Ordering::SeqCst, Ordering::SeqCst)
+        .map(|_| expected + 1).map_err(|_| CANCELLED.into())
+}
+
+/// Cancellation of an old response must not close a newer command or decline its approval.
+fn clear_cancelled_run(run: &mut Run, generation: u64, current_generation: u64) -> bool {
+    if run.generation != generation || current_generation != generation {
+        return false;
+    }
+    *run = Run { generation: generation + 1, ..Default::default() };
+    true
+}
+
+fn save_run_history(app: &AppHandle, generation: u64, row: &HistoryEntry) {
+    let c = commands(app);
+    let run = c.run.lock().unwrap();
+    // Refine reuses the entry ID: an older result must never replace its newer turn.
+    if run.id == row.id && (run.generation != generation || c.generation.load(Ordering::SeqCst) != generation) {
+        return;
+    }
+    let _ = app.state::<AppState>().db.update_history(row);
+    drop(run);
+    history_updated(app);
+}
+
+fn cancel_run(app: &AppHandle, generation: u64, history_id: &str) {
+    if let Ok(mut row) = app.state::<AppState>().db.get_history_entry(history_id) {
+        row.status = "failed".into();
+        row.error = Some(CANCELLED.into());
+        save_run_history(app, generation, &row);
+    }
+    let c = commands(app);
+    let mut open = c.open.lock().unwrap();
+    let mut run = c.run.lock().unwrap();
+    let current = c.generation.load(Ordering::SeqCst);
+    // Reserve invalidation before touching the window; a concurrently admitted run wins.
+    if run.generation == generation && current == generation &&
+        c.generation.compare_exchange(generation, generation + 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() &&
+        clear_cancelled_run(&mut run, generation, current)
+    {
+        if let Some(window) = app.get_webview_window("command") { let _ = window.hide(); }
+        *open = false;
+        c.private_epoch.fetch_add(1, Ordering::SeqCst);
+        emit(app, &run);
+        let _ = app.emit("command-window", json!({ "open": false }));
+    }
+    let mut approvals = c.approvals.lock().unwrap();
+    deny_generation(&mut approvals, generation);
+    drop(approvals);
+    drop(run);
+    drop(open);
+    arm_keys(app);
 }
 
 fn is_open(app: &AppHandle) -> bool {
@@ -308,66 +382,111 @@ pub fn handle_hotkey(app: &AppHandle, event: HotkeyEvent) {
 // ---- flows ----
 
 /// A finished recording from the commands hotkey (lib.rs worker / async runtime).
-pub async fn run_recorded(app: AppHandle, recording: Recording, _duration_ms: i64, mut session: Session) {
-    session.resolve_context().await;
-    let c = commands(&app);
-    // Holding the hotkey again while an answer is shown refines it.
-    let open = is_open(&app);
-    let (refine, previous_id) = {
-        let run = c.run.lock().unwrap();
-        (open && run.answer_ready, run.id.clone())
-    };
+pub async fn run_recorded(app: AppHandle, recording: Recording, duration_ms: i64, mut session: Session) {
+    let job = session.processing.take().unwrap_or_else(|| crate::job_started(&app));
+    let cancellation = job.cancellation();
+    let expected_generation = commands(&app).generation.load(Ordering::SeqCst);
+    // Keep the audio preparation alive to preserve Retry even if the user cancels during it.
     let (wav, has_speech) = match crate::finish_recording(recording).await {
         Ok(done) => done,
-        Err(e) => return report_error(&app, e),
-    };
-    if !has_speech {
-        if open {
-            let generation = c.run.lock().unwrap().generation;
-            update(&app, generation, |r| r.error = Some("No speech detected".into()));
+        Err(e) => {
+            if !cancellation.is_cancelled() { report_error(&app, e); }
+            return;
         }
+    };
+    if !has_speech { return; }
+    let c = commands(&app);
+    let admission = cancellation.run_if_active(|| {
+        let open = c.open.lock().unwrap();
+        let mut run = c.run.lock().unwrap();
+        let generation = reserve_generation(&c.generation, expected_generation)?;
+        let refine = *open && run.answer_ready;
+        let history_id = if refine { run.id.clone() } else { uuid::Uuid::new_v4().to_string() };
+        let (messages, urls) = if refine { (std::mem::take(&mut run.messages), std::mem::take(&mut run.urls)) } else { Default::default() };
+        *run = Run { id: history_id.clone(), phase: "transcribing".into(), refine_keys: refine_keys(&app), messages, urls, generation, ..Default::default() };
+        emit(&app, &run);
+        Ok((generation, history_id, refine))
+    });
+    let (generation, history_id, refine) = match admission {
+        Ok(admitted) => admitted,
+        Err(_) => {
+            // Cancellation while preparing an older recording must not replace the current command.
+            let id = uuid::Uuid::new_v4().to_string();
+            let filename = format!("{id}.wav");
+            let state = app.state::<AppState>();
+            let saved = std::fs::write(state.db.app_dir.join("audio").join(&filename), &wav).is_ok();
+            let row = HistoryEntry {
+                kind: "command".into(), status: "failed".into(), error: Some(CANCELLED.into()),
+                duration_ms, created_at: session.recorded_at.clone(), audio_filename: saved.then_some(filename),
+                app_name: session.context.as_ref().map(|c| c.name.clone()),
+                app_bundle_id: session.context.as_ref().map(|c| c.bundle_id.clone()),
+                website: crate::history_website(session.context.as_ref()), ..HistoryEntry::new(id)
+            };
+            let _ = state.db.insert_history(&row);
+            history_updated(&app);
+            return;
+        }
+    };
+    deny_older_pending(&app, generation);
+    let state = app.state::<AppState>();
+    let mut row = {
+        let shown_run = c.run.lock().unwrap();
+        if shown_run.generation != generation || c.generation.load(Ordering::SeqCst) != generation { return; }
+        let existing = state.db.get_history_entry(&history_id).ok();
+        let mut row = existing.clone().unwrap_or_else(|| HistoryEntry {
+            kind: "command".into(), created_at: session.recorded_at.clone(), ..HistoryEntry::new(history_id.clone())
+        });
+        row.status = "running".into();
+        row.error = None;
+        row.duration_ms = duration_ms;
+        let audio_filename = format!("{history_id}.wav");
+        match std::fs::write(state.db.app_dir.join("audio").join(&audio_filename), &wav) {
+            Ok(()) => row.audio_filename = Some(audio_filename),
+            Err(e) if !cancellation.is_cancelled() => report_error(&app, format!("Couldn't save the recording: {e}")),
+            Err(_) => {}
+        }
+        if existing.is_some() { let _ = state.db.update_history(&row); }
+        else { let _ = state.db.insert_history(&row); }
+        row
+    };
+    history_updated(&app);
+    if cancellation.run(session.resolve_context()).await.is_err() {
+        cancel_run(&app, generation, &history_id);
         return;
     }
-    let generation = c.generation.fetch_add(1, Ordering::SeqCst) + 1;
-    deny_pending(&app);
-    {
-        let mut run = c.run.lock().unwrap();
-        let (messages, urls) = if refine { (std::mem::take(&mut run.messages), std::mem::take(&mut run.urls)) } else { Default::default() };
-        *run = Run { phase: "transcribing".into(), refine_keys: refine_keys(&app), messages, urls, generation, ..Default::default() };
-        emit(&app, &run);
-    }
-    show_window(&app);
-
+    row.app_name = session.context.as_ref().map(|c| c.name.clone());
+    row.app_bundle_id = session.context.as_ref().map(|c| c.bundle_id.clone());
+    row.website = crate::history_website(session.context.as_ref());
+    save_run_history(&app, generation, &row);
+    show_window(&app, generation, &cancellation);
     let config = session.config.clone();
     let transcription = match session.live.take() {
-        Some(live) => live.finish().await,
-        None => transcribe_raw(&app, wav, &config, Vec::new()).await,
+        Some(live) => cancellation.run(live.finish()).await.and_then(|result| result),
+        None => transcribe_raw_cancellable(&app, wav, &config, Vec::new(), cancellation.clone()).await,
     };
+    if cancellation.is_cancelled() {
+        cancel_run(&app, generation, &history_id);
+        return;
+    }
     let instruction = match transcription {
         Ok(t) if t.chars().any(char::is_alphanumeric) => t,
-        Ok(_) => return update(&app, generation, |r| fail(r, "No speech detected")),
-        Err(e) => return update(&app, generation, |r| fail(r, &e)),
+        Ok(_) => {
+            row.status = "failed".into(); row.error = Some("No speech detected".into());
+            save_run_history(&app, generation, &row);
+            return update(&app, generation, |r| fail(r, "No speech detected"));
+        }
+        Err(e) => {
+            row.status = "failed".into(); row.error = Some(e.clone());
+            save_run_history(&app, generation, &row);
+            return update(&app, generation, |r| fail(r, &e));
+        }
     };
-    // Accessibility only: a synthetic ⌘C would clobber non-text clipboards and, on Windows,
-    // interrupt terminals (Ctrl+C). ponytail: apps without AX selection get no context.
+    row.text = instruction.clone();
+    row.raw_text = instruction.clone();
+    save_run_history(&app, generation, &row);
+    // Accessibility only: a synthetic copy would clobber non-text clipboards or interrupt terminals.
     let selection = if refine { None } else { session.selection.clone() };
-    let history_id = if refine {
-        previous_id
-    } else {
-        let row = HistoryEntry {
-            kind: "command".into(),
-            status: "running".into(),
-            text: instruction.clone(),
-            raw_text: instruction.clone(),
-            app_name: session.context.as_ref().map(|c| c.name.clone()),
-            app_bundle_id: session.context.as_ref().map(|c| c.bundle_id.clone()),
-            ..HistoryEntry::new(uuid::Uuid::new_v4().to_string())
-        };
-        let _ = app.state::<AppState>().db.insert_history(&row);
-        history_updated(&app);
-        row.id
-    };
-    run_command(&app, generation, instruction, selection, session.context, history_id).await;
+    run_command(&app, generation, instruction, selection, session.context, history_id, &cancellation).await;
 }
 
 fn fail(run: &mut Run, error: &str) {
@@ -383,20 +502,23 @@ pub fn start_from_dictation(
     selection: Option<String>,
     context: Option<AppContext>,
     history_id: String,
+    job: Job,
 ) {
     let activity = match app.state::<crate::updater::UpdateState>().activity() {
         Ok(activity) => activity,
         Err(error) => return report_error(app, error),
     };
+    let expected_generation = commands(app).generation.load(Ordering::SeqCst);
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
         let _activity = activity;
+        let _job = job;
+        let cancellation = _job.cancellation();
         let c = commands(&app);
-        let generation = c.generation.fetch_add(1, Ordering::SeqCst) + 1;
-        deny_pending(&app);
         let waiting = instruction.trim().is_empty();
-        {
+        let admission = cancellation.run_if_active(|| {
             let mut run = c.run.lock().unwrap();
+            let generation = reserve_generation(&c.generation, expected_generation)?;
             *run = Run {
                 id: history_id.clone(),
                 phase: if waiting { "done" } else { "thinking" }.into(),
@@ -406,20 +528,34 @@ pub fn start_from_dictation(
                 ..Default::default()
             };
             emit(&app, &run);
-        }
-        show_window(&app);
+            Ok(generation)
+        });
+        let generation = match admission {
+            Ok(generation) => generation,
+            Err(_) => {
+                // Nothing was admitted, so update only the originating History entry.
+                if let Ok(mut row) = app.state::<AppState>().db.get_history_entry(&history_id) {
+                    row.status = "failed".into(); row.error = Some(CANCELLED.into());
+                    let _ = app.state::<AppState>().db.update_history(&row);
+                    history_updated(&app);
+                }
+                return;
+            }
+        };
+        deny_older_pending(&app, generation);
+        show_window(&app, generation, &cancellation);
+        if cancellation.is_cancelled() { cancel_run(&app, generation, &history_id); return; }
         if waiting {
             // Nothing to do yet: the next commands-hotkey recording starts a fresh command.
             let state = app.state::<AppState>();
             if let Ok(mut row) = state.db.get_history_entry(&history_id) {
                 row.status = "ok".into();
                 row.answer = Some("What can I help you with?".into());
-                let _ = state.db.update_history(&row);
-                history_updated(&app);
+                save_run_history(&app, generation, &row);
             }
             return;
         }
-        run_command(&app, generation, instruction, selection, context, history_id).await;
+        run_command(&app, generation, instruction, selection, context, history_id, &cancellation).await;
     });
 }
 
@@ -430,7 +566,9 @@ async fn run_command(
     selection: Option<String>,
     context: Option<AppContext>,
     history_id: String,
+    cancellation: &Cancellation,
 ) {
+    if cancellation.is_cancelled() { cancel_run(app, generation, &history_id); return; }
     let config = app.state::<AppState>().config.lock().unwrap().clone();
     let (mut messages, urls) = {
         let c = commands(app);
@@ -457,42 +595,48 @@ async fn run_command(
 
     let mut tool_ctx = tools::ToolContext::new(app.clone(), config.clone(), context.as_ref().and_then(|c| c.url.clone()), selection, &instruction);
     tool_ctx.inherit_urls(urls);
-    let result = agent_loop(app, generation, &config, &tool_ctx, &mut messages).await;
+    let result = cancellation.run(agent_loop(app, generation, &config, &tool_ctx, &mut messages, cancellation)).await.and_then(|result| result);
+    if cancellation.is_cancelled() { cancel_run(app, generation, &history_id); return; }
 
-    let state = app.state::<AppState>();
-    let mut row = state.db.get_history_entry(&history_id).unwrap_or_else(|_| HistoryEntry {
-        kind: "command".into(),
-        text: instruction.clone(),
-        raw_text: instruction.clone(),
-        ..HistoryEntry::new(history_id.clone())
+    // Delivering a late answer/error or notification must be atomic with the user's cancellation.
+    let delivered = cancellation.run_if_active(|| {
+        let state = app.state::<AppState>();
+        let mut row = state.db.get_history_entry(&history_id).unwrap_or_else(|_| HistoryEntry {
+            kind: "command".into(),
+            text: instruction.clone(),
+            raw_text: instruction.clone(),
+            ..HistoryEntry::new(history_id.clone())
+        });
+        let still_shown = is_open(app) && commands(app).run.lock().unwrap().generation == generation;
+        match result {
+            Ok((answer, sources)) => {
+                messages.push(json!({"role":"assistant","content": answer}));
+                row.status = "ok".into();
+                row.answer = Some(answer.clone());
+                row.error = None;
+                row.sources = sources;
+                update(app, generation, |r| {
+                    r.phase = "done".into();
+                    r.text = answer;
+                    r.messages = messages;
+                    r.urls = tool_ctx.urls();
+                });
+            }
+            Err(e) => {
+                row.status = "failed".into();
+                row.error = Some(e.clone());
+                update(app, generation, |r| fail(r, &e));
+            }
+        }
+        save_run_history(app, generation, &row);
+        if !still_shown && commands(app).generation.load(Ordering::SeqCst) == generation {
+            let title = if row.status == "ok" { "Command finished" } else { "Command failed" };
+            notify(app, title, &instruction);
+        }
+        Ok(())
     });
-    let still_shown = is_open(app) && commands(app).run.lock().unwrap().generation == generation;
-    match result {
-        Ok((answer, sources)) => {
-            messages.push(json!({"role":"assistant","content": answer}));
-            row.status = "ok".into();
-            row.answer = Some(answer.clone());
-            row.error = None;
-            row.sources = sources;
-            update(app, generation, |r| {
-                r.phase = "done".into();
-                r.text = answer;
-                r.messages = messages;
-                r.urls = tool_ctx.urls();
-            });
-        }
-        Err(e) => {
-            row.status = "failed".into();
-            row.error = Some(e.clone());
-            update(app, generation, |r| fail(r, &e));
-        }
-    }
-    let _ = state.db.update_history(&row);
-    history_updated(app);
-    if !still_shown {
-        let title = if row.status == "ok" { "Command finished" } else { "Command failed" };
-        notify(app, title, &instruction);
-    }
+    if delivered.is_err() { cancel_run(app, generation, &history_id); }
+
 }
 
 /// Streams completions, running tool calls between them, until the model answers.
@@ -502,6 +646,7 @@ async fn agent_loop(
     config: &TranscriptionConfig,
     ctx: &tools::ToolContext,
     messages: &mut Vec<Value>,
+    cancellation: &Cancellation,
 ) -> Result<(String, Vec<Source>), String> {
     let llm = llm_from(app, config)?;
     let mcp = &commands(app).mcp;
@@ -515,6 +660,7 @@ async fn agent_loop(
     let mut last_emit = Instant::now();
     let mut private_epoch = None;
     for step in 0..MAX_STEPS {
+        cancellation.check()?;
         check_run_access(app, generation, private_epoch)?;
         // The last step gets no tools, so the model has to answer.
         let offered: &[Value] = if step + 1 == MAX_STEPS { &[] } else { &schemas };
@@ -523,7 +669,7 @@ async fn agent_loop(
             .stream(messages, offered, |delta| {
                 let c = commands(app);
                 let mut run = c.run.lock().unwrap();
-                if run.generation != generation {
+                if cancellation.is_cancelled() || run.generation != generation || c.generation.load(Ordering::SeqCst) != generation {
                     return;
                 }
                 run.phase = "streaming".into();
@@ -534,6 +680,7 @@ async fn agent_loop(
                 }
             })
             .await?;
+        cancellation.check()?;
         check_run_access(app, generation, private_epoch)?;
         if completion.tool_calls.is_empty() {
             return Ok((completion.text.trim().to_string(), sources));
@@ -544,8 +691,9 @@ async fn agent_loop(
             if tools::requires_approval(&call.name, &args) {
                 private_epoch.get_or_insert_with(|| commands(app).private_epoch.load(Ordering::SeqCst));
             }
-            let output = run_tool(app, generation, config, ctx, &call.name, &args, &mut sources).await;
+            let output = run_tool(app, generation, ctx, &call.name, &args, &mut sources, cancellation).await;
             // Never pass a private result to the next model request after close/supersession.
+            cancellation.check()?;
             check_run_access(app, generation, private_epoch)?;
             messages.push(json!({"role":"tool","tool_call_id": call.id, "content": output}));
         }
@@ -556,12 +704,14 @@ async fn agent_loop(
 async fn run_tool(
     app: &AppHandle,
     generation: u64,
-    config: &TranscriptionConfig,
     ctx: &tools::ToolContext,
     name: &str,
     args: &Value,
     sources: &mut Vec<Source>,
+    cancellation: &Cancellation,
 ) -> String {
+    let config = &ctx.config;
+    if cancellation.is_cancelled() { return CANCELLED.into(); }
     if let Err(e) = check_run_access(app, generation, None) {
         return format!("Error: {e}");
     }
@@ -580,11 +730,11 @@ async fn run_tool(
     let result: Result<String, String> = if tools::is_builtin(name) {
         let private_epoch = tools::requires_approval(name, args).then(|| commands(app).private_epoch.load(Ordering::SeqCst));
         let approved = if private_epoch.is_some() {
-            ask_approval(app, generation, "OpenGlaido · this call only", name, args, false).await == "once"
+            ask_approval(app, generation, "OpenGlaido · this call only", name, args, false, cancellation).await == "once"
         } else {
             false
         };
-        match check_run_access(app, generation, private_epoch) {
+        match cancellation.check().and_then(|()| check_run_access(app, generation, private_epoch)) {
             Err(e) => Err(e),
             Ok(()) => match tools::run(ctx, name, args, approved).await {
                 Err(e) => Err(e),
@@ -595,9 +745,9 @@ async fn run_tool(
             },
         }
     } else if let Some((server, tool, policy)) = resolved {
-        let decision = if policy == "ask" { ask_approval(app, generation, &server, &tool, args, true).await } else { policy.clone() };
+        let decision = if policy == "ask" { ask_approval(app, generation, &server, &tool, args, true, cancellation).await } else { policy.clone() };
         match decision.as_str() {
-            "once" | "auto" if check_run_access(app, generation, None).is_ok() => mcp.call(&server, &tool, args.clone()).await,
+            "once" | "auto" if !cancellation.is_cancelled() && check_run_access(app, generation, None).is_ok() => mcp.call(&server, &tool, args.clone()).await,
             _ => Ok("The user declined this tool call.".into()),
         }
     } else {
@@ -621,7 +771,7 @@ fn approval_decision(decision: &str, persistent: bool, valid: bool) -> &'static 
 }
 
 /// Enter = once; Esc/close/60 s = deny. Only MCP can persist "always" decisions.
-async fn ask_approval(app: &AppHandle, generation: u64, server: &str, tool: &str, args: &Value, persistent: bool) -> String {
+async fn ask_approval(app: &AppHandle, generation: u64, server: &str, tool: &str, args: &Value, persistent: bool, cancellation: &Cancellation) -> String {
     let c = commands(app);
     let private_epoch = c.private_epoch.load(Ordering::SeqCst);
     let request_id = uuid::Uuid::new_v4().to_string();
@@ -632,10 +782,10 @@ async fn ask_approval(app: &AppHandle, generation: u64, server: &str, tool: &str
         // Register atomically with close/new-run cancellation: a hidden card must never wait.
         let open = c.open.lock().unwrap();
         let mut run = c.run.lock().unwrap();
-        if !*open || run.generation != generation || c.generation.load(Ordering::SeqCst) != generation {
+        if cancellation.is_cancelled() || !*open || run.generation != generation || c.generation.load(Ordering::SeqCst) != generation {
             return "deny".into();
         }
-        c.approvals.lock().unwrap().insert(request_id.clone(), tx);
+        c.approvals.lock().unwrap().insert(request_id.clone(), (generation, tx));
         run.phase = "approval".into();
         run.approval = Some(Approval {
             request_id: request_id.clone(),
@@ -648,8 +798,8 @@ async fn ask_approval(app: &AppHandle, generation: u64, server: &str, tool: &str
         emit(app, &run);
     }
     arm_keys(app);
-    let decision = match tokio::time::timeout(APPROVAL_TIMEOUT, rx).await {
-        Ok(Ok(d)) => d,
+    let decision = match cancellation.run(tokio::time::timeout(APPROVAL_TIMEOUT, rx)).await {
+        Ok(Ok(Ok(d))) => d,
         _ => "deny".into(),
     };
     c.approvals.lock().unwrap().remove(&request_id);
@@ -657,7 +807,7 @@ async fn ask_approval(app: &AppHandle, generation: u64, server: &str, tool: &str
         r.approval = None;
         r.phase = "tool".into();
     });
-    let decision = approval_decision(&decision, persistent, check_run_access(app, generation, Some(private_epoch)).is_ok());
+    let decision = approval_decision(&decision, persistent, !cancellation.is_cancelled() && check_run_access(app, generation, Some(private_epoch)).is_ok());
     if decision == "auto" {
         let (server, tool) = (server.to_string(), tool.to_string());
         if let Err(e) = crate::update_config(app, |c| {
@@ -676,7 +826,7 @@ fn decide(app: &AppHandle, request_id: &str, decision: &str) {
     if !*open || run.generation != c.generation.load(Ordering::SeqCst) || run.approval.as_ref().is_none_or(|a| a.request_id != request_id) {
         return;
     }
-    if let Some(tx) = c.approvals.lock().unwrap().remove(request_id) {
+    if let Some((_, tx)) = c.approvals.lock().unwrap().remove(request_id) {
         let _ = tx.send(decision.into());
     };
 }
@@ -900,6 +1050,58 @@ mod tests {
         // Background safe tools keep running; superseded runs do not.
         assert!(access_valid(false, 4, 4, None, 9));
         assert!(!access_valid(true, 4, 5, None, 9));
+    }
+
+    #[test]
+    fn admission_serializes_with_cancellation_and_rejects_out_of_order_preparation() {
+        use std::sync::{Arc, Barrier};
+        let cancellation = Cancellation::default();
+        let generation = Arc::new(AtomicU64::new(4));
+        let barrier = Arc::new(Barrier::new(2));
+        let preparation = std::thread::spawn({
+            let cancellation = cancellation.clone();
+            let generation = generation.clone();
+            let barrier = barrier.clone();
+            move || {
+                let expected = generation.load(Ordering::SeqCst);
+                barrier.wait(); // The old recording is still preparing.
+                barrier.wait(); // Cancellation and a newer admission have won.
+                cancellation.run_if_active(|| reserve_generation(&generation, expected))
+            }
+        });
+        barrier.wait();
+        cancellation.cancel();
+        assert_eq!(reserve_generation(&generation, 4).unwrap(), 5);
+        barrier.wait();
+        assert_eq!(preparation.join().unwrap().unwrap_err(), CANCELLED);
+        assert_eq!(generation.load(Ordering::SeqCst), 5);
+        // Out-of-order preparation is refused even if its token was never canceled.
+        let still_active = Cancellation::default();
+        assert_eq!(still_active.run_if_active(|| reserve_generation(&generation, 4)).unwrap_err(), CANCELLED);
+        assert_eq!(generation.load(Ordering::SeqCst), 5);
+        assert_eq!(still_active.run_if_active(|| reserve_generation(&generation, 5)).unwrap(), 6);
+    }
+
+    #[tokio::test]
+    async fn cancelled_command_cannot_clear_a_newer_turn_or_decline_its_approval() {
+        let mut run = Run {
+            id: "new-command".into(), generation: 5, phase: "streaming".into(), text: "New answer".into(),
+            ..Default::default()
+        };
+        assert!(!clear_cancelled_run(&mut run, 4, 5));
+        assert_eq!(run.id, "new-command");
+        assert_eq!(run.text, "New answer");
+        assert!(!clear_cancelled_run(&mut run, 5, 6));
+        let (old_tx, old_rx) = oneshot::channel();
+        let (new_tx, new_rx) = oneshot::channel();
+        let mut approvals = HashMap::from([("old".into(), (4, old_tx)), ("new".into(), (5, new_tx))]);
+        deny_generation(&mut approvals, 4);
+        assert!(old_rx.await.is_err());
+        approvals.remove("new").unwrap().1.send("once".into()).unwrap();
+        assert_eq!(new_rx.await.unwrap(), "once");
+        assert!(clear_cancelled_run(&mut run, 5, 5));
+        assert_eq!(run.generation, 6);
+        assert!(run.text.is_empty() && !run.answer_ready && run.approval.is_none());
     }
 
     #[test]

@@ -466,5 +466,6 @@
  "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "このモデルは、設定された音声入力の言語の一部に対応していません。別のモデルを選ぶか、音声入力の言語を変更してください。",
  "This model needs one spoken language.": "このモデルでは、話す言語を1つ指定する必要があります。",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribeでは言語を1つ指定する必要があります。「設定」›「モデル」で選択してください。",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "このモデルは選択された音声入力の言語に対応していません。別のモデルを選ぶか、「設定」で言語を変更してください。"
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "このモデルは選択された音声入力の言語に対応していません。別のモデルを選ぶか、「設定」で言語を変更してください。",
+ "Cancelled": "キャンセル済み"
 }

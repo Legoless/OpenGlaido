@@ -466,5 +466,6 @@
  "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Ce modèle ne prend pas en charge toutes vos langues de dictée. Choisissez un autre modèle ou modifiez vos langues de dictée.",
  "This model needs one spoken language.": "Ce modèle nécessite une seule langue parlée.",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe nécessite une seule langue. Choisissez-la dans Réglages › Modèle.",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Ce modèle ne prend pas en charge les langues de dictée sélectionnées. Choisissez un autre modèle ou modifiez les langues dans les réglages."
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Ce modèle ne prend pas en charge les langues de dictée sélectionnées. Choisissez un autre modèle ou modifiez les langues dans les réglages.",
+ "Cancelled": "Annulé"
 }

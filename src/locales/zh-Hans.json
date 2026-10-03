@@ -466,5 +466,6 @@
  "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "此模型不支持你设置的所有听写语言。请选择其他模型或更改听写语言。",
  "This model needs one spoken language.": "此模型需要指定一种所说的语言。",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe需要指定一种语言。请在“设置”›“模型”中选择。",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "此模型不支持所选的听写语言。请选择其他模型或在“设置”中更改语言。"
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "此模型不支持所选的听写语言。请选择其他模型或在“设置”中更改语言。",
+ "Cancelled": "已取消"
 }

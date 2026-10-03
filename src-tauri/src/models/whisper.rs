@@ -2,7 +2,8 @@
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tauri::AppHandle;
+use crate::processing::Cancellation;
+use tauri::{AppHandle, Manager};
 
 pub use imp::transcribe_file;
 
@@ -18,12 +19,28 @@ pub async fn transcribe(
     languages: &[String],
     prompt: Option<String>,
 ) -> Result<String, String> {
+    transcribe_cancellable(app, model_id, wav, languages, prompt, Cancellation::default()).await
+}
+
+pub async fn transcribe_cancellable(
+    app: &AppHandle,
+    model_id: &str,
+    wav: Vec<u8>,
+    languages: &[String],
+    prompt: Option<String>,
+    cancellation: Cancellation,
+) -> Result<String, String> {
+    cancellation.check()?;
     if !super::supported() {
         return Err(super::UNSUPPORTED.into());
     }
     let path = super::path_if_downloaded(app, model_id).ok_or("Download the transcription model in Settings › Model")?;
     let languages = languages.to_vec();
-    tokio::task::spawn_blocking(move || transcribe_file(&path, &wav, &languages, prompt.as_deref()))
+    let activity = app.state::<crate::updater::UpdateState>().activity()?;
+    tokio::task::spawn_blocking(move || {
+        let _activity = activity;
+        imp::transcribe_file_cancellable(&path, &wav, &languages, prompt.as_deref(), &cancellation)
+    })
         .await
         .map_err(|e| format!("Transcription failed: {e}"))?
 }
@@ -64,6 +81,11 @@ mod imp {
         Err(super::super::UNSUPPORTED.into())
     }
 
+    pub fn transcribe_file_cancellable(_: &Path, _: &[u8], _: &[String], _: Option<&str>, cancellation: &super::Cancellation) -> Result<String, String> {
+        cancellation.check()?;
+        Err(super::super::UNSUPPORTED.into())
+    }
+
     pub fn load(_: &Path, _: impl FnOnce() -> bool) -> Result<(), String> {
         Err(super::super::UNSUPPORTED.into())
     }
@@ -75,6 +97,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use crate::processing::{Cancellation, CANCELLED};
     #[cfg(test)]
     use std::io::Cursor;
     use std::path::{Path, PathBuf};
@@ -132,6 +155,17 @@ mod imp {
         languages: &[String],
         prompt: Option<&str>,
     ) -> Result<String, String> {
+        transcribe_file_cancellable(model_path, wav, languages, prompt, &Cancellation::default())
+    }
+
+    pub fn transcribe_file_cancellable(
+        model_path: &Path,
+        wav: &[u8],
+        languages: &[String],
+        prompt: Option<&str>,
+        cancellation: &Cancellation,
+    ) -> Result<String, String> {
+        cancellation.check()?;
         let fail = |e: whisper_rs::WhisperError| {
             eprintln!("Whisper failed: {e}");
             "Transcription failed: the local model couldn't process the audio".to_string()
@@ -141,10 +175,12 @@ mod imp {
             return Ok(String::new());
         }
         let mut cached = lock();
+        cancellation.check()?;
         if super::QUITTING.load(Ordering::Relaxed) {
-            return Err("Cancelled".into());
+            return Err(CANCELLED.into());
         }
         let ctx = loaded(&mut cached, model_path)?;
+        cancellation.check()?;
         let mut state = ctx.create_state().map_err(fail)?;
         let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
 
@@ -162,6 +198,7 @@ mod imp {
         } else if allowed.len() > 1 {
             // No allow-list in whisper.cpp: detect once and take the most likely allowed language.
             state.pcm_to_mel(&pcm, threads).map_err(fail)?;
+            cancellation.check()?;
             let (_, probs) = state.lang_detect(0, threads).map_err(fail)?;
             most_likely(&allowed, &probs)
         } else {
@@ -169,6 +206,12 @@ mod imp {
         };
 
         let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+        // whisper-rs 0.16's capturing "safe" wrapper erases the closure before casting it back.
+        // This borrowed token stays alive throughout full(), and the callback only reads it.
+        unsafe {
+            params.set_abort_callback(Some(abort_transcription));
+            params.set_abort_callback_user_data(std::ptr::from_ref(cancellation).cast_mut().cast());
+        }
         params.set_n_threads(threads as i32);
         params.set_language(Some(language));
         params.set_suppress_nst(true);
@@ -180,9 +223,18 @@ mod imp {
         if !prompt.trim().is_empty() {
             params.set_initial_prompt(&prompt);
         }
-        state.full(params, &pcm).map_err(fail)?;
+        cancellation.check()?;
+        let result = state.full(params, &pcm);
+        cancellation.check()?;
+        result.map_err(fail)?;
         let text: String = state.as_iter().map(|s| strip_markers(&s.to_str_lossy().unwrap_or_default())).collect();
         Ok(text.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    unsafe extern "C" fn abort_transcription(data: *mut std::ffi::c_void) -> bool {
+        // SAFETY: transcribe_file_cancellable holds the borrowed token until full() returns.
+        let cancellation = unsafe { &*data.cast::<Cancellation>() };
+        cancellation.is_cancelled() || super::QUITTING.load(Ordering::Relaxed)
     }
 
     /// The allowed language with the highest detection probability (`probs` is indexed by whisper language id).
@@ -216,6 +268,17 @@ mod imp {
     #[cfg(test)]
     mod tests {
         use super::*;
+
+        #[test]
+        fn cancelled_requests_stop_before_decoding_or_loading_and_signal_whisper() {
+            let cancellation = Cancellation::default();
+            let data = std::ptr::from_ref(&cancellation).cast_mut().cast();
+            assert!(!unsafe { abort_transcription(data) });
+            cancellation.cancel();
+            assert!(unsafe { abort_transcription(data) });
+            assert_eq!(transcribe_file_cancellable(Path::new("missing"), b"not a wav", &[], None, &cancellation).unwrap_err(), CANCELLED);
+            assert!(!super::super::QUITTING.load(Ordering::Relaxed));
+        }
 
         #[test]
         fn strips_non_speech_markers() {

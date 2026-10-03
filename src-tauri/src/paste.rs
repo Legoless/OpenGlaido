@@ -1,5 +1,6 @@
 use arboard::Clipboard;
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
+use crate::processing::{Cancellation, CANCELLED};
 use std::collections::BTreeSet;
 use std::sync::{Arc, LazyLock, Mutex};
 use std::thread::sleep;
@@ -85,7 +86,7 @@ impl Drop for DeliveryTicket {
 
 /// Explicit command paste into the focused app.
 pub fn paste_text(app: &AppHandle, text: &str, keep_in_clipboard: bool) -> Result<(), String> {
-    paste(app, text, keep_in_clipboard, None)
+    paste(app, text, keep_in_clipboard, None, Cancellation::default())
 }
 
 /// Automatic dictation delivery requires the app captured at recording start to still be focused.
@@ -96,11 +97,22 @@ pub fn paste_text_to(
     keep_in_clipboard: bool,
     target_app_id: Option<&str>,
 ) -> Result<(), String> {
+    paste_text_to_cancellable(app, text, keep_in_clipboard, target_app_id, Cancellation::default())
+}
+
+pub fn paste_text_to_cancellable(
+    app: &AppHandle,
+    text: &str,
+    keep_in_clipboard: bool,
+    target_app_id: Option<&str>,
+    cancellation: Cancellation,
+) -> Result<(), String> {
     paste(
         app,
         text,
         keep_in_clipboard,
         Some(target_app_id.unwrap_or_default().to_owned()),
+        cancellation,
     )
 }
 
@@ -110,16 +122,16 @@ fn paste(
     text: &str,
     keep_in_clipboard: bool,
     target_app_id: Option<String>,
+    cancellation: Cancellation,
 ) -> Result<(), String> {
     // Serialize the entire clipboard transaction, including the target app's time to read it.
     static TRANSACTION: Mutex<()> = Mutex::new(());
     let _transaction = TRANSACTION.lock().unwrap_or_else(|e| e.into_inner());
+    cancellation.check()?;
     let mut clipboard = Clipboard::new().map_err(|e| format!("Clipboard error: {}", e))?;
-    let previous = if keep_in_clipboard {
-        None
-    } else {
-        clipboard.get_text().ok()
-    };
+    // Even "keep on clipboard" restores previous text when cancellation wins before insertion.
+    let previous = clipboard.get_text().ok();
+    cancellation.check()?;
     clipboard
         .set_text(text)
         .map_err(|e| format!("Failed to set clipboard text: {}", e))?;
@@ -130,10 +142,22 @@ fn paste(
     // Destination and ownership are checked on the same thread immediately before posting Cmd+V.
     // On failure, do not restore: preserve any newer clipboard content. A focus-only
     // failure leaves the transcript available for manual paste.
-    send_paste_shortcut(app, target_app_id, owned_version, text.to_owned())?;
+    let result = send_paste_shortcut(app, target_app_id, owned_version, text.to_owned(), cancellation.clone());
+    if result.is_err() && cancellation.is_cancelled() {
+        restore_previous(&mut clipboard, previous, text, owned_version);
+        return Err(CANCELLED.into());
+    }
+    result?;
 
     // ponytail: fixed 1 s for the target to read; slow remote desktops may need longer.
     sleep(Duration::from_millis(1000));
+    if !keep_in_clipboard {
+        restore_previous(&mut clipboard, previous, text, owned_version);
+    }
+    Ok(())
+}
+
+fn restore_previous(clipboard: &mut Clipboard, previous: Option<String>, text: &str, owned_version: u64) {
     if let Some(previous) = previous {
         // Also read back the text: a write between set_text and the initial version sample
         // must not let us adopt another app's clipboard content.
@@ -143,7 +167,6 @@ fn paste(
             }
         }
     }
-    Ok(())
 }
 
 const CLIPBOARD_CHANGED: &str = "The clipboard changed before pasting; the transcript was not pasted";
@@ -183,7 +206,8 @@ fn clipboard_version() -> Option<u64> {
     }
 }
 
-fn checked_paste(target_app_id: Option<&str>, owned_version: u64, text: &str) -> Result<(), String> {
+fn checked_paste(target_app_id: Option<&str>, owned_version: u64, text: &str, cancellation: &Cancellation) -> Result<(), String> {
+    cancellation.check()?;
     let current = verified_clipboard_version(text, clipboard_version, || Clipboard::new().ok()?.get_text().ok());
     if current != Some(owned_version) {
         return Err(CLIPBOARD_CHANGED.into());
@@ -193,7 +217,9 @@ fn checked_paste(target_app_id: Option<&str>, owned_version: u64, text: &str) ->
             "The focused app changed; the text is on the clipboard".into(),
         );
     }
-    press_paste()
+    // Cancellation and the actual keyboard injection share one admission boundary. A cancel
+    // that wins cannot leave a queued main-thread closure posting Cmd+V later.
+    cancellation.run_if_active(press_paste)
 }
 
 /// ⌘V / Ctrl+V. On macOS enigo resolves "v" through the keyboard layout (Text Input Sources),
@@ -203,6 +229,7 @@ fn send_paste_shortcut(
     target_app_id: Option<String>,
     owned_version: u64,
     text: String,
+    cancellation: Cancellation,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -215,7 +242,7 @@ fn send_paste_shortcut(
         let queued = phase.clone();
         app.run_on_main_thread(move || {
             if queued.compare_exchange(0, 1, SeqCst, SeqCst).is_ok() {
-                let _ = tx.send(checked_paste(target_app_id.as_deref(), owned_version, &text));
+                let _ = tx.send(checked_paste(target_app_id.as_deref(), owned_version, &text, &cancellation));
             }
         })
         .map_err(|e| format!("Couldn't paste: {e}"))?;
@@ -231,7 +258,7 @@ fn send_paste_shortcut(
     #[cfg(not(target_os = "macos"))]
     {
         let _ = app;
-        checked_paste(target_app_id.as_deref(), owned_version, &text)
+        checked_paste(target_app_id.as_deref(), owned_version, &text, &cancellation)
     }
 }
 
@@ -259,6 +286,13 @@ fn press_paste() -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cancelled_paste_stops_before_any_clipboard_or_keyboard_access() {
+        let cancellation = Cancellation::default();
+        cancellation.cancel();
+        assert_eq!(checked_paste(None, 0, "must not be pasted", &cancellation).unwrap_err(), CANCELLED);
+    }
 
     #[tokio::test]
     async fn delivery_is_ordered_and_cancelled_slots_never_block_later_jobs() {

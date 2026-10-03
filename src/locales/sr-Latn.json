@@ -466,5 +466,6 @@
  "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Ovaj model ne podržava sve vaše jezike diktiranja. Izaberite drugi model ili promenite jezike diktiranja.",
  "This model needs one spoken language.": "Ovaj model zahteva jedan govorni jezik.",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe zahteva jedan jezik. Izaberite ga u Podešavanja › Model.",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Ovaj model ne podržava izabrane jezike diktiranja. Izaberite drugi model ili promenite jezike u Podešavanjima."
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Ovaj model ne podržava izabrane jezike diktiranja. Izaberite drugi model ili promenite jezike u Podešavanjima.",
+ "Cancelled": "Otkazano"
 }

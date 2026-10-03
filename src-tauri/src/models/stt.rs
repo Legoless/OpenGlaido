@@ -1,6 +1,7 @@
 //! Dispatch local speech models without loading another ggml runtime into the app process.
 
 use std::path::Path;
+use crate::processing::Cancellation;
 use tauri::AppHandle;
 
 /// Shared PCM conversion for local engines. Native helper input is bounded before allocating it;
@@ -34,10 +35,22 @@ pub async fn transcribe(
     languages: &[String],
     prompt: Option<String>,
 ) -> Result<String, String> {
+    transcribe_cancellable(app, id, wav, languages, prompt, Cancellation::default()).await
+}
+
+pub async fn transcribe_cancellable(
+    app: &AppHandle,
+    id: &str,
+    wav: Vec<u8>,
+    languages: &[String],
+    prompt: Option<String>,
+    cancellation: Cancellation,
+) -> Result<String, String> {
+    cancellation.check()?;
     let model = super::find(id).filter(|m| m.kind == "stt").ok_or("Unknown transcription model")?;
     match model.backend {
-        "whisper" => super::whisper::transcribe(app, id, wav, languages, prompt).await,
-        "native" => super::native::transcribe(app, id, wav, languages).await,
+        "whisper" => super::whisper::transcribe_cancellable(app, id, wav, languages, prompt, cancellation).await,
+        "native" => super::native::transcribe_cancellable(app, id, wav, languages, cancellation).await,
         _ => Err("Unsupported transcription engine".into()),
     }
 }

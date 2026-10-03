@@ -466,5 +466,6 @@
  "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Acest model nu acceptă toate limbile tale de dictare. Alege alt model sau modifică limbile de dictare.",
  "This model needs one spoken language.": "Acest model necesită o singură limbă vorbită.",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe necesită o singură limbă. Alege-o în Setări › Model.",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Acest model nu acceptă limbile de dictare selectate. Alege alt model sau modifică limbile în Setări."
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Acest model nu acceptă limbile de dictare selectate. Alege alt model sau modifică limbile în Setări.",
+ "Cancelled": "Anulat"
 }

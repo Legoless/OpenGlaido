@@ -200,8 +200,10 @@ impl HotkeyEngine {
 
     /// Screen rect (points) of the dictation bar's cancel "x", or None while it isn't shown.
     /// macOS only: the tap turns a click there into `HotkeyEvent::Cancel`.
-    pub fn set_cancel_area(&self, area: Option<[f64; 4]>) {
-        self.lock().cancel_area = area;
+    pub fn set_cancel_area(&self, area: Option<[f64; 4]>, processing: bool) {
+        let mut state = self.lock();
+        state.cancel_area = area;
+        state.cancel_processing = processing;
     }
 
     /// Arms/disarms Enter -> `HotkeyEvent::Submit`.

@@ -30,7 +30,11 @@ pub async fn chat(
     // Dropping this future (a timeout) stops the generation at its next token.
     let stop = StopOnDrop(Arc::default());
     let cancel = stop.0.clone();
-    tokio::task::spawn_blocking(move || chat_file(&path, template, &messages, temperature, max_tokens, &cancel, on_text))
+    let activity = tauri::Manager::state::<crate::updater::UpdateState>(app).activity()?;
+    tokio::task::spawn_blocking(move || {
+        let _activity = activity;
+        chat_file(&path, template, &messages, temperature, max_tokens, &cancel, on_text)
+    })
         .await
         .map_err(|e| format!("The local language model failed: {e}"))?
 }

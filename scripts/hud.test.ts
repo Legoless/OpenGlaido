@@ -39,8 +39,8 @@ test("bars rest still until the first sound, then ripple gently while quiet", ()
   for (const t of [0, 700, 2500]) expect(heightsAt(0, t, false)).toEqual(Array(10).fill(BAR_REST));
   const ripple = frames(0, 8000).flatMap((t) => heightsAt(0, t));
   expect(Math.min(...ripple)).toBeGreaterThanOrEqual(BAR_REST);
-  expect(Math.max(...ripple)).toBeLessThanOrEqual(BAR_REST + 1.5);
-  expect(Math.max(...ripple) - Math.min(...ripple)).toBeGreaterThan(1.4);
+  expect(Math.max(...ripple)).toBeLessThanOrEqual(BAR_REST + 0.75);
+  expect(Math.max(...ripple) - Math.min(...ripple)).toBeGreaterThan(0.7);
   expect(heightsAt(0, 1000)).not.toEqual(heightsAt(0, 2000)); // travels over time
   expect(new Set(heightsAt(0, 1000)).size).toBe(10); // and across the bars
 });
@@ -54,11 +54,23 @@ test("speech moves every bar on its own, within the waveform height", () => {
   expect(new Set(heightsAt(0.6, 1234).map((h) => h.toFixed(1))).size).toBeGreaterThan(6);
   const loud = frames(0, 10_000).flatMap((t) => heightsAt(1, t));
   expect(Math.max(...loud)).toBeGreaterThan(WAVEFORM_HEIGHT - 0.5);
-  expect(Math.min(...loud)).toBeGreaterThan(BAR_REST + 0.15 * (WAVEFORM_HEIGHT - BAR_REST) - 0.01); // floor
+  expect(Math.min(...loud)).toBeGreaterThan(BAR_REST + 0.45 * (WAVEFORM_HEIGHT - BAR_REST) - 0.01); // subdued swings
   // A steady voice keeps each bar moving, and a louder voice raises the bars.
   expect(barHeight(3, 0.7, 1000, true)).not.toBeCloseTo(barHeight(3, 0.7, 1200, true), 1);
   const mean = (level: number) => frames(0, 4000).flatMap((t) => heightsAt(level, t)).reduce((a, b) => a + b) / 2500;
   expect(mean(0.8)).toBeGreaterThan(mean(0.4) + 3);
+});
+
+test("steady speech moves gently without shrinking its loudness response", () => {
+  const times = frames(0, 10_000);
+  for (const i of BARS) {
+    const heights = times.map((t) => barHeight(i, 1, t, true));
+    const steps = heights.slice(1).map((height, k) => Math.abs(height - heights[k]));
+    expect(Math.max(...steps)).toBeLessThan(0.37); // less than 0.37 px per 16 ms at full loudness
+    expect(Math.max(...heights) - Math.min(...heights)).toBeLessThanOrEqual(11);
+  }
+  expect(Math.min(...times.flatMap((t) => heightsAt(0.45, t))))
+    .toBeGreaterThan(BAR_REST + 0.45 * (WAVEFORM_HEIGHT - BAR_REST) * 0.45 ** 1.3 - 0.01);
 });
 
 test("processing keeps the bars as resting dots under a shimmer, with no solid strip", () => {
@@ -75,7 +87,7 @@ test("processing keeps the bars as resting dots under a shimmer, with no solid s
   expect(recording.match(/<span\b/g)).toHaveLength(10);
 });
 
-test("Commands show chevrons and only a hands-free recording offers cancel", () => {
+test("Commands show chevrons and cancel is limited to active native-supported work", () => {
   const visibleIcons = (view: "recording" | "processing" | "error", command: boolean) =>
     [...renderToStaticMarkup(createElement(HudIcon, { view, command })).matchAll(/class="lucide (lucide-[\w-]+)([^"]*)"/g)]
       .filter((m) => !m[2].includes("opacity-0"))
@@ -87,7 +99,16 @@ test("Commands show chevrons and only a hands-free recording offers cancel", () 
   const recording: HudState = { ...IDLE_HUD, recording: true, visible: true, revision: 1 };
   expect(hudCancellable(recording)).toBe(false);
   expect(hudCancellable({ ...recording, hands_free: true })).toBe(true);
-  expect(hudCancellable({ ...recording, recording: false, processing: true, hands_free: true })).toBe(false);
+  const processing: HudState = { ...recording, recording: false, processing: true, processing_cancellable: true };
+  expect(hudCancellable(processing)).toBe(true);
+  expect(hudCancellable({ ...processing, hands_free: false })).toBe(true);
+  expect(hudCancellable({ ...processing, processing_cancellable: false })).toBe(false); // no native click route
+  expect(hudCancellable({ ...processing, recording: true })).toBe(false); // newer hold capture takes priority
+  expect(hudCancellable({ ...processing, visible: false })).toBe(false);
+  expect(hudCancellable(processing, "warning")).toBe(false);
+  expect(hudCancellable(processing, "error")).toBe(false);
+  expect(hudCancellable(processing, null)).toBe(false);
+  expect(hudCancellable({ ...processing, processing: false })).toBe(false);
 });
 
 test("the HUD follows recording, the full response, errors and cancellation without stale reads", () => {

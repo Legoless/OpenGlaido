@@ -166,5 +166,6 @@
  "14 languages. Choose the spoken language; automatic detection is unavailable.",
  "13 languages; transcribes after recording in OpenGlaido.",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings."
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.",
+ "Cancelled"
 ]

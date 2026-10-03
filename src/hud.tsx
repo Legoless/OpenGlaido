@@ -158,7 +158,7 @@ export function Hud() {
   if (live && live !== view) setView(live);
   const shown = live !== null;
   const isMessage = view === "warning" || view === "error";
-  const cancellable = hudCancellable(status);
+  const cancellable = hudCancellable(status, live);
 
   useEffect(() => {
     if (!shown) return setSettled(false);
@@ -209,10 +209,10 @@ export function Hud() {
               </p>
             </div>
           </div>
-          {/* The bar never takes clicks (it must not steal focus): the hotkey tap catches a click
-              on this spot and cancels like Esc (CANCEL_HIT in src-tauri/src/lib.rs). */}
+          {/* The bar never takes clicks (it must not steal focus): the hotkey tap catches this
+              spot to cancel a hands-free capture or pending parsing (CANCEL_HIT in lib.rs). */}
           {cancellable && (
-            <span aria-hidden="true" className="mr-2 ml-0.5 grid size-5 shrink-0 place-items-center text-text-subdued">
+            <span aria-hidden="true" className="mr-2 ml-0.5 grid h-5 w-[22px] shrink-0 place-items-center pl-0.5 text-text-subdued">
               <X className="size-3.5" />
             </span>
           )}

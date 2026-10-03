@@ -6,6 +6,7 @@ pub mod hotkeys;
 pub mod models;
 pub mod output;
 pub mod paste;
+pub mod processing;
 pub mod realtime;
 pub mod secrets;
 pub mod setup;
@@ -17,7 +18,7 @@ use audio::{AudioRecorder, Recording};
 use db::{Database, DictionaryEntry, HistoryEntry, SnippetEntry};
 use frontmost::{AppContext, AppInfo};
 use hotkeys::{HotkeyEngine, HotkeyEvent, HotkeyStatus};
-use transcribe::{apply_formatting, transcribe_raw, TranscriptionConfig};
+use transcribe::{apply_formatting, TranscriptionConfig};
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -112,6 +113,7 @@ pub struct AppState {
     pub events: Sender<(HotkeyEvent, Instant)>,
     /// Transcriptions in flight; the bar stays visible until the last response finishes.
     pub jobs: AtomicUsize,
+    pub responses: processing::Responses,
     /// The dictation bar stays visible until then to show a message.
     pub error_until: Mutex<Option<Instant>>,
     pub hud: Mutex<HudVisibility>,
@@ -150,6 +152,7 @@ pub struct Session {
     recorded_at: String,
     context_task: Option<tokio::sync::oneshot::Receiver<(AppContext, Option<String>)>>,
     delivery: Option<paste::DeliveryTicket>,
+    pub processing: Option<processing::Job>,
 }
 
 impl Session {
@@ -315,6 +318,7 @@ struct HudSnapshot {
     revision: u64,
     command: bool,
     hands_free: bool,
+    processing_cancellable: bool,
 }
 
 /// `changes` invalidates queued native shows only when visibility changes.
@@ -328,20 +332,22 @@ pub struct HudVisibility {
     revision: u64,
     command: bool,
     hands_free: bool,
+    processing_cancellable: bool,
 }
 
 impl HudVisibility {
     fn update(&mut self, recording: bool, jobs: usize, showing_error: bool, command: bool, hands_free: bool) -> bool {
         let processing = jobs > 0;
         let show = recording || processing || showing_error;
-        let next = (show, recording, processing, command, recording && hands_free);
-        if (self.shown, self.recording, self.processing, self.command, self.hands_free) == next {
+        let processing_cancellable = cfg!(target_os = "macos") && processing && !recording && !showing_error;
+        let next = (show, recording, processing, command, recording && hands_free, processing_cancellable);
+        if (self.shown, self.recording, self.processing, self.command, self.hands_free, self.processing_cancellable) == next {
             return false;
         }
         if self.shown != show {
             self.changes += 1;
         }
-        (self.shown, self.recording, self.processing, self.command, self.hands_free) = next;
+        (self.shown, self.recording, self.processing, self.command, self.hands_free, self.processing_cancellable) = next;
         self.revision += 1;
         true
     }
@@ -354,7 +360,12 @@ impl HudVisibility {
             revision: self.revision,
             command: self.command,
             hands_free: self.hands_free,
+            processing_cancellable: self.processing_cancellable,
         }
+    }
+
+    fn cancellable(&self) -> bool {
+        self.shown && ((self.recording && self.hands_free) || self.processing_cancellable)
     }
 
     fn can_show(&self, change: u64) -> bool {
@@ -362,14 +373,14 @@ impl HudVisibility {
     }
 }
 
-/// Where the cancel "x" sits in the 420x72 bar window during a hands-free recording (logical px):
-/// the 134x38 pill is centred with its bottom 17 px up (src/hud.tsx), and the x is at its right
-/// end after the waveform (x 249..269). A little margin, but inside the pill's rounded corners.
+/// Where the cancel "x" sits in the 420x72 bar window during hands-free recording or processing (logical px):
+/// the 136x38 pill is centred with its bottom 17 px up (src/hud.tsx), and the x is at its right
+/// end after the waveform (x 248..270). A little margin, but inside the pill's rounded corners.
 #[cfg(target_os = "macos")]
 const CANCEL_HIT: [f64; 4] = [247.0, 21.0, 26.0, 30.0];
 
 /// Main thread, under the hud lock. Arms the hotkey tap's cancel click on the "x" while a
-/// hands-free recording shows it, at the bar's place: `placed` = the origin just set (setting a
+/// cancellable response or hands-free recording shows it, at the bar's place: `placed` = the origin just set (setting a
 /// position applies asynchronously), otherwise the current frame (also after a move).
 #[cfg(target_os = "macos")]
 fn arm_cancel(app: &AppHandle, bar: &HudVisibility, window: &tauri::WebviewWindow, placed: Option<(f64, f64)>) {
@@ -378,9 +389,9 @@ fn arm_cancel(app: &AppHandle, bar: &HudVisibility, window: &tauri::WebviewWindo
         let origin = window.outer_position().ok()?.to_logical::<f64>(scale);
         Some((origin.x, origin.y))
     };
-    let origin = if bar.shown && bar.recording && bar.hands_free { placed.or_else(current) } else { None };
+    let origin = if bar.cancellable() { placed.or_else(current) } else { None };
     let [x, y, w, h] = CANCEL_HIT;
-    app.state::<HotkeyEngine>().set_cancel_area(origin.map(|(left, top)| [left + x, top + y, w, h]));
+    app.state::<HotkeyEngine>().set_cancel_area(origin.map(|(left, top)| [left + x, top + y, w, h]), bar.processing_cancellable);
 }
 
 /// Keeps the bar on the pointer's display through recording, transcription and formatting.
@@ -391,7 +402,7 @@ pub fn update_hud(app: &AppHandle) {
     let showing_error = state.error_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
     let changed = bar.update(
         state.recording.load(Ordering::SeqCst),
-        state.jobs.load(Ordering::SeqCst),
+        state.responses.active(),
         showing_error,
         state.command.load(Ordering::SeqCst),
         // The cancel "x" works through the macOS hotkey tap only; elsewhere it isn't shown.
@@ -401,9 +412,9 @@ pub fn update_hud(app: &AppHandle) {
         // Under the lock, so the HUD hears the changes in order.
         let _ = app.emit_to("hud", "hud-state", bar.snapshot());
         // macOS only: elsewhere the engine can wait on the main thread, which may wait on `hud`.
-        if cfg!(target_os = "macos") && !(bar.shown && bar.recording && bar.hands_free) {
+        if cfg!(target_os = "macos") && !bar.cancellable() {
             if let Some(engine) = app.try_state::<HotkeyEngine>() {
-                engine.set_cancel_area(None);
+                engine.set_cancel_area(None, false);
             }
         }
     }
@@ -442,13 +453,13 @@ pub fn update_hud(app: &AppHandle) {
 }
 
 /// Reserve processing before ending recording, so microphone teardown cannot flash the bar off.
-pub fn job_started(app: &AppHandle) {
-    app.state::<AppState>().jobs.fetch_add(1, Ordering::SeqCst);
-    update_hud(app);
+pub fn job_started(app: &AppHandle) -> processing::Job {
+    processing::Job::start(app)
 }
 
-pub fn job_finished(app: &AppHandle) {
-    app.state::<AppState>().jobs.fetch_sub(1, Ordering::SeqCst);
+fn cancel_responses(app: &AppHandle) {
+    let state = app.state::<AppState>();
+    state.responses.cancel();
     update_hud(app);
 }
 
@@ -885,7 +896,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         output::mute_after(&state.db.app_dir, Duration::from_millis(if sound_on { 250 } else { 0 }));
     }
     *state.session.lock().unwrap() = Some(Session {
-        purpose, context, selection: None, chime: sound_on, config, live, context_task, delivery: None,
+        purpose, context, selection: None, chime: sound_on, config, live, context_task, delivery: None, processing: None,
         recorded_at: (chrono::Utc::now() - chrono::Duration::from_std(started.elapsed()).unwrap_or_default()).to_rfc3339(),
     });
     spawn_level_meter(app, started);
@@ -900,7 +911,7 @@ fn end_recording_feedback(app: &AppHandle, state: &AppState) {
 
 // Caller holds the mode lock. Returns the recording, its duration and its session.
 fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Session), String> {
-    job_started(app);
+    let job = job_started(app);
     end_recording_feedback(app, state);
     let mut session = state.session.lock().unwrap().take().unwrap_or_else(|| Session {
         purpose: Purpose::Dictation,
@@ -912,7 +923,9 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         recorded_at: chrono::Utc::now().to_rfc3339(),
         context_task: None,
         delivery: None,
+        processing: None,
     });
+    session.processing = Some(job);
     let duration_ms = state
         .recording_start
         .lock()
@@ -936,13 +949,8 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
     if session.chime {
         sound::play_stop_tone();
     }
-    if recording.is_ok() {
-        if session.purpose == Purpose::Dictation {
-            session.delivery = Some(paste::reserve_delivery());
-        }
-    } else {
-        // No processing task will be spawned when stopping the input fails.
-        job_finished(app);
+    if recording.is_ok() && session.purpose == Purpose::Dictation {
+        session.delivery = Some(paste::reserve_delivery());
     }
     recording
         .map(|r| (r, duration_ms, session))
@@ -974,6 +982,10 @@ fn split_event(event: HotkeyEvent) -> Option<(HotkeyEvent, Purpose)> {
 
 // Runs on the hotkey worker thread, so blocking on the audio thread is fine here.
 fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
+    if event == HotkeyEvent::CancelProcessing {
+        cancel_responses(app);
+        return;
+    }
     let Some((event, purpose)) = split_event(event) else {
         commands::handle_hotkey(app, event);
         return;
@@ -981,6 +993,10 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
     let state = app.state::<AppState>();
     let mut mode = state.mode.lock().unwrap();
     if app.state::<updater::UpdateState>().is_installing() {
+        return;
+    }
+    if event == HotkeyEvent::Cancel && *mode == Mode::Idle {
+        cancel_responses(app);
         return;
     }
     // A dictation hotkey never stops a command recording (and vice versa); Esc/Enter apply to both.
@@ -1051,7 +1067,6 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
                     let app = app.clone();
                     tauri::async_runtime::spawn(async move {
                         commands::run_recorded(app.clone(), recording, duration_ms, session).await;
-                        job_finished(&app);
                     });
                 }
             },
@@ -1127,17 +1142,36 @@ fn history_context(entry: &HistoryEntry) -> Option<AppContext> {
     })
 }
 
+fn cancel_history(db: &Database, fallback: &HistoryEntry) -> Result<(), String> {
+    let existing = db.get_history_entry(&fallback.id);
+    let mut entry = existing.as_ref().cloned().unwrap_or_else(|_| fallback.clone());
+    if entry.raw_text.is_empty() { entry.raw_text = fallback.raw_text.clone(); }
+    if entry.text.is_empty() { entry.text = fallback.text.clone(); }
+    entry.status = "failed".into();
+    entry.error = Some(processing::CANCELLED.into());
+    if existing.is_ok() { db.update_history(&entry) } else { db.insert_history(&entry) }
+}
+
+fn mark_cancelled(app: &AppHandle, fallback: &HistoryEntry) {
+    if let Err(error) = cancel_history(&app.state::<AppState>().db, fallback) {
+        report_error(app, format!("Couldn't save to history: {error}"));
+    }
+    history_updated(app);
+}
+
 /// Transcribes, pastes and saves a dictation from `end_capture` (which counted the job);
 /// model failures are reported to the dictation bar; other failures stay in the main window.
-async fn process_recording(app: AppHandle, recording: Recording, duration_ms: i64, session: Session) {
+async fn process_recording(app: AppHandle, recording: Recording, duration_ms: i64, mut session: Session) {
+    let job = session.processing.get_or_insert_with(|| job_started(&app)).clone();
+    let cancellation = job.cancellation();
     match transcribe_and_paste(&app, recording, duration_ms, session).await {
         Ok(Some(text)) => {
             let _ = app.emit("transcription-completed", text);
         }
         Ok(None) => {}
-        Err(e) => report_notice(&app, &e),
+        Err(e) if !cancellation.is_cancelled() => report_notice(&app, &e),
+        Err(_) => {},
     }
-    job_finished(&app);
 }
 
 /// Ok(None) = nothing pasted: no speech (silent) or handed over to a command (voice activation).
@@ -1148,6 +1182,7 @@ async fn transcribe_and_paste(
     mut session: Session,
 ) -> Result<Option<String>, Notice> {
     let state = app.state::<AppState>();
+    let cancellation = session.processing.as_ref().map(processing::Job::cancellation).unwrap_or_default();
     let interruption = recording.interruption.clone();
     let had_samples = !recording.samples.is_empty();
     if interruption.is_some() {
@@ -1200,8 +1235,8 @@ async fn transcribe_and_paste(
     let saved_early = audio_saved && state.db.insert_history(&HistoryEntry { status: "running".into(), ..row.clone() }).is_ok();
 
     let transcription = match session.live.take() {
-        Some(live) => live.finish().await,
-        None => transcribe_raw(app, wav, &config, vocab_terms(&state.db)).await,
+        Some(live) => cancellation.run(live.finish()).await.and_then(|result| result),
+        None => transcribe::transcribe_raw_cancellable(app, wav, &config, vocab_terms(&state.db), cancellation.clone()).await,
     };
     let raw = match transcription {
         Ok(t) => t,
@@ -1211,6 +1246,7 @@ async fn transcribe_and_paste(
                 let _ = state.db.update_history(&HistoryEntry { status: "failed".into(), error: Some(e.clone()), ..row });
                 history_updated(app);
             }
+            if cancellation.is_cancelled() { return Ok(None); }
             return Err(Notice::model_error(e));
         }
     };
@@ -1225,6 +1261,11 @@ async fn transcribe_and_paste(
         return Ok(None);
     }
 
+    if cancellation.is_cancelled() {
+        mark_cancelled(app, &row);
+        return Ok(None);
+    }
+
     // Voice activation: "Glaido, …" turns the dictation into a command; nothing is pasted.
     if let Some(instruction) = config.beta_features.then(|| commands::wake_command(&raw)).flatten() {
         let command_row = HistoryEntry { kind: "command".into(), status: "running".into(), text: raw.clone(), raw_text: raw, ..row };
@@ -1233,11 +1274,15 @@ async fn transcribe_and_paste(
             eprintln!("Couldn't save the command record: {}", e);
         }
         history_updated(app);
-        commands::start_from_dictation(app, instruction, session.selection, context, id);
+        let job = session.processing.take().unwrap_or_else(|| job_started(app));
+        commands::start_from_dictation(app, instruction, session.selection, context, id, job);
         return Ok(None);
     }
 
-    let final_text = finish_text(app, &state.db, &raw, &config, context.as_ref()).await;
+    let final_text = match cancellation.run(finish_text(app, &state.db, &raw, &config, context.as_ref())).await {
+        Ok(text) => text,
+        Err(_) => { mark_cancelled(app, &HistoryEntry { raw_text: raw, ..row }); return Ok(None); }
+    };
 
     // Make a completed transcript recoverable before waiting for another delivery or touching the clipboard.
     let entry = HistoryEntry { text: final_text.clone(), raw_text: raw, ..row };
@@ -1257,19 +1302,25 @@ async fn transcribe_and_paste(
     let target_app_id = context.as_ref().map(|c| c.bundle_id.clone());
     let delivery = session.delivery.take();
     if let Some(ticket) = delivery.as_ref() {
-        ticket.wait().await;
+        if cancellation.run(ticket.wait()).await.is_err() {
+            mark_cancelled(app, &entry);
+            return Ok(None);
+        }
     }
+    let activity = app.state::<updater::UpdateState>().activity().map_err(Notice::error)?;
     eprintln!("Dictation paste: target={:?} accessibility={} chars={}", context.as_ref().map(|c| c.bundle_id.as_str()), can_paste, final_text.chars().count());
     match tauri::async_runtime::spawn_blocking(move || {
         // The native operation owns its turn even if the awaiting task is cancelled.
         let _delivery = delivery;
-        paste::paste_text_to(&paste_app, &text, keep_in_clipboard, target_app_id.as_deref())
+        let _activity = activity;
+        paste::paste_text_to_cancellable(&paste_app, &text, keep_in_clipboard, target_app_id.as_deref(), cancellation)
     }).await {
         Ok(Ok(())) if !can_paste => report_error(
             app,
             "Copied to clipboard: allow OpenGlaido in Privacy & Security › Accessibility to paste automatically",
         ),
         Ok(Ok(())) => eprintln!("Dictation paste shortcut posted"),
+        Ok(Err(e)) if e == processing::CANCELLED => { mark_cancelled(app, &entry); return Ok(None); }
         Ok(Err(e)) => report_error(app, format!("Couldn't paste: {}", e)),
         Err(e) => report_error(app, format!("Couldn't paste: {}", e)),
     }
@@ -1313,7 +1364,6 @@ async fn stop_recording_and_process(app: AppHandle, state: State<'_, AppState>) 
         Purpose::Dictation => process_recording(app, recording, duration_ms, session).await,
         Purpose::Command => {
             commands::run_recorded(app.clone(), recording, duration_ms, session).await;
-            job_finished(&app);
         }
     }
     Ok(())
@@ -1325,6 +1375,8 @@ async fn cancel_recording(app: AppHandle, state: State<'_, AppState>) -> Result<
     if *mode != Mode::Idle {
         cancel_capture(&app, &state);
         set_mode(&app, &state, &mut mode, Mode::Idle);
+    } else {
+        cancel_responses(&app);
     }
     Ok(())
 }
@@ -1529,13 +1581,23 @@ async fn retranscribe(app: AppHandle, id: String, state: State<'_, AppState>) ->
             state.command.store(false, Ordering::SeqCst);
         }
     }
-    job_started(&app);
-    let result = retranscribe_entry(&app, &id, &state).await;
-    job_finished(&app);
-    result
+    let job = job_started(&app);
+    let cancellation = job.cancellation();
+    let result = cancellation.run(retranscribe_entry(&app, &id, &state, cancellation.clone())).await;
+    match result {
+        Ok(result) => result,
+        Err(error) => {
+            if let Ok(entry) = state.db.get_history_entry(&id) {
+                mark_cancelled(&app, &entry);
+                state.db.get_history_entry(&id)
+            } else {
+                Err(error)
+            }
+        }
+    }
 }
 
-async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState) -> Result<HistoryEntry, String> {
+async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState, cancellation: processing::Cancellation) -> Result<HistoryEntry, String> {
     let app = app.clone();
     let mut entry = state.db.get_history_entry(id)?;
     let filename = entry
@@ -1545,7 +1607,7 @@ async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState) -> Resu
     let bytes = fs::read(state.db.app_dir.join("audio").join(filename)).map_err(|e| e.to_string())?;
     let config = state.config.lock().unwrap().clone();
 
-    let raw = transcribe_raw(&app, bytes, &config, vocab_terms(&state.db)).await.and_then(|raw| {
+    let raw = transcribe::transcribe_raw_cancellable(&app, bytes, &config, vocab_terms(&state.db), cancellation.clone()).await.and_then(|raw| {
         if is_blank(&raw) {
             Err("No speech detected".to_string())
         } else {
@@ -1564,7 +1626,8 @@ async fn retranscribe_entry(app: &AppHandle, id: &str, state: &AppState) -> Resu
     };
     // Retain the original website while using the user's current model and formatting settings.
     let context = history_context(&entry);
-    entry.text = finish_text(&app, &state.db, &raw, &config, context.as_ref()).await;
+    entry.text = cancellation.run(finish_text(&app, &state.db, &raw, &config, context.as_ref())).await?;
+    cancellation.check()?;
     entry.raw_text = raw;
     entry.status = "ok".into();
     entry.error = None;
@@ -1718,6 +1781,7 @@ pub fn run() {
                 db: Arc::new(db),
                 events,
                 jobs: AtomicUsize::new(0),
+                responses: processing::Responses::default(),
                 error_until: Mutex::new(None),
                 hud: Mutex::new(HudVisibility { hidden: true, ..HudVisibility::default() }),
                 config_write: Mutex::new(()),
@@ -2187,6 +2251,42 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_processing_keeps_audio_and_recognized_text_retryable() {
+        let dir = std::env::temp_dir().join(format!("openglaido-cancel-{}", uuid::Uuid::new_v4()));
+        let db = Database::new(dir.clone()).unwrap();
+        let initial = HistoryEntry { status: "running".into(), audio_filename: Some("speech.wav".into()), ..HistoryEntry::new("cancel") };
+        fs::write(dir.join("audio/speech.wav"), b"saved audio").unwrap();
+        db.insert_history(&initial).unwrap();
+        cancel_history(&db, &HistoryEntry { raw_text: "recognized words".into(), ..initial.clone() }).unwrap();
+        let cancelled = db.get_history_entry("cancel").unwrap();
+        assert_eq!(cancelled.error.as_deref(), Some(processing::CANCELLED));
+        assert_eq!(cancelled.raw_text, "recognized words");
+        assert_eq!(fs::read(dir.join("audio/speech.wav")).unwrap(), b"saved audio");
+        assert!(db.begin_retry("cancel").is_ok());
+        let previous = HistoryEntry { status: "ok".into(), text: "keep previous transcript".into(), ..cancelled };
+        db.update_history(&previous).unwrap();
+        cancel_history(&db, &initial).unwrap();
+        assert_eq!(db.get_history_entry("cancel").unwrap().text, previous.text);
+        drop(db);
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn processing_cancel_hit_is_only_armed_for_the_visible_processing_view() {
+        let mut hud = HudVisibility::default();
+        hud.update(false, 1, false, false, false);
+        assert_eq!(hud.snapshot().processing_cancellable, cfg!(target_os = "macos"));
+        hud.update(false, 1, true, false, false);
+        assert!(!hud.cancellable(), "model messages never offer an inert cancel button");
+        hud.update(true, 1, true, false, false);
+        assert!(!hud.cancellable(), "recording takes priority: held recording has no cancel icon");
+        hud.update(true, 1, true, false, true);
+        assert!(hud.cancellable(), "hands-free recording keeps its cancel control");
+        hud.update(false, 0, false, false, false);
+        assert!(!hud.cancellable());
+    }
+
+    #[test]
     fn retry_retains_the_site_rule_without_storing_private_url_details() {
         let config = TranscriptionConfig::default();
         let original = AppContext { bundle_id: "com.google.Chrome".into(), name: "Chrome".into(), url: Some("https://mail.google.com/mail/u/0?secret=example#inbox".into()) };
@@ -2205,7 +2305,7 @@ mod tests {
         let original = AppContext { bundle_id: "com.google.Chrome".into(), name: "Chrome".into(), url: None };
         let mut session = Session {
             purpose: Purpose::Dictation, context: Some(original.clone()), selection: None,
-            chime: false, config: TranscriptionConfig::default(), live: None, context_task: None, delivery: None,
+            chime: false, config: TranscriptionConfig::default(), live: None, context_task: None, delivery: None, processing: None,
             recorded_at: chrono::Utc::now().to_rfc3339(),
         };
         let (tx, rx) = tokio::sync::oneshot::channel();

@@ -3,7 +3,8 @@
 //! in the shared pipeline. This pinned engine does not implement vocabulary prompts for them.
 
 use std::path::PathBuf;
-use tauri::AppHandle;
+use crate::processing::Cancellation;
+use tauri::{AppHandle, Manager};
 
 pub(super) fn supported_languages(id: &str) -> Option<&'static [&'static str]> {
     Some(match id {
@@ -41,13 +42,19 @@ fn language_for(id: &str, languages: &[String]) -> Result<String, String> {
     Ok(String::new())
 }
 
-pub async fn transcribe(app: &AppHandle, id: &str, wav: Vec<u8>, languages: &[String]) -> Result<String, String> {
+pub async fn transcribe_cancellable(app: &AppHandle, id: &str, wav: Vec<u8>, languages: &[String], cancellation: Cancellation) -> Result<String, String> {
+    cancellation.check()?;
     if !super::supported() {
         return Err(super::UNSUPPORTED.into());
     }
     let language = language_for(id, languages)?;
     let path = super::path_if_downloaded(app, id).ok_or("Download the transcription model in Settings › Model")?;
-    tokio::task::spawn_blocking(move || imp::transcribe(&path, &wav, &language))
+    let activity = app.state::<crate::updater::UpdateState>().activity()?;
+    tokio::task::spawn_blocking(move || {
+        // A dropped awaiting future cannot release update admission while the helper is running.
+        let _activity = activity;
+        imp::transcribe(&path, &wav, &language, &cancellation)
+    })
         .await.map_err(|e| format!("Transcription failed: {e}"))?
 }
 
@@ -72,7 +79,7 @@ pub fn unload_now() {
 #[cfg(not(target_os = "macos"))]
 mod imp {
     use std::path::Path;
-    pub fn transcribe(_: &Path, _: &[u8], _: &str) -> Result<String, String> { Err(super::super::UNSUPPORTED.into()) }
+    pub fn transcribe(_: &Path, _: &[u8], _: &str, _: &super::Cancellation) -> Result<String, String> { Err(super::super::UNSUPPORTED.into()) }
     pub fn load(_: &Path, _: impl FnOnce() -> bool) -> Result<(), String> { Err(super::super::UNSUPPORTED.into()) }
     pub fn free(_: Option<&Path>) {}
     pub fn quit() {}
@@ -80,6 +87,7 @@ mod imp {
 
 #[cfg(target_os = "macos")]
 mod imp {
+    use crate::processing::{Cancellation, CANCELLED};
     use std::io::{BufWriter, Read, Write};
     use std::path::{Path, PathBuf};
     use std::process::{Child, ChildStdin, Command, Stdio};
@@ -134,7 +142,8 @@ mod imp {
     }
 
     impl Helper {
-        fn start(path: &Path) -> Result<Self, String> {
+        fn start(path: &Path, cancellation: &Cancellation) -> Result<Self, String> {
+            cancellation.check()?;
             let mut child = Command::new(helper_path()?).arg(path).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
                 .spawn().map_err(|e| format!("Couldn't start the local transcription engine: {e}"))?;
             let mut input = BufWriter::new(child.stdin.take().unwrap());
@@ -153,32 +162,34 @@ mod imp {
                 }
             });
             let helper = Self { path: path.to_path_buf(), child, requests, replies };
-            if !helper.reply(Duration::from_secs(180))?.is_empty() { return Err("The local transcription engine could not initialize".into()); }
+            if !helper.reply(Duration::from_secs(180), cancellation)?.is_empty() { return Err("The local transcription engine could not initialize".into()); }
             Ok(helper)
         }
 
-        fn reply(&self, timeout: Duration) -> Result<String, String> {
-            wait_reply(&self.replies, timeout, &QUITTING)
+        fn reply(&self, timeout: Duration, cancellation: &Cancellation) -> Result<String, String> {
+            wait_reply(&self.replies, timeout, &QUITTING, cancellation)
         }
 
-        fn run(&mut self, samples: Vec<f32>, language: &str) -> Result<String, String> {
+        fn run(&mut self, samples: Vec<f32>, language: &str, cancellation: &Cancellation) -> Result<String, String> {
+            cancellation.check()?;
             let timeout = Duration::from_secs(120 + (samples.len() / RATE) as u64 * 2);
             self.requests.try_send((samples, language.to_string()))
                 .map_err(|_| "The local transcription engine is unavailable. Try again.".to_string())?;
             // Covers BOTH writing a large recording and waiting for inference. A stuck child can
             // never block the main process indefinitely while its stdin pipe is full.
-            self.reply(timeout)
+            self.reply(timeout, cancellation)
         }
     }
 
-    fn wait_reply(replies: &mpsc::Receiver<Result<String, String>>, timeout: Duration, quitting: &AtomicBool) -> Result<String, String> {
+    fn wait_reply(replies: &mpsc::Receiver<Result<String, String>>, timeout: Duration, quitting: &AtomicBool, cancellation: &Cancellation) -> Result<String, String> {
         let deadline = Instant::now() + timeout;
         loop {
-            if quitting.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
+            if quitting.load(Ordering::Relaxed) { return Err(CANCELLED.into()); }
+            cancellation.check()?;
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() { return Err("The local transcription model took too long. Try a smaller model.".into()); }
             match replies.recv_timeout(remaining.min(Duration::from_millis(100))) {
-                Ok(result) => return result,
+                Ok(result) => { cancellation.check()?; return result; }
                 Err(mpsc::RecvTimeoutError::Timeout) => continue,
                 Err(mpsc::RecvTimeoutError::Disconnected) => return Err("The local transcription engine stopped unexpectedly. Try again.".into()),
             }
@@ -195,10 +206,10 @@ mod imp {
         })().map_err(|e| format!("Couldn't send audio to the local transcription engine: {e}"))
     }
 
-    fn loaded<'a>(cached: &'a mut Option<Helper>, path: &Path) -> Result<&'a mut Helper, String> {
+    fn loaded<'a>(cached: &'a mut Option<Helper>, path: &Path, cancellation: &Cancellation) -> Result<&'a mut Helper, String> {
         if cached.as_ref().is_none_or(|helper| helper.path != path) {
             *cached = None;
-            *cached = Some(Helper::start(path)?);
+            *cached = Some(Helper::start(path, cancellation)?);
         }
         Ok(cached.as_mut().unwrap())
     }
@@ -206,7 +217,7 @@ mod imp {
     pub fn load(path: &Path, wanted: impl FnOnce() -> bool) -> Result<(), String> {
         let mut cached = lock();
         if QUITTING.load(Ordering::Relaxed) || !wanted() { return Ok(()); }
-        loaded(&mut cached, path).map(|_| ())
+        loaded(&mut cached, path, &Cancellation::default()).map(|_| ())
     }
 
     pub fn free(path: Option<&Path>) {
@@ -217,12 +228,14 @@ mod imp {
     pub fn quit() { QUITTING.store(true, Ordering::Relaxed); free(None); }
 
 
-    pub fn transcribe(path: &Path, wav: &[u8], language: &str) -> Result<String, String> {
+    pub fn transcribe(path: &Path, wav: &[u8], language: &str, cancellation: &Cancellation) -> Result<String, String> {
+        cancellation.check()?;
         let samples = super::super::stt::decode_wav(wav, Some(1800))?;
         if samples.is_empty() { return Ok(String::new()); }
         let mut cached = lock();
-        if QUITTING.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
-        let result = loaded(&mut cached, path)?.run(samples, language);
+        cancellation.check()?;
+        if QUITTING.load(Ordering::Relaxed) { return Err(CANCELLED.into()); }
+        let result = loaded(&mut cached, path, cancellation).and_then(|helper| helper.run(samples, language, cancellation));
         if result.is_err() { *cached = None; } // next attempt starts a fresh engine after a crash/error
         result.map(|text| text.trim().to_string())
     }
@@ -242,11 +255,31 @@ mod imp {
                 flag.store(true, Ordering::Relaxed);
             });
             let start = Instant::now();
-            assert_eq!(wait_reply(&receiver, Duration::from_secs(180), &quitting).unwrap_err(), "Cancelled");
+            assert_eq!(wait_reply(&receiver, Duration::from_secs(180), &quitting, &Cancellation::default()).unwrap_err(), "Cancelled");
             assert!(start.elapsed() < Duration::from_secs(5));
             signal.join().unwrap();
-            assert!(wait_reply(&receiver, Duration::from_millis(1), &AtomicBool::new(false)).unwrap_err().contains("too long"));
+            assert!(wait_reply(&receiver, Duration::from_millis(1), &AtomicBool::new(false), &Cancellation::default()).unwrap_err().contains("too long"));
         }
+        #[test]
+        fn cancellation_interrupts_a_stalled_reply_without_shutting_down_the_engine_globally() {
+            let (_sender, receiver) = mpsc::channel();
+            let cancellation = Cancellation::default();
+            let signal = cancellation.clone();
+            let thread = std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(10));
+                signal.cancel();
+            });
+            let quitting = AtomicBool::new(false);
+            let start = Instant::now();
+            assert_eq!(wait_reply(&receiver, Duration::from_secs(180), &quitting, &cancellation).unwrap_err(), CANCELLED);
+            assert!(start.elapsed() < Duration::from_secs(2));
+            assert!(!quitting.load(Ordering::Relaxed));
+            thread.join().unwrap();
+            let (sender, receiver) = mpsc::channel();
+            sender.send(Ok("next request".into())).unwrap();
+            assert_eq!(wait_reply(&receiver, Duration::from_secs(1), &quitting, &Cancellation::default()).unwrap(), "next request");
+        }
+
         #[test]
         fn invalid_or_failed_helper_responses_cannot_be_transcripts() {
             let response = |status: u32, text: &[u8]| { let mut r = status.to_le_bytes().to_vec(); r.extend((text.len() as u32).to_le_bytes()); r.extend(text); r };

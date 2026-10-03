@@ -466,5 +466,6 @@
  "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Dit model ondersteunt niet al je dicteertalen. Kies een ander model of wijzig je dicteertalen.",
  "This model needs one spoken language.": "Dit model heeft één gesproken taal nodig.",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Cohere Transcribe heeft één taal nodig. Kies deze bij Instellingen › Model.",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Dit model ondersteunt de geselecteerde dicteertalen niet. Kies een ander model of wijzig de talen in Instellingen."
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Dit model ondersteunt de geselecteerde dicteertalen niet. Kies een ander model of wijzig de talen in Instellingen.",
+ "Cancelled": "Geannuleerd"
 }

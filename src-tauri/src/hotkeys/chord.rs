@@ -16,6 +16,8 @@ pub enum HotkeyEvent {
     TogglePressed,
     /// Esc pressed while armed via `set_recording(true)`.
     Cancel,
+    /// The processing bar's cancel click; never affects a recording that starts meanwhile.
+    CancelProcessing,
     /// Enter pressed while armed via `set_submit_enabled(true)`.
     Submit,
     // Commands hotkeys: hold/toggle drive the same recording state machine; Enter/Esc/Copy go to
@@ -263,6 +265,7 @@ pub struct State {
     /// Screen rect (x, y, width, height in points) of the dictation bar's cancel "x" while a
     /// hands-free recording shows it. A left click there → Cancel, and the click is swallowed.
     pub cancel_area: Option<[f64; 4]>,
+    pub cancel_processing: bool,
     /// The cancel click's button-up still has to be swallowed.
     swallow_up: bool,
     /// Enter → Submit while set.
@@ -298,10 +301,9 @@ impl State {
         if !down {
             return (None, std::mem::take(&mut self.swallow_up));
         }
-        let hit = self.recording
-            && self.cancel_area.is_some_and(|[left, top, w, h]| x >= left && x < left + w && y >= top && y < top + h);
+        let hit = self.cancel_area.is_some_and(|[left, top, w, h]| x >= left && x < left + w && y >= top && y < top + h);
         self.swallow_up = hit;
-        if hit {
+        if hit && !self.cancel_processing {
             // Like Esc: the recording ends, and a held toggle modifier must not start another.
             for pair in &mut self.pairs {
                 pair.hold_active = false;
@@ -309,7 +311,7 @@ impl State {
                 pair.tap_armed = false;
             }
         }
-        (hit.then_some(Output::Event(Cancel)), hit)
+        (hit.then_some(Output::Event(if self.cancel_processing { CancelProcessing } else { Cancel })), hit)
     }
 
     pub fn set_bindings(&mut self, hold: Option<Binding>, toggle: Option<Binding>) {
@@ -887,7 +889,8 @@ mod tests {
         assert_eq!(st.click(true, 1010.0, 820.0), (None, false));
         assert_eq!(st.click(false, 1010.0, 820.0), (None, false));
         st.cancel_area = Some(x);
-        assert_eq!(st.click(true, 1010.0, 820.0), (None, false), "not recording");
+        assert_eq!(st.click(true, 1010.0, 820.0), (Some(Output::Event(HotkeyEvent::Cancel)), true), "processing is cancellable without a recording");
+        assert_eq!(st.click(false, 1010.0, 820.0), (None, true));
         st.recording = true;
         assert_eq!(st.click(true, 999.0, 820.0), (None, false), "left of the x");
         assert_eq!(st.click(true, 1010.0, 838.0), (None, false), "below the x");
@@ -911,4 +914,15 @@ mod tests {
         st.recording = false;
         assert_eq!(run(&mut st, vec![up(ALT_RIGHT)]).0, vec![], "no new hands-free recording");
     }
+    #[test]
+    fn cancelling_processing_never_spoils_a_new_recording_hold() {
+        let mut st = state("Fn", "Fn+Space");
+        st.cancel_area = Some([0.0, 0.0, 10.0, 10.0]);
+        st.cancel_processing = true;
+        assert_eq!(run(&mut st, vec![down(FN)]).0, vec![HoldPressed]);
+        assert_eq!(st.click(true, 5.0, 5.0), (Some(Output::Event(CancelProcessing)), true));
+        assert_eq!(st.click(false, 5.0, 5.0), (None, true));
+        assert_eq!(run(&mut st, vec![up(FN)]).0, vec![HoldReleased]);
+    }
+
 }

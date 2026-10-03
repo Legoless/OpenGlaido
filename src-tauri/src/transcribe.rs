@@ -448,16 +448,28 @@ pub async fn transcribe_raw(
     config: &TranscriptionConfig,
     vocabulary: Vec<String>,
 ) -> Result<String, String> {
-    if config.stt_source == "local" {
-        let initial_prompt = (!vocabulary.is_empty()).then(|| vocabulary.join(", "));
-        return models::stt::transcribe(app, &config.local_stt_model, wav_bytes, &config.languages, initial_prompt).await;
-    }
-    // History Retry still uses the selected model: feed the saved WAV through its live
-    // protocol instead of sending a live-only model to the file transcription endpoint.
-    if crate::realtime::is_live_model(&config.model_name) {
-        return crate::realtime::transcribe_wav(config, wav_bytes, vocabulary).await;
-    }
-    transcribe_file(wav_bytes, config, &vocabulary).await
+    transcribe_raw_cancellable(app, wav_bytes, config, vocabulary, crate::processing::Cancellation::default()).await
+}
+
+pub async fn transcribe_raw_cancellable(
+    app: &AppHandle,
+    wav_bytes: Vec<u8>,
+    config: &TranscriptionConfig,
+    vocabulary: Vec<String>,
+    cancellation: crate::processing::Cancellation,
+) -> Result<String, String> {
+    cancellation.run(async {
+        if config.stt_source == "local" {
+            let initial_prompt = (!vocabulary.is_empty()).then(|| vocabulary.join(", "));
+            return models::stt::transcribe_cancellable(app, &config.local_stt_model, wav_bytes, &config.languages, initial_prompt, cancellation.clone()).await;
+        }
+        // History Retry still uses the selected model: feed the saved WAV through its live
+        // protocol instead of sending a live-only model to the file transcription endpoint.
+        if crate::realtime::is_live_model(&config.model_name) {
+            return crate::realtime::transcribe_wav(config, wav_bytes, vocabulary).await;
+        }
+        transcribe_file(wav_bytes, config, &vocabulary).await
+    }).await?
 }
 
 fn is_elevenlabs(config: &TranscriptionConfig) -> bool {

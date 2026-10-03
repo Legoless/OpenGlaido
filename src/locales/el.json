@@ -466,5 +466,6 @@
  "This model does not support all your dictation languages. Choose another model or change your dictation languages.": "Αυτό το μοντέλο δεν υποστηρίζει όλες τις γλώσσες υπαγόρευσής σας. Επιλέξτε άλλο μοντέλο ή αλλάξτε τις γλώσσες υπαγόρευσης.",
  "This model needs one spoken language.": "Αυτό το μοντέλο απαιτεί μία ομιλούμενη γλώσσα.",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.": "Το Cohere Transcribe απαιτεί μία γλώσσα. Επιλέξτε την στις Ρυθμίσεις › Μοντέλο.",
- "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Αυτό το μοντέλο δεν υποστηρίζει τις επιλεγμένες γλώσσες υπαγόρευσης. Επιλέξτε άλλο μοντέλο ή αλλάξτε τις γλώσσες στις Ρυθμίσεις."
+ "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.": "Αυτό το μοντέλο δεν υποστηρίζει τις επιλεγμένες γλώσσες υπαγόρευσης. Επιλέξτε άλλο μοντέλο ή αλλάξτε τις γλώσσες στις Ρυθμίσεις.",
+ "Cancelled": "Ακυρώθηκε"
 }
