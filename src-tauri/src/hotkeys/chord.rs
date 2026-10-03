@@ -262,6 +262,8 @@ pub struct State {
     pub pairs: [Pair; 2],
     /// Esc → Cancel while set.
     pub recording: bool,
+    /// Dictation has passed the accidental-shortcut guard; unrelated input can move focus.
+    pub dictation_active: bool,
     /// Screen rect (x, y, width, height in points) of the dictation bar's cancel "x" while a
     /// hands-free recording shows it. A left click there → Cancel, and the click is swallowed.
     pub cancel_area: Option<[f64; 4]>,
@@ -357,7 +359,8 @@ impl State {
             pair.tap_spoiled = true;
             pair.tap_armed = false;
             let aborts = pair.hold.as_ref().is_some_and(|h| h.key.is_none() && !(click && h.exact | h.any == FN));
-            if Some(i) != except && pair.hold_active && aborts {
+            let preserve_dictation = i == 0 && self.dictation_active && except.is_none();
+            if Some(i) != except && pair.hold_active && aborts && !preserve_dictation {
                 pair.hold_active = false;
                 out.push(Output::Event(events[2]));
             }
@@ -406,9 +409,16 @@ impl State {
             return;
         }
         let (mods, keys_idle) = (self.mods, self.keys_down.is_empty());
-        for (pair, [pressed, released, aborted, toggled]) in self.pairs.iter_mut().zip(PAIR_EVENTS) {
+        let command_modifier_chord = [&self.pairs[1].hold, &self.pairs[1].toggle]
+            .into_iter().flatten().any(|b| b.key.is_none() && b.matches(mods));
+        for (i, (pair, [pressed, released, aborted, toggled])) in self.pairs.iter_mut().zip(PAIR_EVENTS).enumerate() {
             if let Some(hold) = pair.hold.as_ref().filter(|h| h.key.is_none()) {
-                if pair.hold_active && !hold.matches(mods) {
+                let held = if i == 0 && self.dictation_active && pair.hold_active && !command_modifier_chord {
+                    mods & (hold.exact | hold.any)
+                } else {
+                    mods
+                };
+                if pair.hold_active && !hold.matches(held) {
                     pair.hold_active = false;
                     out.push(Output::Event(if down { aborted } else { released }));
                 } else if !pair.hold_active && down && keys_idle && hold.matches(mods) {
@@ -625,6 +635,70 @@ mod tests {
         run(&mut st, vec![down(FN)]);
         assert_eq!(st.abort_active(), vec![Output::Event(HoldAborted)]);
         assert_eq!(run(&mut st, vec![up(FN)]).0, vec![]);
+    }
+
+    #[test]
+    fn active_dictation_hold_survives_app_switch_and_releases_its_own_modifier() {
+        for release in [vec![up(META_LEFT), up(FN)], vec![up(FN), up(META_LEFT)]] {
+            let mut st = state("Fn", "Fn+Space");
+            assert_eq!(run(&mut st, vec![down(FN)]).0, vec![HoldPressed]);
+            st.dictation_active = true;
+            assert_eq!(run(&mut st, vec![down(META_LEFT), kd("Tab"), ku("Tab")]), (vec![], false));
+            assert_eq!(run(&mut st, release), (vec![HoldReleased], false));
+        }
+    }
+
+    #[test]
+    fn active_custom_dictation_modifier_hold_survives_clicks_and_typing() {
+        let mut st = state("AltRight", "AltRight+Space");
+        assert_eq!(run(&mut st, vec![down(ALT_RIGHT)]).0, vec![HoldPressed]);
+        st.dictation_active = true;
+        assert_eq!(run(&mut st, vec![Input::Pointer, kd("KeyE"), ku("KeyE")]), (vec![], false));
+        assert_eq!(run(&mut st, vec![up(ALT_RIGHT)]).0, vec![HoldReleased]);
+    }
+
+    #[test]
+    fn pre_capture_dictation_and_command_shortcuts_still_abort_on_other_input() {
+        let mut st = state("Fn", "Fn+Space");
+        assert_eq!(run(&mut st, vec![down(FN), kd("ArrowUp"), ku("ArrowUp"), up(FN)]), (vec![HoldPressed, HoldAborted], false));
+        for active in [false, true] {
+            let mut st = state("Fn", "Fn+Space");
+            st.set_command_bindings(parse("AltRight").unwrap(), parse("AltRight+Space").unwrap());
+            st.dictation_active = active;
+            assert_eq!(run(&mut st, vec![down(ALT_RIGHT), Input::Pointer, up(ALT_RIGHT)]).0, vec![CommandHoldPressed, CommandHoldAborted]);
+            assert_eq!(run(&mut st, vec![down(ALT_RIGHT), kd("KeyE"), ku("KeyE"), up(ALT_RIGHT)]), (vec![CommandHoldPressed, CommandHoldAborted], false));
+        }
+    }
+
+    #[test]
+    fn active_dictation_keeps_escape_and_hands_free_shortcuts() {
+        let mut st = state("Fn", "Fn+Space");
+        run(&mut st, vec![down(FN)]);
+        st.dictation_active = true;
+        st.recording = true;
+        assert_eq!(run(&mut st, vec![kd("Escape"), ku("Escape")]), (vec![Cancel], true));
+        assert_eq!(run(&mut st, vec![up(FN)]).0, vec![]);
+
+        let mut st = state("Fn", "Fn+Space");
+        run(&mut st, vec![down(FN)]);
+        st.dictation_active = true;
+        assert_eq!(run(&mut st, vec![kd("Space"), ku("Space"), up(FN)]), (vec![TogglePressed, HoldReleased], false));
+        assert_eq!(run(&mut st, vec![kd("Space"), ku("Space")]), (vec![], false));
+    }
+
+    #[test]
+    fn active_dictation_still_yields_to_matched_command_chords() {
+        let mut st = state("Fn", "");
+        st.set_command_bindings(None, parse("Fn+KeyK").unwrap());
+        run(&mut st, vec![down(FN)]);
+        st.dictation_active = true;
+        assert_eq!(run(&mut st, vec![kd("KeyK"), ku("KeyK"), up(FN)]).0, vec![HoldAborted, CommandTogglePressed]);
+
+        let mut st = state("Fn", "");
+        st.set_command_bindings(parse("Fn+AltRight").unwrap(), None);
+        run(&mut st, vec![down(FN)]);
+        st.dictation_active = true;
+        assert_eq!(run(&mut st, vec![down(ALT_RIGHT)]).0, vec![HoldAborted, CommandHoldPressed]);
     }
 
     #[test]

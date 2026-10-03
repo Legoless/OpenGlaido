@@ -6,6 +6,7 @@ import {
   AudioWaveform,
   Check,
   FlaskConical,
+  Focus,
   Search,
   SunMoon,
   VolumeX,
@@ -319,6 +320,79 @@ export const BAR_LOCATIONS = [
   { value: "high", label: "High" },
 ];
 
+export function DictationBehaviorSettings({ config, save, errorNote }: {
+  config: Pick<TranscriptionConfig, "copy_to_clipboard" | "cancel_on_focus_change" | "mute_background" | "sound_feedback" | "bar_location">;
+  save: SaveConfig;
+  errorNote: (key: keyof TranscriptionConfig) => React.ReactNode;
+}) {
+  return (
+    <>
+      <SettingsSection label={t("Behavior")} />
+      <SettingsRow
+        icon={Clipboard}
+        title={t("Copy to clipboard")}
+        description={t("Also copy transcribed text to the clipboard after pasting")}
+        note={errorNote("copy_to_clipboard")}
+      >
+        <Toggle
+          on={config.copy_to_clipboard}
+          onChange={(v) => save({ copy_to_clipboard: v })}
+          label={t("Copy to clipboard")}
+        />
+      </SettingsRow>
+      <SettingsRow
+        icon={Focus}
+        title={t("Cancel when focus changes")}
+        description={t("Stop dictation if you switch to another window or field.")}
+        note={errorNote("cancel_on_focus_change")}
+      >
+        <Toggle
+          on={config.cancel_on_focus_change}
+          onChange={(v) => save({ cancel_on_focus_change: v })}
+          label={t("Cancel when focus changes")}
+        />
+      </SettingsRow>
+      <SettingsRow
+        icon={VolumeX}
+        title={IS_MAC ? t("Mute background") : t("Mute system audio")}
+        description={t("Mute your default output device while OpenGlaido is recording")}
+        note={errorNote("mute_background")}
+      >
+        <Toggle
+          on={config.mute_background}
+          onChange={(v) => save({ mute_background: v })}
+          label={t("Mute background")}
+        />
+      </SettingsRow>
+      <SettingsRow
+        icon={Music}
+        title={t("Interaction sounds")}
+        description={t("Play audio feedback when recording starts and stops")}
+        note={errorNote("sound_feedback")}
+      >
+        <Toggle
+          on={config.sound_feedback}
+          onChange={(v) => save({ sound_feedback: v })}
+          label={t("Interaction sounds")}
+        />
+      </SettingsRow>
+      <SettingsRow
+        icon={MapPin}
+        title={t("Dictation bar location")}
+        description={t("Choose how high the dictation bar appears on screen")}
+        note={errorNote("bar_location")}
+      >
+        <Dropdown
+          value={config.bar_location}
+          options={BAR_LOCATIONS.map((o) => ({ ...o, label: t(o.label) }))}
+          onChange={(v) => v && save({ bar_location: v })}
+          className="w-[132px]"
+        />
+      </SettingsRow>
+    </>
+  );
+}
+
 const THEMES = [
   { value: "dark", label: "Dark" },
   { value: "light", label: "Light" },
@@ -528,56 +602,7 @@ export function SettingsModal({
               >
                 <OutlineButton onClick={() => setLanguagesOpen(true)}>{t("Change")}</OutlineButton>
               </SettingsRow>
-              <SettingsSection label={t("Behavior")} />
-              <SettingsRow
-                icon={Clipboard}
-                title={t("Copy to clipboard")}
-                description={t("Also copy transcribed text to the clipboard after pasting")}
-                note={errorNote("copy_to_clipboard")}
-              >
-                <Toggle
-                  on={config.copy_to_clipboard}
-                  onChange={(v) => save({ copy_to_clipboard: v })}
-                  label={t("Copy to clipboard")}
-                />
-              </SettingsRow>
-              <SettingsRow
-                icon={VolumeX}
-                title={IS_MAC ? t("Mute background") : t("Mute system audio")}
-                description={t("Mute your default output device while OpenGlaido is recording")}
-                note={errorNote("mute_background")}
-              >
-                <Toggle
-                  on={config.mute_background}
-                  onChange={(v) => save({ mute_background: v })}
-                  label={t("Mute background")}
-                />
-              </SettingsRow>
-              <SettingsRow
-                icon={Music}
-                title={t("Interaction sounds")}
-                description={t("Play audio feedback when recording starts and stops")}
-                note={errorNote("sound_feedback")}
-              >
-                <Toggle
-                  on={config.sound_feedback}
-                  onChange={(v) => save({ sound_feedback: v })}
-                  label={t("Interaction sounds")}
-                />
-              </SettingsRow>
-              <SettingsRow
-                icon={MapPin}
-                title={t("Dictation bar location")}
-                description={t("Choose how high the dictation bar appears on screen")}
-                note={errorNote("bar_location")}
-              >
-                <Dropdown
-                  value={config.bar_location}
-                  options={BAR_LOCATIONS.map((o) => ({ ...o, label: t(o.label) }))}
-                  onChange={(v) => v && save({ bar_location: v })}
-                  className="w-[132px]"
-                />
-              </SettingsRow>
+              <DictationBehaviorSettings config={config} save={save} errorNote={errorNote} />
             </>
           )}
 

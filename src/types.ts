@@ -58,6 +58,7 @@ export interface TranscriptionConfig {
   hotkey_hold: string;
   hotkey_toggle: string;
   enter_to_stop: boolean;
+  cancel_on_focus_change: boolean;
   input_device?: string | null;
   copy_to_clipboard: boolean;
   bar_location: string;

@@ -198,6 +198,11 @@ impl HotkeyEngine {
         self.update_armed(|st| st.recording = recording);
     }
 
+    /// Preserves active dictation holds through input that moves focus or edits text.
+    pub fn set_dictation_active(&self, active: bool) {
+        self.lock().dictation_active = active;
+    }
+
     /// Screen rect (points) of the dictation bar's cancel "x", or None while it isn't shown.
     /// macOS only: the tap turns a click there into `HotkeyEvent::Cancel`.
     pub fn set_cancel_area(&self, area: Option<[f64; 4]>, processing: bool) {

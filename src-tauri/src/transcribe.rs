@@ -33,6 +33,7 @@ pub struct TranscriptionConfig {
     pub hotkey_hold: String,        // push-to-talk binding, see hotkeys.rs ("" = disabled)
     pub hotkey_toggle: String,      // hands-free binding
     pub enter_to_stop: bool,        // Enter stops & pastes while dictating hands-free
+    pub cancel_on_focus_change: bool, // cancel dictation when the original window or field loses focus
     pub input_device: Option<String>, // cpal device name; None = system default
     pub copy_to_clipboard: bool,    // false = restore the previous clipboard text after pasting
     pub bar_location: String,       // "bottom" | "raised" | "high"
@@ -139,6 +140,7 @@ impl Default for TranscriptionConfig {
             hotkey_hold: hotkeys::default_hold().to_string(),
             hotkey_toggle: hotkeys::default_toggle().to_string(),
             enter_to_stop: false,
+            cancel_on_focus_change: false,
             input_device: None,
             copy_to_clipboard: false,
             bar_location: "bottom".to_string(),
@@ -739,6 +741,19 @@ mod tests {
         assert_eq!(cfg.bar_location, "bottom");
         assert!(cfg.show_in_menu_bar && cfg.show_in_dock && !cfg.copy_to_clipboard);
         assert_eq!(serde_json::from_str::<TranscriptionConfig>("{}").unwrap(), TranscriptionConfig::default());
+    }
+
+    #[test]
+    fn cancel_on_focus_change_is_opt_in_and_persisted() {
+        assert!(!TranscriptionConfig::default().cancel_on_focus_change);
+        let legacy = TranscriptionConfig::from_json(r#"{"api_key":"k","enter_to_stop":true}"#).unwrap();
+        assert!(!legacy.cancel_on_focus_change);
+        for enabled in [false, true] {
+            let cfg = TranscriptionConfig::from_json(&json!({ "cancel_on_focus_change": enabled }).to_string()).unwrap();
+            assert_eq!(cfg.cancel_on_focus_change, enabled);
+            let saved = serde_json::to_string(&cfg).unwrap();
+            assert_eq!(TranscriptionConfig::from_json(&saved).unwrap(), cfg);
+        }
     }
 
     #[test]

@@ -18,6 +18,26 @@ pub struct ContextSnapshot {
     pid: i32,
 }
 
+/// Native app, window and focused-control identity; text, titles and caret position are excluded.
+#[derive(Clone)]
+pub struct FocusTarget {
+    pid: u32,
+    #[cfg(target_os = "macos")]
+    window: mac::FocusElement,
+    #[cfg(target_os = "macos")]
+    field: mac::FocusElement,
+    #[cfg(not(target_os = "macos"))]
+    window: usize,
+    #[cfg(not(target_os = "macos"))]
+    field: usize,
+}
+
+impl FocusTarget {
+    pub fn same_focus(&self, other: &Self) -> bool {
+        self.pid == other.pid && self.window == other.window && self.field == other.field
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 const CONTEXT_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -72,10 +92,10 @@ fn url_from_title(title: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{app_icon, capture_context, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
+pub use mac::{app_icon, capture_context, capture_focus, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
 
 #[cfg(not(target_os = "macos"))]
-pub use other::{app_icon, capture_context, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
+pub use other::{app_icon, capture_context, capture_focus, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -102,10 +122,43 @@ mod mac {
         fn AXUIElementSetAttributeValue(element: AXUIElementRef, attribute: *const c_void, value: *const c_void) -> i32;
         fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f32) -> i32;
         fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
+        fn AXUIElementGetTypeID() -> usize;
+    }
+
+    #[link(name = "CoreFoundation", kind = "framework")]
+    extern "C" {
+        fn CFEqual(first: *const c_void, second: *const c_void) -> u8;
+        fn CFGetTypeID(value: *const c_void) -> usize;
     }
 
     /// An owned CF/AX object (toll-free bridged, so objc2 can release and downcast it).
     type Ax = Retained<AnyObject>;
+
+    #[derive(Clone)]
+    pub(super) struct FocusElement(Ax);
+
+    // SAFETY: these owned references are AXUIElement CF identity objects, not arbitrary Cocoa
+    // objects. After capture they are only retained/released or compared with CFEqual, never
+    // mutated or used for AX messaging. Core Foundation permits immutable objects across threads.
+    unsafe impl Send for FocusElement {}
+    unsafe impl Sync for FocusElement {}
+
+    impl PartialEq for FocusElement {
+        fn eq(&self, other: &Self) -> bool {
+            unsafe { CFEqual(Retained::as_ptr(&self.0).cast(), Retained::as_ptr(&other.0).cast()) != 0 }
+        }
+    }
+
+    impl FocusElement {
+        fn for_process(value: Ax, expected_pid: i32) -> Option<Self> {
+            let ptr = Retained::as_ptr(&value).cast();
+            let mut pid = 0;
+            let valid = unsafe {
+                CFGetTypeID(ptr) == AXUIElementGetTypeID() && AXUIElementGetPid(ptr, &mut pid) == 0 && pid == expected_pid
+            };
+            valid.then_some(Self(value))
+        }
+    }
 
     /// Takes ownership of a +1 CF reference.
     fn own(ptr: *const c_void) -> Option<Ax> {
@@ -206,6 +259,37 @@ mod mac {
             let name = app.localizedName().map(|n| n.to_string()).unwrap_or_else(|| bundle_id.clone());
             Some(ContextSnapshot { context: AppContext { bundle_id, name, url: None }, pid: app.processIdentifier() })
         })
+    }
+
+    /// Missing permission and incomplete AX snapshots are inconclusive.
+    pub fn capture_focus() -> Option<FocusTarget> {
+        autoreleasepool(|_| {
+            let pid = NSWorkspace::sharedWorkspace().frontmostApplication()?.processIdentifier();
+            let deadline = Instant::now() + CONTEXT_BUDGET;
+            let app = app_element(pid)?;
+            // Initialize Chromium before recording its field identity. A later context lookup
+            // must not be the operation that first exposes the browser's accessibility tree.
+            enable_web_accessibility(&app, pid, deadline);
+            let read = || {
+                Some(FocusTarget {
+                    pid: pid as u32,
+                    window: FocusElement::for_process(attr(&app, "AXFocusedWindow", deadline)?, pid)?,
+                    field: FocusElement::for_process(attr(&app, "AXFocusedUIElement", deadline)?, pid)?,
+                })
+            };
+            let focus = read().or_else(|| {
+                enable_web_accessibility(&app, pid, deadline);
+                read()
+            })?;
+            // AX lookups can outlive the foreground app; discard a mixed snapshot.
+            (NSWorkspace::sharedWorkspace().frontmostApplication()?.processIdentifier() == pid).then_some(focus)
+        })
+    }
+
+    #[cfg(test)]
+    pub(super) fn test_focus_target(pid: u32, window: i32, field: i32) -> FocusTarget {
+        // App identity references exercise CFEqual without reading any live UI attributes.
+        FocusTarget { pid, window: FocusElement(app_element(window).unwrap()), field: FocusElement(app_element(field).unwrap()) }
     }
 
     pub fn resolve_context(mut target: ContextSnapshot, selection: bool) -> (AppContext, Option<String>) {
@@ -344,6 +428,31 @@ mod other {
         (target.context, None)
     }
 
+    /// Window and HWND-backed focused-control identity, without reading text or caret state.
+    pub fn capture_focus() -> Option<FocusTarget> {
+        #[cfg(windows)]
+        unsafe {
+            use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetGUIThreadInfo, GetWindowThreadProcessId, GUITHREADINFO};
+            let window = GetForegroundWindow();
+            if window.0.is_null() {
+                return None;
+            }
+            let mut pid = 0;
+            let thread = GetWindowThreadProcessId(window, Some(&mut pid));
+            if thread == 0 || pid == 0 {
+                return None;
+            }
+            let mut info = GUITHREADINFO { cbSize: std::mem::size_of::<GUITHREADINFO>() as u32, ..Default::default() };
+            GetGUIThreadInfo(thread, &mut info).ok()?;
+            if info.hwndFocus.0.is_null() || info.hwndActive != window || GetForegroundWindow() != window {
+                return None;
+            }
+            return Some(FocusTarget { pid, window: window.0 as usize, field: info.hwndFocus.0 as usize });
+        }
+        #[allow(unreachable_code)]
+        None
+    }
+
     /// Foreground process on Windows: "slack.exe" as the id, "slack" as the name. No URL.
     // ponytail: Windows has no browser URL / selection / app list / icons yet (UI Automation needed).
     pub fn current_context() -> Option<AppContext> {
@@ -396,6 +505,25 @@ mod other {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_identity_distinguishes_apps_windows_and_fields() {
+        fn target(pid: u32, window: usize, field: usize) -> FocusTarget {
+            #[cfg(target_os = "macos")]
+            {
+                mac::test_focus_target(pid, window as i32, field as i32)
+            }
+            #[cfg(not(target_os = "macos"))]
+            FocusTarget { pid, window, field }
+        }
+        let original = target(1, 2, 3);
+        assert!(original.same_focus(&target(1, 2, 3)), "fresh references to the same focus stay equal");
+        assert!(!original.same_focus(&target(4, 2, 3)), "another app changes focus");
+        assert!(!original.same_focus(&target(1, 4, 3)), "another window in the same app changes focus");
+        assert!(!original.same_focus(&target(1, 2, 4)), "another field in the same window changes focus");
+        fn assert_send_sync<T: Send + Sync>() {}
+        assert_send_sync::<FocusTarget>();
+    }
 
     #[test]
     fn accessibility_calls_share_one_overall_deadline() {

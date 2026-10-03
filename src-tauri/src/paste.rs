@@ -86,10 +86,20 @@ impl Drop for DeliveryTicket {
 
 /// Explicit command paste into the focused app.
 pub fn paste_text(app: &AppHandle, text: &str, keep_in_clipboard: bool) -> Result<(), String> {
-    paste(app, text, keep_in_clipboard, None, Cancellation::default())
+    paste_text_cancellable(app, text, keep_in_clipboard, Cancellation::default())
 }
 
-/// Automatic dictation delivery requires the app captured at recording start to still be focused.
+/// Insert into whichever app/field is focused when the paste shortcut is posted.
+pub fn paste_text_cancellable(
+    app: &AppHandle,
+    text: &str,
+    keep_in_clipboard: bool,
+    cancellation: Cancellation,
+) -> Result<(), String> {
+    paste(app, text, keep_in_clipboard, None, cancellation)
+}
+
+/// Targeted delivery requires the specified app to still be focused.
 /// If it changed (or couldn't be identified), keep the transcript on the clipboard for manual paste.
 pub fn paste_text_to(
     app: &AppHandle,
@@ -360,6 +370,13 @@ mod tests {
         assert!(!destination_matches(Some("editor"), Some("mail")));
         assert!(!destination_matches(Some("editor"), None));
         assert!(!destination_matches(Some(""), Some("")));
-        assert!(destination_matches(None, Some("editor"))); // Explicit command paste.
+    }
+
+    #[test]
+    fn current_focus_delivery_allows_switching_apps_and_fields() {
+        // Untargeted dictation follows focus at insertion; no foreground app identity is required.
+        assert!(destination_matches(None, Some("editor")));
+        assert!(destination_matches(None, Some("mail")));
+        assert!(destination_matches(None, None));
     }
 }

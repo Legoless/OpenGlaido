@@ -154,6 +154,7 @@ pub struct Session {
     context_task: Option<tokio::sync::oneshot::Receiver<(AppContext, Option<String>)>>,
     delivery: Option<paste::DeliveryTicket>,
     pub processing: Option<processing::Job>,
+    focus: Option<frontmost::FocusTarget>,
 }
 
 impl Session {
@@ -799,11 +800,38 @@ fn interrupt_capture(app: &AppHandle, started: Instant) {
         capture
     };
     match capture {
-        Ok((recording, duration, session)) => {
+        Ok(Some((recording, duration, session))) => {
             tauri::async_runtime::spawn(process_recording(app.clone(), recording, duration, session));
         }
+        Ok(None) => {}
         Err(error) => report_error(app, error),
     }
+}
+
+fn focus_cancel_matches(mode: Mode, current: Option<Instant>, started: Instant) -> bool {
+    mode != Mode::Idle && current == Some(started)
+}
+
+// Only the opt-in path makes Accessibility queries. Failed snapshots are inconclusive.
+fn watch_recording_focus(app: &AppHandle, started: Instant, original: frontmost::FocusTarget) {
+    let app = app.clone();
+    std::thread::spawn(move || loop {
+        std::thread::sleep(Duration::from_millis(100));
+        let state = app.state::<AppState>();
+        if *state.recording_start.lock().unwrap() != Some(started) {
+            break;
+        }
+        if frontmost::capture_focus().is_some_and(|current| !original.same_focus(&current)) {
+            // Serialize with stop/start and check the session again after the native query. A
+            // stale focus observation must never cancel a newer recording or pending response.
+            let mut mode = state.mode.lock().unwrap();
+            if focus_cancel_matches(*mode, *state.recording_start.lock().unwrap(), started) {
+                cancel_capture(&app, &state);
+                set_mode(&app, &state, &mut mode, Mode::Idle);
+            }
+            break;
+        }
+    });
 }
 
 // Caller holds the mode lock. Keeps the engine's Esc/Enter arming in sync with `mode`.
@@ -812,6 +840,9 @@ fn set_mode(app: &AppHandle, state: &AppState, mode: &mut Mode, next: Mode) {
     state.recording.store(next != Mode::Idle, Ordering::SeqCst);
     let engine = app.state::<HotkeyEngine>();
     engine.set_recording(next != Mode::Idle);
+    if next == Mode::Idle {
+        engine.set_dictation_active(false);
+    }
     let submit = submit_enabled(next, &state.config.lock().unwrap());
     engine.set_submit_enabled(submit);
     // A Fn hold upgraded with Space shows its cancel button. Only once the bar shows the
@@ -842,6 +873,11 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     let (device, sound_on, mute, beta) = (
         config.input_device.clone(), config.sound_feedback, config.mute_background, config.beta_features,
     );
+    let focus = if purpose == Purpose::Dictation && config.cancel_on_focus_change {
+        frontmost::capture_focus()
+    } else {
+        None
+    };
     let target = frontmost::capture_context();
     let context = target.as_ref().map(|target| target.context.clone());
     let context_task = target.map(|target| {
@@ -869,6 +905,12 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     state.recording.store(true, Ordering::SeqCst);
     state.command.store(purpose == Purpose::Command, Ordering::SeqCst);
     state.hands_free.store(is_hands_free(next), Ordering::SeqCst);
+    // The modifier-only shortcut grace is over. Window switching must no longer spoil this
+    // dictation hold, including while a slow microphone is opening.
+    app.state::<HotkeyEngine>().set_dictation_active(purpose == Purpose::Dictation);
+    if let Some(original) = focus.as_ref() {
+        watch_recording_focus(app, started, original.clone());
+    }
     update_hud(app);
     let fell_back = match state.recorder.start_recording_streamed(
         device.as_deref(), input, if sound_on { CHIME_TRIM_MS } else { 0 },
@@ -901,7 +943,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         output::mute_after(&state.db.app_dir, Duration::from_millis(if sound_on { 250 } else { 0 }));
     }
     *state.session.lock().unwrap() = Some(Session {
-        purpose, context, selection: None, chime: sound_on, config, live, context_task, delivery: None, processing: None,
+        purpose, context, selection: None, chime: sound_on, config, live, context_task, delivery: None, processing: None, focus,
         recorded_at: (chrono::Utc::now() - chrono::Duration::from_std(started.elapsed()).unwrap_or_default()).to_rfc3339(),
     });
     spawn_level_meter(app, started);
@@ -911,11 +953,19 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
 // Switch to processing before microphone teardown or output restoration can block the worker.
 fn end_recording_feedback(app: &AppHandle, state: &AppState) {
     state.recording.store(false, Ordering::SeqCst);
+    app.state::<HotkeyEngine>().set_dictation_active(false);
     update_hud(app);
 }
 
-// Caller holds the mode lock. Returns the recording, its duration and its session.
-fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Session), String> {
+// Caller holds the mode lock. None means focus cancellation, with no transcription job created.
+fn end_capture(app: &AppHandle, state: &AppState) -> Result<Option<(Recording, i64, Session)>, String> {
+    let focus = state.session.lock().unwrap().as_ref().and_then(|s| s.focus.clone());
+    // Also check at stop: a release queued during microphone opening can beat the watcher to
+    // the mode lock, and a change in the last polling interval must not be transcribed either.
+    if focus.is_some_and(|original| frontmost::capture_focus().is_some_and(|current| !original.same_focus(&current))) {
+        cancel_capture(app, state);
+        return Ok(None);
+    }
     let job = job_started(app);
     end_recording_feedback(app, state);
     let mut session = state.session.lock().unwrap().take().unwrap_or_else(|| Session {
@@ -929,6 +979,7 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         context_task: None,
         delivery: None,
         processing: None,
+        focus: None,
     });
     session.processing = Some(job);
     let duration_ms = state
@@ -958,7 +1009,7 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<(Recording, i64, Ses
         session.delivery = Some(paste::reserve_delivery());
     }
     recording
-        .map(|r| (r, duration_ms, session))
+        .map(|r| Some((r, duration_ms, session)))
         .map_err(|e| format!("Recording failed: {}", e))
 }
 
@@ -1061,7 +1112,7 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
             end_recording_feedback(app, &state);
         }
         Effect::Stop => match end_capture(app, &state) {
-            Ok((recording, duration_ms, session)) => match session.purpose {
+            Ok(Some((recording, duration_ms, session))) => match session.purpose {
                 _ if recording.interruption.is_some() => {
                     tauri::async_runtime::spawn(process_recording(app.clone(), recording, duration_ms, session));
                 }
@@ -1075,6 +1126,7 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
                     });
                 }
             },
+            Ok(None) => {}
             Err(e) => report_error(app, e),
         },
         Effect::Cancel => cancel_capture(app, &state),
@@ -1304,7 +1356,6 @@ async fn transcribe_and_paste(
     let keep_in_clipboard = config.copy_to_clipboard || !can_paste;
     let text = final_text.clone();
     let paste_app = app.clone();
-    let target_app_id = context.as_ref().map(|c| c.bundle_id.clone());
     let delivery = session.delivery.take();
     if let Some(ticket) = delivery.as_ref() {
         if cancellation.run(ticket.wait()).await.is_err() {
@@ -1313,12 +1364,12 @@ async fn transcribe_and_paste(
         }
     }
     let activity = app.state::<updater::UpdateState>().activity().map_err(Notice::error)?;
-    eprintln!("Dictation paste: target={:?} accessibility={} chars={}", context.as_ref().map(|c| c.bundle_id.as_str()), can_paste, final_text.chars().count());
+    eprintln!("Dictation paste: current focus accessibility={} chars={}", can_paste, final_text.chars().count());
     match tauri::async_runtime::spawn_blocking(move || {
         // The native operation owns its turn even if the awaiting task is cancelled.
         let _delivery = delivery;
         let _activity = activity;
-        paste::paste_text_to_cancellable(&paste_app, &text, keep_in_clipboard, target_app_id.as_deref(), cancellation)
+        paste::paste_text_cancellable(&paste_app, &text, keep_in_clipboard, cancellation)
     }).await {
         Ok(Ok(())) if !can_paste => report_error(
             app,
@@ -1355,7 +1406,7 @@ async fn start_recording(app: AppHandle, state: State<'_, AppState>) -> Result<(
 
 #[tauri::command]
 async fn stop_recording_and_process(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let (recording, duration_ms, session) = {
+    let capture = {
         let mut mode = state.mode.lock().unwrap();
         if *mode == Mode::Idle {
             return Err("Not recording".to_string());
@@ -1364,6 +1415,7 @@ async fn stop_recording_and_process(app: AppHandle, state: State<'_, AppState>) 
         set_mode(&app, &state, &mut mode, Mode::Idle);
         capture.inspect_err(|e| report_error(&app, e))?
     };
+    let Some((recording, duration_ms, session)) = capture else { return Ok(()) };
     match session.purpose {
         _ if recording.interruption.is_some() => process_recording(app, recording, duration_ms, session).await,
         Purpose::Dictation => process_recording(app, recording, duration_ms, session).await,
@@ -2003,6 +2055,17 @@ fn prepare_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn focus_cancellation_only_matches_the_active_recording() {
+        let original = Instant::now();
+        let newer = original + Duration::from_secs(1);
+        assert!(focus_cancel_matches(Mode::Hold, Some(original), original));
+        assert!(focus_cancel_matches(Mode::HandsFree, Some(original), original));
+        assert!(!focus_cancel_matches(Mode::Idle, Some(original), original));
+        assert!(!focus_cancel_matches(Mode::Hold, None, original));
+        assert!(!focus_cancel_matches(Mode::Hold, Some(newer), original));
+    }
     use HotkeyEvent::*;
 
     const SHORT: Duration = Duration::from_millis(100);
@@ -2310,7 +2373,7 @@ mod tests {
         let original = AppContext { bundle_id: "com.google.Chrome".into(), name: "Chrome".into(), url: None };
         let mut session = Session {
             purpose: Purpose::Dictation, context: Some(original.clone()), selection: None,
-            chime: false, config: TranscriptionConfig::default(), live: None, context_task: None, delivery: None, processing: None,
+            chime: false, config: TranscriptionConfig::default(), live: None, context_task: None, delivery: None, processing: None, focus: None,
             recorded_at: chrono::Utc::now().to_rfc3339(),
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
