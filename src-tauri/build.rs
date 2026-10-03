@@ -5,6 +5,8 @@ fn main() {
     if macos {
         stage_llama_dylibs();
         stage_native_stt();
+        stage_native_vibe();
+        stage_microsoft_runtime();
     }
     // With bundle.macOS.frameworks set, this copies libs/*.dylib to target/Frameworks and adds the
     // @executable_path/../Frameworks rpath. That covers both `tauri dev` and the bundled .app.
@@ -48,6 +50,33 @@ fn stage_native_stt() {
         .status()
         .expect("Could not start the native speech helper build");
     assert!(status.success(), "Native speech helper build failed");
+}
+
+fn stage_native_vibe() {
+    for path in ["../native-vibe", "../scripts/build-native-vibe.sh"] { println!("cargo:rerun-if-changed={path}"); }
+    let target = env::var("TARGET").unwrap();
+    let output = env::var("OUT_DIR").unwrap();
+    let cache = Path::new(&output).ancestors().nth(4).unwrap().join("native-vibe").join(&target);
+    let status = Command::new("/bin/bash").arg("../scripts/build-native-vibe.sh").arg(target).arg(cache).status().expect("Could not build Microsoft BitNet speech helper");
+    assert!(status.success(), "Microsoft BitNet speech helper build failed");
+}
+
+// PyInstaller runs only for a native app build/dev launch, not Cargo verification in CI.
+// Stage its already-built folder beside the development executable when it is available.
+fn stage_microsoft_runtime() {
+    println!("cargo:rerun-if-changed=microsoft-runtime");
+    let source = Path::new("microsoft-runtime");
+    // Tauri also resolves bundle resources during `cargo test`/CI. An empty
+    // marker lets those checks run without freezing the optional model runtime.
+    if !source.is_dir() {
+        fs::create_dir_all(source).expect("Could not create Microsoft runtime resource folder");
+        fs::write(source.join("UNBUILT.txt"), "Run the app build to package the Microsoft speech runtime.\n").unwrap();
+    }
+    if !source.join("openglaido-microsoft").is_file() { return; }
+    let output = env::var("OUT_DIR").unwrap();
+    let profile = Path::new(&output).ancestors().nth(3).unwrap();
+    let status = Command::new("/usr/bin/ditto").arg(source).arg(profile.join("microsoft-runtime")).status().expect("Could not stage Microsoft speech runtime");
+    assert!(status.success(), "Microsoft speech runtime staging failed");
 }
 
 // llama-cpp-2 "dynamic-link" builds libllama/libggml*.dylib. whisper-rs keeps its own ggml static, and two

@@ -1,0 +1,22 @@
+Microsoft VibeVoice
+Source: https://github.com/microsoft/VibeVoice
+Revision: 1541f590c7099820f10ea012f48d2399282df69f
+License: MIT (vendor/LICENSE)
+
+The bundled source is pinned in vendor-source.json. Local changes report
+EOS/chunk-end completion and add the full model's assistant generation prompt.
+Exhausted token budgets fail instead of producing partial text.
+
+Some VibeVoice source retains Apache-2.0 notices from the Hugging Face team
+and TSAIL team (including schedule/dpm_solver.py). The complete Apache-2.0
+license is included as APACHE-2.0.txt. Those notices remain in each file.
+
+Phi-4-multimodal model code is bundled from Microsoft revision
+93f923e1a7727d1c4f446756212d9d3e8fcc5d81 (vendor/phi4). Its MIT license
+and Apache-2.0 source notices are preserved. Weights are downloaded separately
+with checksum verification.
+
+The frozen runtime also includes third-party Python packages. Their license
+metadata must be included by the runtime build script.
+CPython's complete license and PyInstaller's bootloader license/exception are
+also included in the runtime.

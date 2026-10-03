@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.openglaido.app",
   "build": {
-    "beforeDevCommand": "bun run dev",
+    "beforeDevCommand": "bun run prepare:microsoft && bun run dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "bun run build",
+    "beforeBuildCommand": "bun run build && bun run prepare:microsoft",
     "frontendDist": "../dist"
   },
   "app": {

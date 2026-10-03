@@ -310,6 +310,59 @@ pub const CATALOG: &[CatalogModel] = &[
         license: "Apache-2.0",
         template: "mistral-v7-tekken",
     },
+    CatalogModel {
+        id: "vibevoice-bitnet",
+        kind: "stt",
+        backend: "vibe",
+        name: "VibeVoice ASR BitNet",
+        notes: "Compact CPU transcription in seven languages; dictionary hints supported.",
+        file: "vibevoice-bitnet/vibeasr-lm-i2_s-embed-q6_k.gguf",
+        url: "https://huggingface.co/microsoft/VibeVoice-ASR-BitNet/resolve/66e78021ab8f5f06133d1ab421ba4d348bda97c9/vibeasr-lm-i2_s-embed-q6_k.gguf",
+        size_bytes: 1695957664,
+        sha256: "fbe273d8dc2f2433bb25f849e19d77ea65aaa2188d12c20cee987ab6f321e002",
+        english_only: false, speed: 0, accuracy: 0, recommended: false,
+        license: "MIT", template: "",
+    },
+    CatalogModel {
+        id: "vibevoice-asr",
+        kind: "stt",
+        backend: "microsoft-python",
+        name: "VibeVoice ASR",
+        notes: "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.",
+        file: "vibevoice-asr/config.json",
+        url: "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/config.json",
+        size_bytes: 17359809626,
+        sha256: "1798906d016a625ffa0100182cad152e055bfee53fb228a45ffe25d8179b9b24",
+        english_only: false, speed: 0, accuracy: 0, recommended: false,
+        license: "MIT", template: "",
+    },
+    CatalogModel {
+        id: "vibevoice-asr-streaming-7b",
+        kind: "stt",
+        backend: "microsoft-python",
+        name: "VibeVoice ASR Streaming 7B",
+        notes: "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.",
+        file: "vibevoice-asr-streaming-7b/config.json",
+        url: "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/config.json",
+        size_bytes: 17359814972,
+        sha256: "804c6e78705f629e0e3484ce130967d43f8d5e1a728e5c1322bdd697e8704c7d",
+        english_only: false, speed: 0, accuracy: 0, recommended: false,
+        license: "MIT", template: "",
+    },
+    CatalogModel {
+        id: "phi-4-multimodal",
+        kind: "stt",
+        backend: "microsoft-python",
+        name: "Phi-4 Multimodal",
+        notes: "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.",
+        file: "phi-4-multimodal/config.json",
+        url: "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/config.json",
+        size_bytes: 11171330770,
+        sha256: "49e1c05f93d43d7f17715b779a2576235b019f587285d7d914e5b05156253f62",
+        english_only: false, speed: 0, accuracy: 0, recommended: false,
+        license: "MIT", template: "",
+    },
+
 ];
 
 #[cfg(test)]
@@ -329,7 +382,7 @@ mod tests {
                 model.file
             );
             assert!(
-                !model.file.contains(['/', '\\']),
+                super::super::valid_model_file(model.file),
                 "unsafe filename: {}",
                 model.file
             );
@@ -347,10 +400,10 @@ mod tests {
                 .expect("revision and filename");
             assert_eq!(revision.len(), 40, "unpinned model: {}", model.id);
             assert!(revision.bytes().all(|c| c.is_ascii_hexdigit()));
-            assert_eq!(file, model.file);
+            assert!(model.file.ends_with(file));
             assert!(matches!(
                 (model.kind, model.backend),
-                ("stt", "whisper" | "native") | ("llm", "llama")
+                ("stt", "whisper" | "native" | "vibe" | "microsoft-python") | ("llm", "llama")
             ));
         }
     }

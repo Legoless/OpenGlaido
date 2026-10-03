@@ -1,5 +1,6 @@
 // Cloud presets for Settings › Model. The config keeps full endpoint URLs:
 // `/audio/transcriptions` for speech to text (`/speech-to-text` for ElevenLabs), `/chat/completions` for chat.
+// Microsoft keeps the user's Azure resource root; its adapters choose the request path.
 // Any other provider id means "custom" (the user's own URL).
 import type { LocalModel, TranscriptionConfig } from "./types";
 
@@ -59,6 +60,18 @@ export const PROVIDERS: Provider[] = [
     defaultStt: "scribe_v2",
     defaultChat: "",
     keyUrl: "https://elevenlabs.io/app/developers/api-keys",
+  },
+  {
+    id: "microsoft",
+    name: "Microsoft Azure",
+    baseUrl: "",
+    stt: true,
+    chat: false,
+    sttModels: ["mai-transcribe-2", "mai-transcribe-2-streaming"],
+    chatModels: [],
+    defaultStt: "mai-transcribe-2",
+    defaultChat: "",
+    keyUrl: "https://ai.azure.com/",
   },
   {
     id: "openrouter",
@@ -125,7 +138,7 @@ export const PROVIDERS: Provider[] = [
 /** Keep completed and live choices available even when model discovery omits them. */
 export function providerModelIds(provider: Provider | undefined, kind: "stt" | "llm", discovered: string[] | undefined, current: string): string[] {
   const presets = (kind === "stt" ? provider?.sttModels : provider?.chatModels) ?? [];
-  const pinned = kind === "stt" && (provider?.id === "openai" || provider?.id === "elevenlabs") ? presets : [];
+  const pinned = kind === "stt" && ["openai", "elevenlabs", "microsoft"].includes(provider?.id ?? "") ? presets : [];
   return [...new Set([...pinned, ...(discovered?.length ? discovered : presets), current].filter(Boolean))];
 }
 
@@ -137,24 +150,33 @@ export function baseFromUrl(url: string): string {
     .replace(/\/(audio\/transcriptions|chat\/completions|speech-to-text)$/, "");
 }
 
-export function endpointUrl(baseUrl: string, kind: "stt" | "llm"): string {
+export function endpointUrl(baseUrl: string, kind: "stt" | "llm", providerId?: string): string {
   const base = baseFromUrl(baseUrl);
+  if (kind === "stt" && providerId === "microsoft") return base;
   const path = kind === "llm" ? "chat/completions" : base === "https://api.elevenlabs.io/v1" ? "speech-to-text" : "audio/transcriptions";
   return `${base}/${path}`;
+}
+
+/** Azure resource endpoints vary per account and stay editable without becoming Custom. */
+export function providerPreset(config: TranscriptionConfig, kind: LocalModel["kind"]): Provider | undefined {
+  const f = MODEL_FIELDS[kind];
+  return PROVIDERS.find((p) => p.id === config[f.provider] && (kind === "stt" ? p.stt : p.chat)
+    && (p.id === "microsoft" || endpointUrl(p.baseUrl, kind) === config[f.url]?.trim()));
 }
 
 /** Clear the visible old key immediately; save_config restores this provider's remembered key. */
 export function providerSelection(config: TranscriptionConfig, kind: LocalModel["kind"], id: string): Partial<TranscriptionConfig> | null {
   const f = MODEL_FIELDS[kind];
-  const current = PROVIDERS.find((p) => p.id === config[f.provider] && endpointUrl(p.baseUrl, kind) === config[f.url]?.trim());
+  const current = providerPreset(config, kind);
   if (id === (current?.id ?? "custom")) return null;
   const provider = PROVIDERS.find((p) => p.id === id);
   return provider
     ? {
         [f.provider]: id,
-        [f.url]: endpointUrl(provider.baseUrl, kind),
+        [f.url]: endpointUrl(provider.baseUrl, kind, provider.id),
         [f.model]: kind === "stt" ? provider.defaultStt : provider.defaultChat,
         [f.key]: "",
+        ...(kind === "stt" && id === "microsoft" ? { stt_deployment: "" } : {}),
       }
     : { [f.provider]: "custom", [f.key]: "" };
 }

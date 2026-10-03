@@ -1,0 +1,47 @@
+{
+  "repository": "https://github.com/microsoft/VibeVoice",
+  "revision": "1541f590c7099820f10ea012f48d2399282df69f",
+  "upstream_sha256": {
+    "vibevoice/__init__.py": "d2545b8b4f70348514a367a04ae38d0da3de98174a88745cdb5e64bb0e4b6839",
+    "vibevoice/modular/__init__.py": "a5453c864eedead47a9d52a03d78e8893bb9983dc3e93ca9ef1205e6803d7448",
+    "vibevoice/modular/configuration_vibevoice.py": "bcf59d8749405d5d25436923444436f6719cb9b2b403941a8a5e46f5b94873d0",
+    "vibevoice/modular/configuration_vibevoice_streaming.py": "1b4417ea2ffe5b42a58d1ee6b3c9508bc253930c2d55f8ec1f10916e36b8029e",
+    "vibevoice/modular/modeling_vibevoice.py": "6a7fbe0f967f09cd05c2cbbd270276bac8e90a6061510a82029cbf8bc680caf2",
+    "vibevoice/modular/modeling_vibevoice_asr.py": "847f1613ad836d8f2176ce90c27b4405af27b4f236320637cc693237b09facbb",
+    "vibevoice/modular/modeling_vibevoice_streaming.py": "96d402716fe2cc6284c4ad7f8b2309dd8d06d2133681e266387466116e908afb",
+    "vibevoice/modular/modeling_vibevoice_streaming_inference.py": "cb5360a62dbf3a836cea763348bc6330c4d7a422fbe572f4abf7b3c7a15bce8b",
+    "vibevoice/modular/modular_vibevoice_diffusion_head.py": "8a90ac685b9e32793749e2c58b48906758486d8b0bc0d92c8dfd141aa053852e",
+    "vibevoice/modular/modular_vibevoice_text_tokenizer.py": "03df076a9d7da769de4243e09c880d5787b2db360b568e9efecb77932b13f8e5",
+    "vibevoice/modular/modular_vibevoice_tokenizer.py": "f2fdcdaff26a685510c982634cad3be8258b299f89566a87188c932fd85f816d",
+    "vibevoice/modular/streamer.py": "e6129f46e2c61466ca96ce479c04adfaad32f483230f4d3531c96717bd16f603",
+    "vibevoice/processor/__init__.py": "957a1c1b18310691647cc0adaece1d8f940785deaa4d8d17ece2059bee0b9dc8",
+    "vibevoice/processor/audio_utils.py": "e15f184c18f754862e38082836b9c19c0f97c03c939412ab856838dc30788bcf",
+    "vibevoice/processor/vibevoice_asr_processor.py": "9fac3c57cf2f40e2d383f684fcff484a0ff2267668a8491bfeb54034763afa59",
+    "vibevoice/processor/vibevoice_processor.py": "5b28fa5247a83cb65385e06428fb112369f50723e343d7b38c7a6e7e1dfddab5",
+    "vibevoice/processor/vibevoice_streaming_processor.py": "41ff57a7da668db9099c395ab7bbee9b2cd7aa0c2f8f0b0c214768c051aa5a53",
+    "vibevoice/processor/vibevoice_tokenizer_processor.py": "3b18571d3b5cac91211412f03c3a8477bb0242173a4a53a633498cac470f1068",
+    "vibevoice/schedule/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "vibevoice/schedule/dpm_solver.py": "be10eae978afda40a6bc082806fa1e8f0f4b4e451fd1d21cec97347116ffba73",
+    "vibevoice/schedule/timestep_sampler.py": "70b003bdfdc716d09942ecfcd0e2f438bac27ea16da9527e105e008a0069dd83",
+    "vibevoice/scripts/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "LICENSE": "98a96c38494df4963951e32b81ec4effebe4c8a812ab8d9e7d185d59e86fe2fc"
+  },
+  "patches": {
+    "vibevoice/modular/modeling_vibevoice_asr.py": "Record whether a streaming chunk ended with EOS/text_chunk_end; refuse truncated transcriptions.",
+    "vibevoice/processor/vibevoice_asr_processor.py": "Honor add_generation_prompt by appending the assistant turn header with an aligned non-acoustic mask; never generate role headers as transcript text."
+  },
+  "additional_sources": [
+    {
+      "repository": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct",
+      "revision": "93f923e1a7727d1c4f446756212d9d3e8fcc5d81",
+      "upstream_sha256": {
+        "configuration_phi4mm.py": "bd9609bd47ba0c87788011e5158a8bd3e1e93165a82a9b764eb7cb048006c949",
+        "modeling_phi4mm.py": "e2b44eb7a66d6cc54524cee1ff9ba92d0658d435ea8900329ea0dbdb85c6439d",
+        "processing_phi4mm.py": "84914d3e12256b4e2186e040c9830c11408468b6774f42afe85e6f8de2626d50",
+        "speech_conformer_encoder.py": "3742827e945732cc5deea4a95e14004da037044431a94e3f3fac26239e614e3a",
+        "vision_siglip_navit.py": "7d5c053341ee9c099126fe675d5dcdc0ed5c0246f92fffdec78a1ab2f804e28d",
+        "LICENSE": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+      }
+    }
+  ]
+}

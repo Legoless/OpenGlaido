@@ -4,6 +4,7 @@ pub mod db;
 pub mod frontmost;
 pub mod hotkeys;
 pub mod models;
+pub mod microsoft;
 pub mod output;
 pub mod paste;
 pub mod processing;
@@ -854,6 +855,10 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     let (live, input) = if config.stt_source == "cloud" && realtime::is_live_model(&config.model_name) {
         let vocabulary = if purpose == Purpose::Dictation { vocab_terms(&state.db) } else { Vec::new() };
         let (live, input) = realtime::LiveTranscription::start(&config, vocabulary).map_err(Notice::model_error)?;
+        (Some(live), Some(input))
+    } else if config.stt_source == "local" && models::stt::is_live_model(&config.local_stt_model) {
+        let vocabulary = if purpose == Purpose::Dictation { vocab_terms(&state.db) } else { Vec::new() };
+        let (live, input) = models::stt::start_live(app, &config.local_stt_model, vocabulary, config.languages.clone()).map_err(Notice::model_error)?;
         (Some(live), Some(input))
     } else {
         (None, None)

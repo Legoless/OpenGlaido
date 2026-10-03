@@ -14,6 +14,9 @@ dist-ssr
 target/
 src-tauri/target/
 src-tauri/binaries/
+src-tauri/microsoft-runtime/
+native-microsoft/__pycache__/
+native-microsoft/vendor/**/__pycache__/
 data/
 release-artifacts/
 

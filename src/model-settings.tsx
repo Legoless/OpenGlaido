@@ -4,7 +4,7 @@ import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
 import { AudioLines, Box, Check, Cloud, Download, FolderOpen, Globe, KeyRound, LoaderCircle, RotateCw, Sparkles, Trash2, TriangleAlert, X } from "lucide-react";
 import { locale, t } from "./i18n";
-import { MODEL_FIELDS as FIELDS, PROVIDERS, apiKeyCheckStatus, baseFromUrl, endpointUrl, modelKeyScope, providerModelIds, providerSelection, type ApiKeyCheck } from "./providers";
+import { MODEL_FIELDS as FIELDS, PROVIDERS, apiKeyCheckStatus, baseFromUrl, endpointUrl, modelKeyScope, providerModelIds, providerPreset, providerSelection, type ApiKeyCheck } from "./providers";
 import type { DownloadProgress, LocalModel, SaveConfig, TranscriptionConfig } from "./types";
 import { Dropdown, IS_MAC, IconButton, NoteText, OutlineButton, SettingsRow, SettingsSection, TextInput } from "./ui";
 
@@ -48,6 +48,7 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
       d[id]?.state === "cancelled" ? d : { ...d, [id]: { id, received: 0, total: 0, state: "failed", error: String(e) } },
     );
   const download = (m: LocalModel) => {
+    if (m.runtime_supported === false) return;
     setDownload({ id: m.id, received: 0, total: m.size_bytes, state: "downloading", error: null });
     invoke("download_model", { id: m.id }).catch((e) => fail(m.id, e));
   };
@@ -84,8 +85,10 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
             const dl = downloads[m.id] ?? m.download;
             const downloaded = m.downloaded || dl?.state === "done";
             const failed = dl?.state === "failed";
+            const available = m.runtime_supported !== false;
             const selected = config[field] === m.id;
             const select = () => {
+              if (!available) return;
               if (!selected) save({ [field]: m.id });
               if (!downloaded && !busy(dl)) download(m);
             };
@@ -102,7 +105,8 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
                 <div
                   role="radio"
                   aria-checked={selected}
-                  tabIndex={0}
+                  aria-disabled={!available}
+                  tabIndex={available ? 0 : -1}
                   onKeyDown={(e) => {
                     if (e.key === "Enter" || e.key === " ") {
                       e.preventDefault();
@@ -125,6 +129,7 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
                     {m.english_only && <Badge>{t("English only")}</Badge>}
                   </div>
                   <span className="gs-text-body-sm-regular text-text-subdued">{t(m.notes)}</span>
+                  {!available && <NoteText tone="warning">{t("Requires an Apple Silicon Mac with macOS 14 or later.")}</NoteText>}
                   <div className="mt-0.5 flex flex-wrap items-center gap-x-4 gap-y-1">
                     <Meter label={t("Speed")} value={m.speed} />
                     <Meter label={t("Accuracy")} value={m.accuracy} />
@@ -185,10 +190,7 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
                           </IconButton>
                         ))}
                       {confirmDelete !== m.id && (
-                        <OutlineButton onClick={() => download(m)}>
-                          {failed ? <RotateCw className="size-3.5" /> : <Download className="size-3.5" />}
-                          {failed ? t("Retry") : t("Download")}
-                        </OutlineButton>
+                        <LocalModelDownloadButton model={m} failed={failed} onDownload={() => download(m)} />
                       )}
                     </>
                   )}
@@ -275,6 +277,20 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
   );
 }
 
+/** Unsupported runtimes must not start a large model download, including stale click callbacks. */
+export function LocalModelDownloadButton({ model, failed, onDownload }: {
+  model: Pick<LocalModel, "runtime_supported">;
+  failed: boolean;
+  onDownload: () => void;
+}) {
+  return (
+    <OutlineButton disabled={model.runtime_supported === false} onClick={() => model.runtime_supported !== false && onDownload()}>
+      {failed ? <RotateCw className="size-3.5" /> : <Download className="size-3.5" />}
+      {failed ? t("Retry") : t("Download")}
+    </OutlineButton>
+  );
+}
+
 /** Some local engines cannot infer the language; preserve the user's preference until they choose. */
 export function LocalModelLanguageSettings({ model, languages, save, error }: {
   model: Pick<LocalModel, "english_only" | "supported_languages" | "requires_language">;
@@ -321,17 +337,17 @@ export function LocalModelLanguageSettings({ model, languages, save, error }: {
 }
 
 /** Provider preset (or Custom URL), API key and model for one cloud section. */
-function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: TranscriptionConfig; save: SaveConfig; errorNote: ErrorNote }) {
+export function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: TranscriptionConfig; save: SaveConfig; errorNote: ErrorNote }) {
   const f = FIELDS[kind];
   const url = config[f.url] ?? "";
-  // A preset only when the saved URL is its endpoint; anything else shows as Custom so the URL can be fixed.
-  const preset = PROVIDERS.find((p) => p.id === config[f.provider] && endpointUrl(p.baseUrl, kind) === url.trim());
+  const preset = providerPreset(config, kind);
+  const microsoftStt = kind === "stt" && preset?.id === "microsoft";
   const apiKey = config[f.key];
   const keyScope = modelKeyScope(config, kind);
   const model = config[f.model] ?? "";
-  const base = preset?.baseUrl ?? baseFromUrl(url);
-  // Scribe uses presets rather than OpenAI-compatible model discovery.
-  const canList = !!base && base !== "https://api.elevenlabs.io/v1" && !(preset?.keyUrl && !apiKey);
+  const base = microsoftStt ? url.trim().replace(/\/+$/, "") : preset?.baseUrl ?? baseFromUrl(url);
+  // Azure and Scribe use presets rather than OpenAI-compatible model discovery.
+  const canList = !!base && !microsoftStt && base !== "https://api.elevenlabs.io/v1" && !(preset?.keyUrl && !apiKey);
   const [listed, setListed] = useState<{ ids: string[]; error: string | null } | null>(null);
   const [other, setOther] = useState(false);
   const [keyCheck, setKeyCheck] = useState<ApiKeyCheck | null>(null);
@@ -379,14 +395,21 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
             ? `Scribe v2 · ${t("After recording")}`
             : elevenlabsStt && id === "scribe_v2_realtime"
               ? `Scribe v2 · ${t("Real time")}`
-              : id,
+              : microsoftStt && id === "mai-transcribe-2"
+                ? `MAI Transcribe 2 · ${t("After recording")}`
+                : microsoftStt && id === "mai-transcribe-2-streaming"
+                  ? `MAI Transcribe 2 · ${t("Real time")}`
+                  : id,
     })),
-    { value: null, label: t("Other…") },
+    ...(microsoftStt ? [] : [{ value: null, label: t("Other…") }]),
   ];
 
   const pickProvider = (id: string) => {
     const patch = providerSelection(config, kind, id);
-    if (patch) save(patch);
+    if (patch) {
+      setOther(false);
+      save(patch);
+    }
   };
   const saveKey = (v: string) => {
     if (v !== apiKey) save({ [f.key]: v });
@@ -410,12 +433,17 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
           className="w-[200px] max-w-full"
         />
       </SettingsRow>
-      {!preset && (
-        <SettingsRow icon={Globe} title={t("Endpoint URL")} description={t("OpenAI-compatible endpoint")} note={errorNote(f.url)}>
+      {(!preset || microsoftStt) && (
+        <SettingsRow
+          icon={Globe}
+          title={microsoftStt ? t("Azure resource URL") : t("Endpoint URL")}
+          description={microsoftStt ? t("Use your Azure AI resource endpoint, not a transcription API URL.") : t("OpenAI-compatible endpoint")}
+          note={errorNote(f.url)}
+        >
           <CommitInput
             value={url}
-            onCommit={(v) => v !== url && save({ [f.url]: v, [f.key]: "" })}
-            placeholder={endpointUrl("https://example.com/v1", kind)}
+            onCommit={(v) => v !== url && save({ [f.url]: v, [f.key]: "", ...(microsoftStt ? { stt_deployment: "" } : {}) })}
+            placeholder={microsoftStt ? "https://your-resource.services.ai.azure.com" : endpointUrl("https://example.com/v1", kind)}
           />
         </SettingsRow>
       )}
@@ -452,14 +480,20 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
       <SettingsRow
         icon={Box}
         title={t("Model")}
-        description={(openaiStt && model === "gpt-live-transcribe") || (elevenlabsStt && model === "scribe_v2_realtime")
+        description={(openaiStt && model === "gpt-live-transcribe") || (elevenlabsStt && model === "scribe_v2_realtime") || (microsoftStt && model === "mai-transcribe-2-streaming")
           ? t("Streams while you speak; pastes when you stop.")
-          : (openaiStt && model === "gpt-transcribe") || (elevenlabsStt && model === "scribe_v2")
+          : (openaiStt && model === "gpt-transcribe") || (elevenlabsStt && model === "scribe_v2") || (microsoftStt && model === "mai-transcribe-2")
             ? t("Transcribes after you stop recording.")
             : t("Pick one from the list or type its name")}
         note={
           <>
             {elevenlabsStt && <NoteText tone="hint">{t("Dictionary hints add 20% to ElevenLabs costs (up to 50 in real time or 100 after recording).")}</NoteText>}
+            {microsoftStt && (
+              <>
+                <NoteText tone="hint">{t("Microsoft MAI transcription is in public preview.")}</NoteText>
+                <NoteText tone="hint">{t("Dictionary recognition hints are supported after recording. Real-time mode applies replacements locally.")}</NoteText>
+              </>
+            )}
             {canList && !listed && <NoteText tone="hint">{t("Loading models…")}</NoteText>}
             {listed?.error && <NoteText tone="error">{t(listed.error)}</NoteText>}
             {errorNote(f.model)}
@@ -475,7 +509,7 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
               setOther(v === null);
               if (v && v !== model) save({ [f.model]: v });
             }}
-            className={`${openaiStt || elevenlabsStt ? "w-[300px]" : "w-[200px]"} max-w-full`}
+            className={`${openaiStt || elevenlabsStt || microsoftStt ? "w-[300px]" : "w-[200px]"} max-w-full`}
           />
           {other && (
             <CommitInput
@@ -490,6 +524,21 @@ function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: 
           )}
         </div>
       </SettingsRow>
+      {microsoftStt && model === "mai-transcribe-2-streaming" && (
+        <SettingsRow
+          icon={Box}
+          title={t("Deployment name")}
+          description={t("Your Azure realtime deployment; leave blank for the default.")}
+          note={errorNote("stt_deployment")}
+        >
+          <CommitInput
+            key={keyScope}
+            value={config.stt_deployment ?? ""}
+            onCommit={(value) => value !== config.stt_deployment && save({ stt_deployment: value })}
+            placeholder="MAI-Transcribe-2-Streaming"
+          />
+        </SettingsRow>
+      )}
     </>
   );
 }

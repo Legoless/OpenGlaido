@@ -51,20 +51,29 @@ pub async fn transcribe_cancellable(
     match model.backend {
         "whisper" => super::whisper::transcribe_cancellable(app, id, wav, languages, prompt, cancellation).await,
         "native" => super::native::transcribe_cancellable(app, id, wav, languages, cancellation).await,
+        "vibe" => super::vibe::transcribe_cancellable(app, id, wav, &prompt.into_iter().collect::<Vec<_>>(), languages, cancellation).await,
+        "microsoft-python" => super::python::transcribe_cancellable(app, id, wav, &prompt.into_iter().collect::<Vec<_>>(), languages, cancellation).await,
         _ => Err("Unsupported transcription engine".into()),
     }
 }
 
+pub fn is_live_model(id: &str) -> bool { id == "vibevoice-asr-streaming-7b" }
+
+pub fn start_live(app: &AppHandle, id: &str, vocabulary: Vec<String>, languages: Vec<String>) -> Result<(crate::realtime::LiveTranscription, crate::audio::StreamInput), String> {
+    super::python::start_live(app, id, vocabulary, languages)
+}
+
 pub fn preload(app: &AppHandle, id: &str) {
-    match super::find(id).filter(|m| m.kind == "stt").map(|m| m.backend) {
-        Some("native") => {
-            super::whisper::unload();
-            super::native::preload(app, id);
-        }
-        Some("whisper") => {
-            super::native::unload(None);
-            super::whisper::preload(app, id);
-        }
+    let backend = super::find(id).filter(|m| m.kind == "stt").map(|m| m.backend);
+    if backend != Some("whisper") { super::whisper::unload(); }
+    if backend != Some("native") { super::native::unload(None); }
+    if backend != Some("vibe") { super::vibe::unload(None); }
+    if backend != Some("microsoft-python") { super::python::unload(None); }
+    match backend {
+        Some("native") => super::native::preload(app, id),
+        Some("whisper") => super::whisper::preload(app, id),
+        Some("vibe") => super::vibe::preload(app, id),
+        Some("microsoft-python") => super::python::preload(app, id),
         _ => {}
     }
 }
@@ -72,14 +81,20 @@ pub fn preload(app: &AppHandle, id: &str) {
 pub fn unload() {
     super::whisper::unload();
     super::native::unload(None);
+    super::vibe::unload(None);
+    super::python::unload(None);
 }
 
 pub(super) fn unload_path(path: &Path) {
     super::whisper::unload_path(path);
     super::native::unload(Some(path.to_path_buf()));
+    super::vibe::unload(Some(path.to_path_buf()));
+    super::python::unload(Some(path.to_path_buf()));
 }
 
 pub fn unload_now() {
     super::native::unload_now();
+    super::vibe::unload_now();
+    super::python::unload_now();
     super::whisper::unload_now();
 }

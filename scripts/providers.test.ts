@@ -1,6 +1,6 @@
 // bun test scripts/providers.test.ts
 import { expect, test } from "bun:test";
-import { MODEL_FIELDS, PROVIDERS, apiKeyCheckStatus, applyConfigPatch, baseFromUrl, editedModelKeys, endpointUrl, modelKeyScope, providerModelIds, providerSelection, scopedConfigPatch } from "../src/providers";
+import { MODEL_FIELDS, PROVIDERS, apiKeyCheckStatus, applyConfigPatch, baseFromUrl, editedModelKeys, endpointUrl, modelKeyScope, providerModelIds, providerPreset, providerSelection, scopedConfigPatch } from "../src/providers";
 import type { TranscriptionConfig } from "../src/types";
 
 test("API key checks never carry over to a changed key, provider, endpoint or role", () => {
@@ -42,6 +42,36 @@ test("ElevenLabs offers both Scribe modes for transcription only", () => {
   expect(elevenlabs.defaultStt).toBe("scribe_v2");
   expect(providerModelIds(elevenlabs, "stt", ["another-model"], "scribe_v2_realtime"))
     .toEqual(["scribe_v2", "scribe_v2_realtime", "another-model"]);
+});
+
+test("Microsoft keeps both MAI modes and uses the account's resource root rather than an OpenAI URL", () => {
+  const microsoft = PROVIDERS.find((p) => p.id === "microsoft")!;
+  expect(microsoft.stt).toBe(true);
+  expect(microsoft.chat).toBe(false);
+  expect(microsoft.chatModels).toEqual([]);
+  expect(microsoft.defaultStt).toBe("mai-transcribe-2");
+  expect(providerModelIds(microsoft, "stt", ["another-model"], "mai-transcribe-2-streaming"))
+    .toEqual(["mai-transcribe-2", "mai-transcribe-2-streaming", "another-model"]);
+  expect(endpointUrl("https://resource.services.ai.azure.com/", "stt", "microsoft"))
+    .toBe("https://resource.services.ai.azure.com");
+  const before = {
+    stt_provider: "openai", endpoint_url: endpointUrl("https://api.openai.com/v1", "stt"), api_key: "openai-key", stt_deployment: "old-deployment",
+    llm_source: "off", llm_provider: "openai", llm_api_key: "llm-key",
+  } as TranscriptionConfig;
+  const patch = providerSelection(before, "stt", "microsoft")!;
+  expect(patch).toEqual({ stt_provider: "microsoft", endpoint_url: "", model_name: "mai-transcribe-2", api_key: "", stt_deployment: "" });
+  expect(editedModelKeys(patch)).toEqual([]);
+  const selected = { ...before, ...patch, endpoint_url: "https://resource.services.ai.azure.com", api_key: "azure-key", stt_deployment: "custom-deployment" };
+  expect(providerPreset(selected, "stt")?.id).toBe("microsoft");
+  expect(providerSelection(selected, "stt", "microsoft")).toBeNull();
+  expect(selected.llm_source).toBe("off");
+  expect(selected.llm_api_key).toBe("llm-key");
+  const scope = modelKeyScope(selected, "stt");
+  expect(modelKeyScope({ ...selected, stt_deployment: "new-deployment" }, "stt")).toBe(scope);
+  const newResource = { ...selected, endpoint_url: "https://another.services.ai.azure.com" };
+  expect(providerPreset(newResource, "stt")?.id).toBe("microsoft");
+  expect(modelKeyScope(newResource, "stt")).not.toBe(scope);
+  expect(applyConfigPatch(newResource, scopedConfigPatch(selected, { api_key: "pending-old-resource-key" }))).toBeNull();
 });
 
 test("provider endpoint URLs preserve ElevenLabs and OpenAI paths", () => {

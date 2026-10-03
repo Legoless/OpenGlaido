@@ -133,6 +133,15 @@ Existing output directories are never overwritten. Nothing is uploaded.`);
     await run(["lipo", "-verify_arch", "arm64", speechHelper]);
     await run(["codesign", "--verify", "--strict", speechHelper]);
     await run([speechHelper, "--self-test"]);
+    const bitnetHelper = join(app, "Contents", "MacOS", "openglaido-vibe");
+    await run(["lipo", "-verify_arch", "arm64", bitnetHelper]);
+    await run(["codesign", "--verify", "--strict", bitnetHelper]);
+    await run([bitnetHelper, "--self-test"]);
+    const microsoftHelper = join(app, "Contents", "Resources", "microsoft-runtime", "openglaido-microsoft");
+    await run(["lipo", "-verify_arch", "arm64", microsoftHelper]);
+    await run(["codesign", "--verify", "--strict", microsoftHelper]);
+    await run([microsoftHelper, "--self-test"]);
+    await run([microsoftHelper, "--check-runtime"]);
     for (const library of config.bundle.macOS.frameworks as string[]) {
       await run(["lipo", "-verify_arch", "arm64", join(app, "Contents", "Frameworks", basename(library))]);
     }

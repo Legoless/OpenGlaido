@@ -20,6 +20,7 @@ pub struct TranscriptionConfig {
     pub llm_model_name: Option<String>,
     // --- Models: the fields above are the cloud settings ---
     pub stt_source: String,         // "cloud" | "local"
+    pub stt_deployment: String,     // Microsoft Foundry live deployment; empty uses the model default
     pub stt_provider: String,       // cloud preset id ("groq", "openai", …, "custom")
     pub local_stt_model: String,    // models catalog id (kind "stt")
     pub llm_source: String,         // "off" | "cloud" | "local"
@@ -126,6 +127,7 @@ impl Default for TranscriptionConfig {
             llm_model_name: Some(DEFAULT_LLM_MODEL.to_string()),
             stt_source: "cloud".to_string(),
             stt_provider: "groq".to_string(),
+            stt_deployment: String::new(),
             local_stt_model: "whisper-large-v3-turbo-q5".to_string(),
             llm_source: "cloud".to_string(),
             llm_provider: "groq".to_string(),
@@ -412,6 +414,9 @@ impl TranscriptionConfig {
                 return Err(format!("Unknown local model “{id}”"));
             }
         }
+        if self.stt_source == "cloud" && self.stt_provider == "microsoft" && !self.endpoint_url.trim().is_empty() {
+            crate::microsoft::validate_endpoint(self)?;
+        }
         Ok(())
     }
 }
@@ -503,6 +508,9 @@ fn transcription_fields(config: &TranscriptionConfig, vocabulary: &[String]) -> 
 
 /// Completed cloud recording. Kept separate from the desktop handle for protocol tests.
 async fn transcribe_file(wav_bytes: Vec<u8>, config: &TranscriptionConfig, vocabulary: &[String]) -> Result<String, String> {
+    if config.stt_provider == "microsoft" || crate::microsoft::is_model(&config.model_name) {
+        return crate::microsoft::transcribe(wav_bytes, config, vocabulary).await;
+    }
     let client = http_client()?;
     let part = Part::bytes(wav_bytes)
         .file_name("audio.wav")

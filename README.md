@@ -15,6 +15,7 @@ Press your shortcut, speak naturally, and messy speech is converted to clean, fo
   - Self-hosted [faster-whisper-server](https://github.com/fedirz/faster-whisper-server)
   - Speaches, vLLM, RunPod, Modal, or OpenAI
   - Or on your Mac, offline: download Whisper, Parakeet Ultra, ARK-ASR, Qwen3-ASR, Cohere Transcribe, or Voxtral Realtime in Settings › Model. New models require macOS 12+ and transcribe after recording stops; see [sizes, languages and dictionary support](docs/local-transcription-models.md).
+  - Microsoft: MAI Transcribe 2 after recording or MAI Transcribe 2 Streaming through Azure. Offline choices are VibeVoice ASR BitNet, VibeVoice ASR, VibeVoice ASR Streaming 7B and Phi-4 Multimodal. The three larger local models require Apple Silicon and macOS 14+; see [setup, downloads and supported languages](docs/microsoft-transcription-models.md). The separate cleanup LLM can stay Off.
 - 🎯 **App Styles & Writing Modes** (VoiceInk Power Modes / Glaido Styles):
   - **Standard Clean-up:** Removes filler words (*um*, *uh*), fixes punctuation and capitalization.
   - **Email Mode:** Formats professional email prose with polite phrasing.
@@ -44,6 +45,7 @@ Press your shortcut, speak naturally, and messy speech is converted to clean, fo
 - [Rust](https://rustup.rs/) (1.91+)
 - [Bun](https://bun.sh/) (or Node.js / pnpm)
 - On macOS: [CMake](https://cmake.org/) (`brew install cmake`), which builds whisper.cpp, llama.cpp, and the bundled native speech helper. The first build downloads its pinned, checksum-verified source archive.
+- On Apple Silicon: [uv](https://docs.astral.sh/uv/getting-started/installation/) to build the self-contained Microsoft speech runtime. The first Tauri build prepares its pinned Python dependencies; users of the packaged app need no Python installation. See [the helper build instructions](native-microsoft/README.md).
 
 ### Running Locally
 ```bash

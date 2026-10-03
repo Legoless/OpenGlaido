@@ -167,5 +167,20 @@
  "13 languages; transcribes after recording in OpenGlaido.",
  "Cohere Transcribe needs one language. Choose it in Settings › Model.",
  "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.",
- "Cancelled"
+ "Cancelled",
+ "Transcription failed: check the Azure resource URL in Settings › Model",
+ "Transcription failed: check the Azure deployment name in Settings › Model",
+ "Transcription failed: choose a Microsoft transcription model",
+ "Transcription failed: Microsoft live sessions are limited to one hour; retry from History",
+ "Transcription failed: Microsoft transcription timed out",
+ "Microsoft local models require an Apple Silicon Mac with macOS 14 or later.",
+ "VibeVoice ASR BitNet",
+ "VibeVoice ASR",
+ "VibeVoice ASR Streaming 7B",
+ "Phi-4 Multimodal",
+ "Compact CPU transcription in seven languages; dictionary hints supported.",
+ "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.",
+ "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.",
+ "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.",
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido."
 ]

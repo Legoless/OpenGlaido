@@ -5,12 +5,14 @@ pub mod llama;
 pub mod whisper;
 pub mod stt;
 mod native;
+mod vibe;
+mod python;
 
 pub use catalog::CATALOG;
 
 use futures_util::StreamExt;
 use reqwest::Client;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -45,6 +47,40 @@ pub struct CatalogModel {
     pub template: &'static str,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+struct ModelFile {
+    file: String,
+    url: String,
+    size_bytes: u64,
+    sha256: String,
+}
+
+static MICROSOFT_FILES: LazyLock<HashMap<String, Vec<ModelFile>>> = LazyLock::new(|| {
+    serde_json::from_str(include_str!("microsoft-files.json")).expect("Invalid pinned Microsoft model files")
+});
+
+fn model_files(model: &CatalogModel) -> Vec<ModelFile> {
+    MICROSOFT_FILES.get(model.id).cloned().unwrap_or_else(|| vec![ModelFile {
+        file: model.file.into(), url: model.url.into(), size_bytes: model.size_bytes, sha256: model.sha256.into(),
+    }])
+}
+
+fn valid_model_file(file: &str) -> bool {
+    !file.is_empty() && !file.contains(['\\', ':', '\0']) && file.split('/').all(|part| !part.is_empty() && part != "." && part != "..")
+}
+
+fn downloaded_in(dir: &Path, model: &CatalogModel) -> bool {
+    files_ready(dir, &model_files(model))
+}
+
+fn files_ready(dir: &Path, files: &[ModelFile]) -> bool {
+    !files.is_empty() && files.iter().all(|file| valid_model_file(&file.file) && std::fs::metadata(dir.join(&file.file)).is_ok_and(|m| m.is_file() && m.len() == file.size_bytes))
+}
+
+fn partial_in(dir: &Path, model: &CatalogModel) -> u64 {
+    model_files(model).iter().map(|file| std::fs::metadata(part_path(&dir.join(&file.file))).map_or(0, |f| f.len().min(file.size_bytes))).sum()
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct DownloadProgress {
     pub id: String,
@@ -61,6 +97,7 @@ pub struct LocalModel {
     pub model: CatalogModel,
     pub supported_languages: Option<&'static [&'static str]>,
     pub requires_language: bool,
+    pub runtime_supported: bool,
     pub downloaded: bool,
     /// Bytes of an unfinished download kept for resuming (0 = none).
     pub partial_bytes: u64,
@@ -92,8 +129,8 @@ pub fn models_dir(app: &AppHandle) -> PathBuf {
 /// The model file when it is fully downloaded (exists with the catalog size).
 pub fn path_if_downloaded(app: &AppHandle, id: &str) -> Option<PathBuf> {
     let model = find(id)?;
-    let path = models_dir(app).join(model.file);
-    (std::fs::metadata(&path).ok()?.len() == model.size_bytes).then_some(path)
+    let dir = models_dir(app);
+    downloaded_in(&dir, model).then(|| dir.join(model.file))
 }
 
 /// Whether the settings still run catalog model `id` locally.
@@ -111,10 +148,11 @@ pub fn list_local_models(app: AppHandle) -> Vec<LocalModel> {
         .iter()
         .map(|m| LocalModel {
             model: m.clone(),
-            supported_languages: native::supported_languages(m.id),
+            supported_languages: match m.backend { "vibe" => Some(vibe::LANGUAGES), "microsoft-python" => python::supported_languages(m.id), _ => native::supported_languages(m.id) },
             requires_language: native::requires_language(m.id),
+            runtime_supported: m.backend != "microsoft-python" || python::supported(),
             downloaded: path_if_downloaded(&app, m.id).is_some(),
-            partial_bytes: std::fs::metadata(part_path(&dir.join(m.file))).map_or(0, |f| f.len()),
+            partial_bytes: partial_in(&dir, m),
             download: downloads.get(m.id).map(|(p, _)| p.clone()),
         })
         .collect()
@@ -133,6 +171,9 @@ fn in_flight(progress: &DownloadProgress) -> bool {
 pub async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
     let _activity = app.state::<crate::updater::UpdateState>().activity()?;
     let model = find(&id).ok_or("Unknown model")?;
+    if model.backend == "microsoft-python" && !python::supported() {
+        return Err("Microsoft local models require an Apple Silicon Mac with macOS 14 or later.".into());
+    }
     let cancel = Arc::new(AtomicBool::new(false));
     let progress = |received, state: &str, error| DownloadProgress {
         id: id.clone(),
@@ -165,13 +206,27 @@ pub async fn download_model(app: AppHandle, id: String) -> Result<(), String> {
         .read_timeout(Duration::from_secs(30))
         .build()
         .map_err(|e| e.to_string())?;
-    let dest = models_dir(&app).join(model.file);
+    let dir = models_dir(&app);
     let mut received = 0;
-    let result = download_to(&client, model.url, &dest, model.size_bytes, model.sha256, &cancel, |r, state| {
-        received = r;
-        report(progress(r, state, None));
-    })
-    .await;
+    let mut completed = 0;
+    let result = async {
+        for file in model_files(model) {
+            if !valid_model_file(&file.file) { return Err("Invalid model download path".into()); }
+            if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
+            let dest = dir.join(&file.file);
+            std::fs::create_dir_all(dest.parent().unwrap()).map_err(save_error)?;
+            if !std::fs::metadata(&dest).is_ok_and(|m| m.is_file() && m.len() == file.size_bytes) {
+                download_to(&client, &file.url, &dest, file.size_bytes, &file.sha256, &cancel, |r, state| {
+                    received = completed + r;
+                    report(progress(received, state, None));
+                }).await?;
+            }
+            completed += file.size_bytes;
+            received = completed;
+            report(progress(received, "downloading", None));
+        }
+        Ok::<_, String>(())
+    }.await;
     match result {
         Ok(()) => {
             report(progress(model.size_bytes, "done", None));
@@ -289,6 +344,7 @@ async fn download_to(
     if !hash.eq_ignore_ascii_case(sha256) {
         return Err(mismatch("The downloaded file is damaged (checksum mismatch). Try again."));
     }
+    if cancel.load(Ordering::Relaxed) { return Err("Cancelled".into()); }
     std::fs::rename(&part, dest).map_err(save_error)
 }
 
@@ -327,10 +383,14 @@ pub fn delete_model(app: AppHandle, id: String) -> Result<(), String> {
         "stt" => stt::unload_path(&path),
         _ => llama::unload_path(&path),
     }
-    for file in [part_path(&path), path] {
-        match std::fs::remove_file(&file) {
-            Err(e) if e.kind() != ErrorKind::NotFound => return Err(format!("Couldn't delete {}: {e}", file.display())),
-            _ => {}
+    for artifact in model_files(model) {
+        if !valid_model_file(&artifact.file) { return Err("Invalid model download path".into()); }
+        let target = models_dir(&app).join(&artifact.file);
+        for file in [part_path(&target), target] {
+            match std::fs::remove_file(&file) {
+                Err(e) if e.kind() != ErrorKind::NotFound => return Err(format!("Couldn't delete {}: {e}", file.display())),
+                _ => {}
+            }
         }
     }
     Ok(())
@@ -475,6 +535,40 @@ mod tests {
     use tokio::net::TcpListener;
 
     #[test]
+    fn multi_file_models_need_every_verified_companion_and_safe_paths() {
+        let dir = std::env::temp_dir().join(format!("openglaido-model-group-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("model")).unwrap();
+        let files = vec![
+            ModelFile { file: "model/decoder".into(), size_bytes: 3, url: String::new(), sha256: String::new() },
+            ModelFile { file: "model/encoder".into(), size_bytes: 4, url: String::new(), sha256: String::new() },
+        ];
+        std::fs::write(dir.join("model/decoder"), b"123").unwrap();
+        std::fs::write(dir.join("model/encoder.part"), b"1234").unwrap();
+        assert!(!files_ready(&dir, &files));
+        std::fs::rename(dir.join("model/encoder.part"), dir.join("model/encoder")).unwrap();
+        assert!(files_ready(&dir, &files));
+        std::fs::write(dir.join("model/encoder"), b"bad size").unwrap();
+        assert!(!files_ready(&dir, &files));
+        for unsafe_path in ["/outside", "../outside", "model/../../outside", "model\\outside", "C:/outside", "", "model/./weights"] { assert!(!valid_model_file(unsafe_path)); }
+        for (id, files) in MICROSOFT_FILES.iter() {
+            let model = find(id).unwrap();
+            assert_eq!(files.iter().map(|file| file.size_bytes).sum::<u64>(), model.size_bytes);
+            assert!(files.iter().any(|file| file.file == model.file));
+            for file in files {
+                assert!(valid_model_file(&file.file));
+                assert!(file.file.starts_with(&format!("{id}/")));
+                assert_eq!(file.sha256.len(), 64);
+                assert!(file.sha256.bytes().all(|byte| byte.is_ascii_hexdigit()));
+                assert!(!file.file.ends_with(".py"), "model downloads never execute new code");
+                let source = file.url.strip_prefix("https://huggingface.co/").unwrap();
+                let revision = source.split("/resolve/").nth(1).unwrap().split('/').next().unwrap();
+                assert_eq!(revision.len(), 40);
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn key_checks_use_only_known_authenticated_endpoints() {
         for (base, suffix) in [
             ("https://api.openai.com/v1", "models"),
@@ -592,7 +686,7 @@ mod tests {
     #[test]
     fn local_models_serialize_flat_for_the_ui() {
         // src/types.ts LocalModel: the catalog fields at the top level, without the prompt template.
-        let model = LocalModel { model: CATALOG[0].clone(), supported_languages: None, requires_language: false, downloaded: true, partial_bytes: 0, download: None };
+        let model = LocalModel { model: CATALOG[0].clone(), supported_languages: None, requires_language: false, runtime_supported: true, downloaded: true, partial_bytes: 0, download: None };
         let json = serde_json::to_value(model).unwrap();
         assert_eq!((json["id"].as_str(), json["size_bytes"].as_u64()), (Some(CATALOG[0].id), Some(CATALOG[0].size_bytes)));
         assert!(json["downloaded"] == true && json["download"].is_null());

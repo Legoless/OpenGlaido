@@ -1,0 +1,298 @@
+{
+  "vibevoice-bitnet": [
+    {
+      "file": "vibevoice-bitnet/vibeasr-lm-i2_s-embed-q6_k.gguf",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-BitNet/resolve/66e78021ab8f5f06133d1ab421ba4d348bda97c9/vibeasr-lm-i2_s-embed-q6_k.gguf",
+      "size_bytes": 992877600,
+      "sha256": "fbe273d8dc2f2433bb25f849e19d77ea65aaa2188d12c20cee987ab6f321e002"
+    },
+    {
+      "file": "vibevoice-bitnet/vibeasr-vae-encoder-i8_s.gguf",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-BitNet/resolve/66e78021ab8f5f06133d1ab421ba4d348bda97c9/vibeasr-vae-encoder-i8_s.gguf",
+      "size_bytes": 703080064,
+      "sha256": "4941c82608c253ec066b5cc74d3dd11a5c8fef96cccbc5b87359ef0fe4338df6"
+    }
+  ],
+  "vibevoice-asr": [
+    {
+      "file": "vibevoice-asr/config.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/config.json",
+      "size_bytes": 3520,
+      "sha256": "1798906d016a625ffa0100182cad152e055bfee53fb228a45ffe25d8179b9b24"
+    },
+    {
+      "file": "vibevoice-asr/merges.txt",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/d149729398750b98c0af14eb82c78cfe92750796/merges.txt",
+      "size_bytes": 1671839,
+      "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+    },
+    {
+      "file": "vibevoice-asr/model-00001-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00001-of-00008.safetensors",
+      "size_bytes": 2488346272,
+      "sha256": "5548c67885d423ba184bc8c33f2e9f81b582a6d119cef79907e19a274b916637"
+    },
+    {
+      "file": "vibevoice-asr/model-00002-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00002-of-00008.safetensors",
+      "size_bytes": 2389315976,
+      "sha256": "163023c61a3fb047745cbaf53ed41c1e27e515e9786a376e122bfac2ea6e687e"
+    },
+    {
+      "file": "vibevoice-asr/model-00003-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00003-of-00008.safetensors",
+      "size_bytes": 2466376368,
+      "sha256": "4e021702dfac2c52e8fdd6688de82c118be7bb7ad9b5c7988725ec63c44a64fb"
+    },
+    {
+      "file": "vibevoice-asr/model-00004-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00004-of-00008.safetensors",
+      "size_bytes": 2466376400,
+      "sha256": "b17657bb151daa117a5a4671374ac1b248acb696691a2a67ac227a1115925e30"
+    },
+    {
+      "file": "vibevoice-asr/model-00005-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00005-of-00008.safetensors",
+      "size_bytes": 2499431136,
+      "sha256": "0ed4e457268f7b02dda5cffe16b3a32614ccc2ccfe5de2db39bdd79700836406"
+    },
+    {
+      "file": "vibevoice-asr/model-00006-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00006-of-00008.safetensors",
+      "size_bytes": 2483469928,
+      "sha256": "6de8246bb042fd853b57d40995efd289ea44e4d1b611cec2e122570b8d2122bd"
+    },
+    {
+      "file": "vibevoice-asr/model-00007-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00007-of-00008.safetensors",
+      "size_bytes": 1464887482,
+      "sha256": "a2ba6960d994dc7598efc6796f85ab097da7708f4dd56095f7fccf4df8dc00e5"
+    },
+    {
+      "file": "vibevoice-asr/model-00008-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model-00008-of-00008.safetensors",
+      "size_bytes": 1089994848,
+      "sha256": "1b9d9b328f85a25b4efca712d31513c6eed9e178152cc8cf4a6f0c2cd2bb623f"
+    },
+    {
+      "file": "vibevoice-asr/model.safetensors.index.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR/resolve/d0c9efdb8d614685062c04425d91e01b6f37d944/model.safetensors.index.json",
+      "size_bytes": 120151,
+      "sha256": "1468c7b7c74fe27831d8db57871fbf15efd270c747f3f99caf689119ace658ba"
+    },
+    {
+      "file": "vibevoice-asr/tokenizer.json",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/d149729398750b98c0af14eb82c78cfe92750796/tokenizer.json",
+      "size_bytes": 7031645,
+      "sha256": "c0382117ea329cdf097041132f6d735924b697924d6f6fc3945713e96ce87539"
+    },
+    {
+      "file": "vibevoice-asr/tokenizer_config.json",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/d149729398750b98c0af14eb82c78cfe92750796/tokenizer_config.json",
+      "size_bytes": 7228,
+      "sha256": "c91efca15ceff6e9ee9424db58a6f59cd41294e550a86cbd07e3c1fb500b34f9"
+    },
+    {
+      "file": "vibevoice-asr/vocab.json",
+      "url": "https://huggingface.co/Qwen/Qwen2.5-7B/resolve/d149729398750b98c0af14eb82c78cfe92750796/vocab.json",
+      "size_bytes": 2776833,
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    }
+  ],
+  "vibevoice-asr-streaming-7b": [
+    {
+      "file": "vibevoice-asr-streaming-7b/config.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/config.json",
+      "size_bytes": 3709,
+      "sha256": "804c6e78705f629e0e3484ce130967d43f8d5e1a728e5c1322bdd697e8704c7d"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/added_tokens.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/added_tokens.json",
+      "size_bytes": 713,
+      "sha256": "d0a4c6e0954c94843fae3c966a7d0b52c7b8c0787fba5731733e6ab602245b88"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/merges.txt",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/merges.txt",
+      "size_bytes": 1671839,
+      "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00001-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00001-of-00008.safetensors",
+      "size_bytes": 2488346304,
+      "sha256": "3685d210ad49c49521e71a0cc5418ea94b20761c801dc8fc95938c4ec1ab27b3"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00002-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00002-of-00008.safetensors",
+      "size_bytes": 2389316008,
+      "sha256": "d0252f5e9bdf7e65bb0ae051c49148fd5d77e531057556eb955fc6dc72f4f0bc"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00003-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00003-of-00008.safetensors",
+      "size_bytes": 2466376400,
+      "sha256": "eeeb0c24e4a3746f16512c0d4aef84732bf8bb4dc5452782e4db356eb5fc7ce7"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00004-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00004-of-00008.safetensors",
+      "size_bytes": 2466376432,
+      "sha256": "02fec24aaf3e59cbc653b55d94665d6393543f2550364c2c8bc9e75e2a2ca3c0"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00005-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00005-of-00008.safetensors",
+      "size_bytes": 2499431160,
+      "sha256": "a78637bdc2b44f28601f7ee12503e28f5e9faedde35ff5bcdc2e7356c9a6458e"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00006-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00006-of-00008.safetensors",
+      "size_bytes": 2483469960,
+      "sha256": "5bc9dfef14c62989192ab39356da45a9ccc9f0ef82f7f7127e48c17b5bd5a2f8"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00007-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00007-of-00008.safetensors",
+      "size_bytes": 1464887514,
+      "sha256": "bb6da42b3547124eb67645fc6fb92523e93310a107872643f7df6dd75f85b4d7"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model-00008-of-00008.safetensors",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model-00008-of-00008.safetensors",
+      "size_bytes": 1089994880,
+      "sha256": "b1499fbe8bc0454eeafc1177db144679940f2456eae188299214c629d4d618b4"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/model.safetensors.index.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/model.safetensors.index.json",
+      "size_bytes": 120115,
+      "sha256": "29df2f8e046f5bd8a6d765a700fd767a9c505fa46fe9fd6d50f476c3bdcae638"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/preprocessor_config.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/preprocessor_config.json",
+      "size_bytes": 192,
+      "sha256": "99bf76b83a21385d2a8f5226edd9ec598f63e1ff7a50384dc8cf6b7753b9f9c4"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/special_tokens_map.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/special_tokens_map.json",
+      "size_bytes": 1177,
+      "sha256": "cf263f1a86f252cae2cef55ca02f001fecefc92646016f0ed2f7349238b8504d"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/tokenizer.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/tokenizer.json",
+      "size_bytes": 7032406,
+      "sha256": "38e847ed54238171badeeaeaf8760632c949336d3d54207d2d34483c56bc7d57"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/tokenizer_config.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/tokenizer_config.json",
+      "size_bytes": 9330,
+      "sha256": "badef858f0481ccaea85cf86879737f1397c61d0385cdc9b785b657407606e02"
+    },
+    {
+      "file": "vibevoice-asr-streaming-7b/vocab.json",
+      "url": "https://huggingface.co/microsoft/VibeVoice-ASR-Streaming-7B/resolve/60d858b518b4e19d404af3737f848fc185b30177/vocab.json",
+      "size_bytes": 2776833,
+      "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"
+    }
+  ],
+  "phi-4-multimodal": [
+    {
+      "file": "phi-4-multimodal/config.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/config.json",
+      "size_bytes": 4631,
+      "sha256": "49e1c05f93d43d7f17715b779a2576235b019f587285d7d914e5b05156253f62"
+    },
+    {
+      "file": "phi-4-multimodal/LICENSE",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/LICENSE",
+      "size_bytes": 1141,
+      "sha256": "c2cfccb812fe482101a8f04597dfc5a9991a6b2748266c47ac91b6a5aae15383"
+    },
+    {
+      "file": "phi-4-multimodal/added_tokens.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/added_tokens.json",
+      "size_bytes": 249,
+      "sha256": "d4f2aceb0f20b71dd1f4bcc7e052e4412946bf281840b8f83d39f259571af486"
+    },
+    {
+      "file": "phi-4-multimodal/generation_config.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/generation_config.json",
+      "size_bytes": 190,
+      "sha256": "757daa0d0e89171fe48fc3286341833e95b90bdb7dd3b02a2f8920fb09f85a38"
+    },
+    {
+      "file": "phi-4-multimodal/merges.txt",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/merges.txt",
+      "size_bytes": 2418348,
+      "sha256": "856ce61180bb689282eed6b3a6838bb1f438399be23aefe9d20eb379791fb4ad"
+    },
+    {
+      "file": "phi-4-multimodal/model-00001-of-00003.safetensors",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/model-00001-of-00003.safetensors",
+      "size_bytes": 4997504848,
+      "sha256": "c46bb03332d82f6a3eaf85bd20af388dd4d4d68b198c2203c965c7381a466094"
+    },
+    {
+      "file": "phi-4-multimodal/model-00002-of-00003.safetensors",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/model-00002-of-00003.safetensors",
+      "size_bytes": 4952333128,
+      "sha256": "b3e812c0c8acef4e7f5e34d6c9f77a7640ee4a2b93ea351921365ac62f19918d"
+    },
+    {
+      "file": "phi-4-multimodal/model-00003-of-00003.safetensors",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/model-00003-of-00003.safetensors",
+      "size_bytes": 1199389232,
+      "sha256": "7be96b7339303752634b202d3f377bcf312a03046586eca6cea23347ace1e65a"
+    },
+    {
+      "file": "phi-4-multimodal/model.safetensors.index.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/model.safetensors.index.json",
+      "size_bytes": 239890,
+      "sha256": "b67dbc7062e1ccf472faba4222d631dc42929c827fbdaed1ec8e34fe0601819a"
+    },
+    {
+      "file": "phi-4-multimodal/preprocessor_config.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/preprocessor_config.json",
+      "size_bytes": 482,
+      "sha256": "9db19b9663fb86f04c0f11d3a9b7f65a19f13d4543fb4a15bd33f82b0c92d64f"
+    },
+    {
+      "file": "phi-4-multimodal/processor_config.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/processor_config.json",
+      "size_bytes": 121,
+      "sha256": "798fc4cd09c067053af27f07f0d2b329b471c5b2eb923ceb06efa41dee660c05"
+    },
+    {
+      "file": "phi-4-multimodal/special_tokens_map.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/special_tokens_map.json",
+      "size_bytes": 473,
+      "sha256": "57491904f8680d4b52ed440f1f7ba48cad1c31ecf3eb453b03484e6ff4723ae8"
+    },
+    {
+      "file": "phi-4-multimodal/tokenizer.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/tokenizer.json",
+      "size_bytes": 15524479,
+      "sha256": "4c1b9f641d4f8b7247b8d5007dd3b6a9f6a87cb5123134fe0d326f14d10c0585"
+    },
+    {
+      "file": "phi-4-multimodal/tokenizer_config.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/tokenizer_config.json",
+      "size_bytes": 3248,
+      "sha256": "a5da2e45718db78924ad5135a58a80b0303596acf54a1dc5c912c98436ddcaf3"
+    },
+    {
+      "file": "phi-4-multimodal/vocab.json",
+      "url": "https://huggingface.co/microsoft/Phi-4-multimodal-instruct/resolve/93f923e1a7727d1c4f446756212d9d3e8fcc5d81/vocab.json",
+      "size_bytes": 3910310,
+      "sha256": "6cb65a857824fa6615bb1782d95d882617a8bbce1da0317118586b36f39e98bd"
+    }
+  ]
+}

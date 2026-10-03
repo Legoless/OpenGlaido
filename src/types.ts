@@ -45,6 +45,8 @@ export interface TranscriptionConfig {
   stt_source: "cloud" | "local";
   /** Cloud preset id (src/providers.ts) or "custom". */
   stt_provider: string;
+  /** Azure realtime deployment name; empty uses Microsoft's default name. */
+  stt_deployment: string;
   /** LocalModel id. */
   local_stt_model: string;
   llm_source: "off" | "cloud" | "local";
@@ -121,6 +123,8 @@ export interface LocalModel {
   recommended: boolean;
   license: string;
   downloaded: boolean;
+  /** false when this model's native runtime cannot run on this Mac. */
+  runtime_supported?: boolean;
   /** Bytes of an unfinished download kept for resuming (0 = none). */
   partial_bytes: number;
   /** In-flight download, if any. */

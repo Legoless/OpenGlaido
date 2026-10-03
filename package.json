@@ -12,7 +12,8 @@
     "release:check": "bun scripts/release.ts check",
     "release:verify": "bun scripts/release.ts verify",
     "release:upload": "bun scripts/release.ts upload",
-    "check:locales": "bun scripts/check-locales.ts"
+    "check:locales": "bun scripts/check-locales.ts",
+    "prepare:microsoft": "bun scripts/prepare-microsoft-runtime.ts"
   },
   "dependencies": {
     "@fontsource-variable/geist-mono": "^5.3.0",

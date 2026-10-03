@@ -1,4 +1,4 @@
-//! One push-to-talk recording per OpenAI or ElevenLabs live transcription session.
+//! One push-to-talk recording per OpenAI, ElevenLabs, or Azure MAI live session.
 use crate::audio::{AudioChunk, StreamInput};
 use crate::transcribe::TranscriptionConfig;
 use base64::{engine::general_purpose::STANDARD, Engine};
@@ -19,7 +19,7 @@ const FINAL_TIMEOUT: Duration = Duration::from_secs(45);
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub fn is_live_model(model: &str) -> bool {
-    model == "scribe_v2_realtime" || model == "gpt-live-transcribe" || model.strip_prefix("gpt-live-transcribe-").is_some_and(|suffix| {
+    model == crate::microsoft::LIVE_MODEL || model == "scribe_v2_realtime" || model == "gpt-live-transcribe" || model.strip_prefix("gpt-live-transcribe-").is_some_and(|suffix| {
         suffix.len() == 10 && suffix.bytes().enumerate().all(|(i, c)| {
             if i == 4 || i == 7 { c == b'-' } else { c.is_ascii_digit() }
         })
@@ -28,24 +28,29 @@ pub fn is_live_model(model: &str) -> bool {
 
 pub struct LiveTranscription {
     finish_tx: Option<oneshot::Sender<()>>,
+    final_timeout: Duration,
     task: tauri::async_runtime::JoinHandle<Result<String, String>>,
+    local_cancel: Option<crate::processing::Cancellation>,
 }
 
 impl LiveTranscription {
     /// Starts connecting in the background; the bounded queue preserves speech during setup.
     pub fn start(config: &TranscriptionConfig, vocabulary: Vec<String>) -> Result<(Self, StreamInput), String> {
         let elevenlabs = config.model_name == "scribe_v2_realtime";
-        let url = if elevenlabs { elevenlabs_url(config, &vocabulary)? } else { realtime_url(&config.endpoint_url)? };
+        let microsoft = config.model_name == crate::microsoft::LIVE_MODEL;
+        let final_timeout = if microsoft { Duration::from_secs(240) } else { FINAL_TIMEOUT };
+        let setup_timeout = if microsoft { Duration::from_secs(30) } else { IO_TIMEOUT };
+        let url = if microsoft { crate::microsoft::live_url(config)? } else if elevenlabs { elevenlabs_url(config, &vocabulary)? } else { realtime_url(&config.endpoint_url)? };
         if config.api_key.trim().is_empty() {
             return Err("Transcription failed: check the API key in Settings › Model".into());
         }
         let mut request = url.into_client_request().map_err(|_| "Transcription failed: check the endpoint URL in Settings › Model")?;
-        let (header, value) = if elevenlabs { ("xi-api-key", config.api_key.trim().to_string()) } else { ("Authorization", format!("Bearer {}", config.api_key.trim())) };
+        let (header, value) = if microsoft { ("api-key", config.api_key.trim().to_string()) } else if elevenlabs { ("xi-api-key", config.api_key.trim().to_string()) } else { ("Authorization", format!("Bearer {}", config.api_key.trim())) };
         let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
             .map_err(|_| "Transcription failed: check the API key in Settings › Model")?;
         value.set_sensitive(true);
         request.headers_mut().insert(header, value);
-        let session = (!elevenlabs).then(|| session_update(config, &vocabulary));
+        let session = (!elevenlabs).then(|| if microsoft { crate::microsoft::live_session(config, RATE) } else { session_update(config, &vocabulary) });
         let api_key = config.api_key.trim().to_string();
         // ponytail: bounded callback queue; batch in the audio worker if very small buffers need more setup time.
         let (tx, rx) = mpsc::channel(2048);
@@ -53,7 +58,7 @@ impl LiveTranscription {
         let overflow_check = overflowed.clone();
         let (finish_tx, finish_rx) = oneshot::channel();
         let task = tauri::async_runtime::spawn(async move {
-            let (mut socket, _) = timeout(IO_TIMEOUT, connect_async(request)).await
+            let (mut socket, _) = timeout(setup_timeout, connect_async(request)).await
                 .map_err(|_| "Transcription failed: live transcription timed out".to_string())?
                 .map_err(|error| match error {
                     tokio_tungstenite::tungstenite::Error::Http(response) => match response.status().as_u16() {
@@ -62,17 +67,27 @@ impl LiveTranscription {
                     },
                     _ => "Transcription failed: couldn't reach the speech-to-text endpoint".into(),
                 })?;
+            if microsoft {
+                timeout(setup_timeout, async {
+                    while receive(&mut socket, &api_key).await?["type"] != "session.created" {}
+                    Ok::<_, String>(())
+                }).await.map_err(|_| "Transcription failed: live transcription timed out".to_string())??;
+            }
             if let Some(session) = session { send(&mut socket, session).await?; }
-            timeout(IO_TIMEOUT, async {
+            timeout(setup_timeout, async {
                 loop {
                     let event = receive(&mut socket, &api_key).await?;
                     if (!elevenlabs && event["type"] == "session.updated") || (elevenlabs && event["message_type"] == "session_started") { return Ok::<_, String>(()); }
                 }
             }).await.map_err(|_| "Transcription failed: live transcription timed out".to_string())??;
             if elevenlabs { stream_elevenlabs(&mut socket, rx, finish_rx, &overflow_check, &api_key).await }
-            else { stream(&mut socket, rx, finish_rx, &overflow_check, &api_key).await }
+            else { stream(&mut socket, rx, finish_rx, &overflow_check, &api_key, microsoft).await }
         });
-        Ok((Self { finish_tx: Some(finish_tx), task }, StreamInput { tx, overflowed }))
+        Ok((Self { finish_tx: Some(finish_tx), final_timeout, task, local_cancel: None }, StreamInput { tx, overflowed }))
+    }
+
+    pub(crate) fn from_local(task: tauri::async_runtime::JoinHandle<Result<String, String>>, finish_tx: oneshot::Sender<()>, cancellation: crate::processing::Cancellation) -> Self {
+        Self { finish_tx: Some(finish_tx), final_timeout: Duration::from_secs(600), task, local_cancel: Some(cancellation) }
     }
 
     /// Call after physically stopping the microphone; callbacks can otherwise retain senders.
@@ -82,14 +97,17 @@ impl LiveTranscription {
 
     pub async fn finish(mut self) -> Result<String, String> {
         self.finish_input();
-        timeout(FINAL_TIMEOUT, &mut self.task).await
+        timeout(self.final_timeout, &mut self.task).await
             .map_err(|_| "Transcription failed: live transcription timed out".to_string())?
             .map_err(|_| "Transcription failed: unexpected response from the speech-to-text endpoint".to_string())?
     }
 }
 
 impl Drop for LiveTranscription {
-    fn drop(&mut self) { self.task.abort(); }
+    fn drop(&mut self) {
+        if let Some(cancellation) = &self.local_cancel { cancellation.cancel(); }
+        self.task.abort();
+    }
 }
 
 fn websocket_url(endpoint: &str) -> Result<reqwest::Url, String> {
@@ -199,7 +217,7 @@ async fn receive(socket: &mut Socket, api_key: &str) -> Result<Value, String> {
     }
 }
 
-async fn stream(socket: &mut Socket, mut rx: mpsc::Receiver<AudioChunk>, mut finish: oneshot::Receiver<()>, overflowed: &AtomicBool, api_key: &str) -> Result<String, String> {
+async fn stream(socket: &mut Socket, mut rx: mpsc::Receiver<AudioChunk>, mut finish: oneshot::Receiver<()>, overflowed: &AtomicBool, api_key: &str, microsoft: bool) -> Result<String, String> {
     let mut resampler = PcmResampler::default();
     let mut pending = Vec::new();
     let mut total_bytes = 0;
@@ -216,6 +234,9 @@ async fn stream(socket: &mut Socket, mut rx: mpsc::Receiver<AudioChunk>, mut fin
             chunk = rx.recv() => match chunk {
                 Some(chunk) => {
                     resampler.push(&chunk.samples, chunk.rate, &mut pending)?;
+                    if microsoft && total_bytes + pending.len() > RATE as usize * 3600 * 2 {
+                        return Err("Transcription failed: Microsoft live sessions are limited to one hour; retry from History".into());
+                    }
                     while pending.len() >= PACKET_BYTES {
                         send(socket, json!({ "type": "input_audio_buffer.append", "audio": STANDARD.encode(&pending[..PACKET_BYTES]) })).await?;
                         pending.drain(..PACKET_BYTES);
@@ -228,36 +249,44 @@ async fn stream(socket: &mut Socket, mut rx: mpsc::Receiver<AudioChunk>, mut fin
     }
     resampler.finish(&mut pending);
     if overflowed.load(Ordering::Acquire) { return Err("Transcription failed: the connection was too slow for live audio; retry from History".into()); }
-    // The API requires at least 100 ms to commit. Very short accidental presses produce no text.
-    if total_bytes + pending.len() < (RATE as usize / 10) * 2 { return Ok(String::new()); }
+    // OpenAI requires at least 100 ms; MAI accepts any nonempty PCM16 buffer.
+    let minimum_bytes = if microsoft { 2 } else { (RATE as usize / 10) * 2 };
+    if total_bytes + pending.len() < minimum_bytes { return Ok(String::new()); }
     if !pending.is_empty() {
         send(socket, json!({ "type": "input_audio_buffer.append", "audio": STANDARD.encode(&pending) })).await?;
     }
     send(socket, json!({ "type": "input_audio_buffer.commit" })).await?;
-    timeout(FINAL_TIMEOUT, final_transcript(socket, api_key)).await
+    timeout(if microsoft { Duration::from_secs(240) } else { FINAL_TIMEOUT }, final_transcript(socket, api_key, microsoft)).await
         .map_err(|_| "Transcription failed: live transcription timed out".to_string())?
 }
 
-async fn final_transcript(socket: &mut Socket, api_key: &str) -> Result<String, String> {
+async fn final_transcript(socket: &mut Socket, api_key: &str, microsoft: bool) -> Result<String, String> {
     let mut committed: Option<String> = None;
-    let mut completed: Option<(String, String)> = None;
+    let mut committed_seen = false;
+    let mut completed: Option<(Option<String>, String)> = None;
     loop {
         let event = receive(socket, api_key).await?;
         match event["type"].as_str() {
             Some("input_audio_buffer.committed") => {
                 committed = event["item_id"].as_str().map(str::to_string);
+                // MAI's documented final events can omit item_id. There is exactly one
+                // manual commit per recording; OpenAI still requires matching IDs.
+                committed_seen = microsoft || committed.is_some();
             },
             Some("conversation.item.input_audio_transcription.completed") => {
-                if let (Some(id), Some(text)) = (event["item_id"].as_str(), event["transcript"].as_str()) {
-                    if committed.as_deref().is_none_or(|expected| expected == id) {
-                        completed = Some((id.to_string(), text.trim().to_string()));
+                let id = event["item_id"].as_str().map(str::to_string);
+                if let Some(text) = event["transcript"].as_str() {
+                    if (microsoft || id.is_some()) && committed.as_ref().is_none_or(|expected| id.as_ref() == Some(expected) || microsoft && id.is_none()) {
+                        completed = Some((id, text.trim().to_string()));
                     }
-                }
+                } else { return Err("Transcription failed: unexpected response from the speech-to-text endpoint".into()); }
             },
             _ => {},
         }
-        if let (Some(expected), Some((id, text))) = (&committed, &completed) {
-            if expected == id { return Ok(text.clone()); }
+        if committed_seen {
+            if let Some((id, text)) = &completed {
+                if committed.is_none() || committed.as_ref() == id.as_ref() || microsoft && id.is_none() { return Ok(text.clone()); }
+            }
         }
     }
 }
@@ -746,6 +775,145 @@ mod tests {
             assert!(transcription.get("prompt").is_none());
         }
         assert_eq!(vocabulary[0], " OpenGlaido "); // Hints never mutate the user's saved entries.
+    }
+
+    fn mai_config(mut config: TranscriptionConfig) -> TranscriptionConfig {
+        config.endpoint_url = config.endpoint_url.replace("/v1/audio/transcriptions", "");
+        config.model_name = crate::microsoft::LIVE_MODEL.into();
+        config.stt_provider = "microsoft".into();
+        config.stt_deployment = "my-azure-deployment".into();
+        config
+    }
+
+    #[tokio::test]
+    async fn microsoft_streams_before_release_drains_tail_and_accepts_idless_final() {
+        let (listener, config) = bind_server().await;
+        let config = mai_config(config);
+        let (received_tx, received_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            #[allow(clippy::result_large_err)] // The library handshake callback fixes this error type.
+            let mut socket = tokio_tungstenite::accept_hdr_async(stream, |request: &tokio_tungstenite::tungstenite::handshake::server::Request, response| {
+                assert_eq!(request.uri(), "/mai/v1/realtime?intent=transcription");
+                assert_eq!(request.headers()["api-key"], "test-secret");
+                assert!(!request.headers().contains_key("authorization"));
+                Ok(response)
+            }).await.unwrap();
+            write(&mut socket, json!({ "type": "session.created" })).await;
+            let session = read(&mut socket).await;
+            assert_eq!(session["session"]["audio"]["input"], json!({
+                "format": { "type": "audio/pcm", "rate": RATE },
+                "transcription": { "model": "my-azure-deployment", "language": null },
+                "turn_detection": null, "noise_reduction": null
+            }));
+            // No unsupported keyword or OpenAI delay fields reach MAI's dedicated schema.
+            write(&mut socket, json!({ "type": "session.updated" })).await;
+            let first = read(&mut socket).await;
+            assert_eq!(first["type"], "input_audio_buffer.append");
+            let mut bytes = STANDARD.decode(first["audio"].as_str().unwrap()).unwrap().len();
+            received_tx.send(()).unwrap();
+            write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.delta", "delta": "Wrong intermediate" })).await;
+            write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.intermediate", "intermediate": "unfinished suffix" })).await;
+            loop {
+                let event = read(&mut socket).await;
+                if event["type"] == "input_audio_buffer.commit" { break; }
+                assert_eq!(event["type"], "input_audio_buffer.append");
+                bytes += STANDARD.decode(event["audio"].as_str().unwrap()).unwrap().len();
+            }
+            assert_eq!(bytes, 9600);
+            // Azure documents these without item IDs, unlike OpenAI's commit protocol.
+            write(&mut socket, json!({ "type": "input_audio_buffer.committed" })).await;
+            write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.completed", "transcript": "  Živjo OpenGlaido.  " })).await;
+        });
+        let (mut live, input) = LiveTranscription::start(&config, vec!["OpenGlaido".into()]).unwrap();
+        input.tx.send(AudioChunk { samples: vec![0.2; 4410], rate: 44_100 }).await.unwrap();
+        timeout(Duration::from_secs(3), received_rx).await.unwrap().unwrap();
+        input.tx.send(AudioChunk { samples: vec![0.3; 4410], rate: 44_100 }).await.unwrap();
+        live.finish_input();
+        assert_eq!(live.finish().await.unwrap(), "Živjo OpenGlaido.");
+        assert!(input.tx.is_closed());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn microsoft_retry_and_completed_before_commit_use_the_same_live_contract() {
+        let (listener, config) = bind_server().await;
+        let config = mai_config(config);
+        let server = tokio::spawn(async move {
+            let mut socket = ready(listener).await;
+            let mut bytes = 0;
+            loop {
+                let event = read(&mut socket).await;
+                if event["type"] == "input_audio_buffer.commit" { break; }
+                bytes += STANDARD.decode(event["audio"].as_str().unwrap()).unwrap().len();
+            }
+            assert_eq!(bytes, 1920); // MAI can finalize even a 40 ms saved clip.
+            write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.completed", "item_id": "retry", "transcript": "Retried Azure audio." })).await;
+            write(&mut socket, json!({ "type": "input_audio_buffer.committed", "item_id": "retry" })).await;
+        });
+        let mut wav = Cursor::new(Vec::new());
+        let mut writer = hound::WavWriter::new(&mut wav, hound::WavSpec { channels: 1, sample_rate: 16_000, bits_per_sample: 16, sample_format: hound::SampleFormat::Int }).unwrap();
+        for _ in 0..640 { writer.write_sample(10000_i16).unwrap(); }
+        writer.finalize().unwrap();
+        assert_eq!(transcribe_wav(&config, wav.into_inner(), vec![]).await.unwrap(), "Retried Azure audio.");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn microsoft_finalization_accepts_optional_ids_but_rejects_mismatching_ids() {
+        for (commit_id, final_id) in [(None, None), (Some("current"), None), (None, Some("current")), (Some("current"), Some("current"))] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                let mut commit = json!({ "type": "input_audio_buffer.committed" });
+                if let Some(id) = commit_id { commit["item_id"] = json!(id); }
+                write(&mut socket, commit).await;
+                if commit_id.is_some() {
+                    write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.completed", "item_id": "old", "transcript": "must not return" })).await;
+                }
+                let mut final_event = json!({ "type": "conversation.item.input_audio_transcription.completed", "transcript": "complete" });
+                if let Some(id) = final_id { final_event["item_id"] = json!(id); }
+                write(&mut socket, final_event).await;
+            });
+            let (mut socket, _) = connect_async(format!("ws://{address}")).await.unwrap();
+            assert_eq!(timeout(Duration::from_secs(3), final_transcript(&mut socket, "test-secret", true)).await.unwrap().unwrap(), "complete");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn microsoft_cancel_errors_and_disconnects_never_return_partial_text() {
+        for case in ["cancel", "error", "disconnect", "overflow"] {
+            let (listener, config) = bind_server().await;
+            let config = mai_config(config);
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let server = tokio::spawn(async move {
+                let mut socket = ready(listener).await;
+                ready_tx.send(()).unwrap();
+                match case {
+                    "cancel" => {
+                        let result = timeout(Duration::from_secs(3), socket.next()).await.unwrap();
+                        assert!(!matches!(result, Some(Ok(Message::Text(_)))));
+                    },
+                    "error" => {
+                        write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.intermediate", "intermediate": "partial must not paste" })).await;
+                        write(&mut socket, json!({ "type": "error", "error": { "message": "model unavailable for test-secret" } })).await;
+                    },
+                    _ => { socket.close(None).await.unwrap(); },
+                }
+            });
+            let (live, input) = LiveTranscription::start(&config, vec![]).unwrap();
+            ready_rx.await.unwrap();
+            if case == "cancel" { drop(live); }
+            else {
+                if case == "overflow" { input.overflowed.store(true, Ordering::Release); }
+                let error = live.finish().await.unwrap_err();
+                assert!(!error.contains("test-secret"));
+            }
+            server.await.unwrap();
+        }
     }
 
     #[test]

@@ -54,6 +54,7 @@ fn keyed_provider(id: &str) -> Option<&'static str> {
         "groq" => "Groq",
         "openai" => "OpenAI",
         "elevenlabs" => "ElevenLabs",
+        "microsoft" => "Microsoft Azure",
         "openrouter" => "OpenRouter",
         "mistral" => "Mistral",
         "gemini" => "Google Gemini",
