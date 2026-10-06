@@ -15,7 +15,9 @@ for idle. Development builds and unbundled macOS binaries cannot install updates
 
 Install Bun, Rust, Git, GitHub CLI (`gh`), and Minisign on the build/upload computer. macOS
 also needs Xcode command-line tools and CMake. Windows builds require native Windows x64,
-Visual Studio's C++/Windows SDK tools, WebView2, and PowerShell. Cross-compilation is not used.
+Visual Studio's C++/Windows SDK tools, WebView2, and PowerShell. Linux builds require native
+Linux x64 with WebKitGTK 4.1, GTK 3, an AppIndicator, librsvg, patchelf, ALSA, libxkbcommon,
+and D-Bus. Cross-compilation is not used.
 
 1. Sign into GitHub with `gh auth login` for `Legoless/OpenGlaido`.
 2. Copy `.release.env.example` to `.release.env.local` and set your local signing paths.
@@ -59,9 +61,13 @@ signing credentials or invokes CI.
 The first draft can contain **macOS Apple Silicon only**. To include Windows, run the local
 build command on a Windows x64 computer at the same commit, then copy its
 `windows-x86_64/` folder alongside `darwin-aarch64/` before uploading. A complete Windows set
-contains both NSIS and MSI installers and their signatures. Once both platforms have public
-users, assemble both before publishing a new version so neither disappears from the feed.
-Intel Mac, Windows ARM, and Linux releases are not prepared by these commands.
+contains both NSIS and MSI installers and their signatures. To include Linux, run the same
+command on an x64 Linux computer and copy its `linux-x86_64/` folder alongside the others.
+A complete Linux set is the amd64 AppImage and deb, each with its updater signature. Once a
+platform has public users, assemble it again before publishing a new version so it does not
+disappear from the feed. Intel Mac, Windows ARM, and Linux ARM releases are not prepared by
+these commands. Linux dictation pastes through X11; Wayland hotkeys and bar placement are not
+supported, and local models stay macOS-only.
 
 ## Publish when ready
 

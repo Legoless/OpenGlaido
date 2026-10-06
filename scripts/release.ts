@@ -34,6 +34,7 @@ export function releaseManifest(files: string[], repository: string, version: st
   const groups = [
     { names: ["OpenGlaido.app.tar.gz", "OpenGlaido.app.tar.gz.sig", `OpenGlaido_${version}_aarch64.dmg`], updates: [["OpenGlaido.app.tar.gz", ["darwin-aarch64", "darwin-aarch64-app"]]] },
     { names: [`OpenGlaido_${version}_x64-setup.exe`, `OpenGlaido_${version}_x64-setup.exe.sig`, `OpenGlaido_${version}_x64_en-US.msi`, `OpenGlaido_${version}_x64_en-US.msi.sig`], updates: [[`OpenGlaido_${version}_x64-setup.exe`, ["windows-x86_64", "windows-x86_64-nsis"]], [`OpenGlaido_${version}_x64_en-US.msi`, ["windows-x86_64-msi"]]] },
+    { names: [`OpenGlaido_${version}_amd64.AppImage`, `OpenGlaido_${version}_amd64.AppImage.sig`, `OpenGlaido_${version}_amd64.deb`, `OpenGlaido_${version}_amd64.deb.sig`], updates: [[`OpenGlaido_${version}_amd64.AppImage`, ["linux-x86_64", "linux-x86_64-appimage"]], [`OpenGlaido_${version}_amd64.deb`, ["linux-x86_64-deb"]]] },
   ] as const;
   const platforms: Record<string, { url: string; signature: string }> = {};
   const accepted = new Set<string>();
@@ -57,7 +58,7 @@ export type BuildReceipt = {
   repository: string;
   version: string;
   commit: string;
-  platform: "darwin-aarch64" | "windows-x86_64";
+  platform: "darwin-aarch64" | "windows-x86_64" | "linux-x86_64";
   assets: Record<string, string>;
 };
 
@@ -79,7 +80,7 @@ export function readBuilds(directory: string, version: string) {
     if (lstatSync(path).isSymbolicLink()) throw new Error("Build receipts cannot be symbolic links");
     const receipt = JSON.parse(readFileSync(path, "utf8")) as BuildReceipt;
     if (receipt.schema !== 1 || receipt.repository !== REPOSITORY || receipt.version !== version
-      || !/^[a-f0-9]{40}$/.test(receipt.commit) || !["darwin-aarch64", "windows-x86_64"].includes(receipt.platform)
+      || !/^[a-f0-9]{40}$/.test(receipt.commit) || !["darwin-aarch64", "windows-x86_64", "linux-x86_64"].includes(receipt.platform)
       || !receipt.assets || Array.isArray(receipt.assets) || typeof receipt.assets !== "object") {
       throw new Error("Invalid or mismatched local build receipt");
     }
@@ -212,7 +213,7 @@ async function main() {
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
     const release: Release = github("releases", "POST", {
       tag_name: `v${version}`, target_commitish: sha, name: `OpenGlaido ${version}`,
-      body: `Locally built from ${sha}.\n\nIncluded platforms: ${build.platforms.join(", ")}. Test these packages before publishing. macOS packages are Developer ID signed and notarized; Windows packages, when included, have updater signatures but no Authenticode certificate configured.`,
+      body: `Locally built from ${sha}.\n\nIncluded platforms: ${build.platforms.join(", ")}. Test these packages before publishing. macOS packages are Developer ID signed and notarized; Windows packages, when included, have updater signatures but no Authenticode certificate configured. Linux packages, when included, are an x64 AppImage and deb with updater signatures.`,
       draft: true, prerelease: false, make_latest: "false",
     });
     for (const file of [...files, manifestPath]) {

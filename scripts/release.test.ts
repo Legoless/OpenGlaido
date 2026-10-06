@@ -16,6 +16,7 @@ const repository = "Legoless/OpenGlaido";
 const commit = "a".repeat(40);
 const macAssets = ["OpenGlaido.app.tar.gz", "OpenGlaido.app.tar.gz.sig", `OpenGlaido_${version}_aarch64.dmg`];
 const windowsAssets = [`OpenGlaido_${version}_x64-setup.exe`, `OpenGlaido_${version}_x64-setup.exe.sig`, `OpenGlaido_${version}_x64_en-US.msi`, `OpenGlaido_${version}_x64_en-US.msi.sig`];
+const linuxAssets = [`OpenGlaido_${version}_amd64.AppImage`, `OpenGlaido_${version}_amd64.AppImage.sig`, `OpenGlaido_${version}_amd64.deb`, `OpenGlaido_${version}_amd64.deb.sig`];
 
 function withDirectory(check: (directory: string) => void) {
   const directory = mkdtempSync(join(tmpdir(), "openglaido-release-test-"));
@@ -32,7 +33,7 @@ function writeAssets(directory: string, names: string[]) {
 }
 
 function writeReceipt(directory: string, platform: BuildReceipt["platform"], changes: Partial<BuildReceipt> = {}) {
-  const names = platform === "darwin-aarch64" ? macAssets : windowsAssets;
+  const names = platform === "darwin-aarch64" ? macAssets : platform === "windows-x86_64" ? windowsAssets : linuxAssets;
   writeAssets(directory, names);
   const assets = Object.fromEntries(names.map((name) => [name, createHash("sha256").update(name.endsWith(".sig") ? "test-signature\n" : "test-artifact").digest("hex")]));
   const receipt: BuildReceipt = { schema: 1, repository, version, commit, platform, assets, ...changes };
@@ -65,8 +66,13 @@ test("manifest accepts complete single-platform or combined releases and preserv
     expect(Object.keys(macManifest.platforms)).toEqual(["darwin-aarch64", "darwin-aarch64-app"]);
     const windowsManifest = releaseManifest(windows, repository, version);
     expect(Object.keys(windowsManifest.platforms)).toEqual(["windows-x86_64", "windows-x86_64-nsis", "windows-x86_64-msi"]);
-    const manifest = releaseManifest([...mac, ...windows], repository, version);
-    expect(Object.keys(manifest.platforms)).toEqual(["darwin-aarch64", "darwin-aarch64-app", "windows-x86_64", "windows-x86_64-nsis", "windows-x86_64-msi"]);
+    const linux = writeAssets(directory, linuxAssets);
+    const linuxManifest = releaseManifest(linux, repository, version);
+    expect(Object.keys(linuxManifest.platforms)).toEqual(["linux-x86_64", "linux-x86_64-appimage", "linux-x86_64-deb"]);
+    expect(linuxManifest.platforms["linux-x86_64"].url).toEndWith(".AppImage");
+    expect(linuxManifest.platforms["linux-x86_64-deb"].url).toEndWith(".deb");
+    const manifest = releaseManifest([...mac, ...windows, ...linux], repository, version);
+    expect(Object.keys(manifest.platforms)).toEqual(["darwin-aarch64", "darwin-aarch64-app", "windows-x86_64", "windows-x86_64-nsis", "windows-x86_64-msi", "linux-x86_64", "linux-x86_64-appimage", "linux-x86_64-deb"]);
     expect(manifest.version).toBe(version);
     expect(manifest.platforms["darwin-aarch64"].signature).toBe("test-signature");
     expect(manifest.platforms["windows-x86_64-msi"].url).toBe("https://github.com/Legoless/OpenGlaido/releases/download/v0.1.1/OpenGlaido_0.1.1_x64_en-US.msi");
@@ -76,7 +82,7 @@ test("manifest accepts complete single-platform or combined releases and preserv
 
 test("manifest rejects missing packages, duplicate names, unsupported assets and empty signatures", () => {
   withDirectory((directory) => {
-    const files = writeAssets(directory, [...macAssets, ...windowsAssets]);
+    const files = writeAssets(directory, [...macAssets, ...windowsAssets, ...linuxAssets]);
     for (let missing = 0; missing < files.length; missing++) {
       expect(() => releaseManifest(files.filter((_, index) => index !== missing), repository, version)).toThrow();
     }
@@ -109,10 +115,13 @@ test("receipts verify complete macOS, Windows and combined local builds", () => 
     const windowsDirectory = join(directory, "windows-x86_64");
     writeReceipt(windowsDirectory, "windows-x86_64");
     expect(readBuilds(windowsDirectory, version).platforms).toEqual(["windows-x86_64"]);
+    const linuxDirectory = join(directory, "linux-x86_64");
+    writeReceipt(linuxDirectory, "linux-x86_64");
+    expect(readBuilds(linuxDirectory, version).platforms).toEqual(["linux-x86_64"]);
     const combined = readBuilds(directory, version);
     expect(combined.commit).toBe(commit);
-    expect(combined.platforms.sort()).toEqual(["darwin-aarch64", "windows-x86_64"]);
-    expect([...combined.assets.keys()].sort()).toEqual([...macAssets, ...windowsAssets].sort());
+    expect(combined.platforms.sort()).toEqual(["darwin-aarch64", "linux-x86_64", "windows-x86_64"]);
+    expect([...combined.assets.keys()].sort()).toEqual([...macAssets, ...windowsAssets, ...linuxAssets].sort());
   });
 });
 
@@ -137,7 +146,7 @@ test("receipts reject malformed metadata and invalid asset maps", () => {
     const path = join(directory, "release-build.json");
     for (const changed of [
       { schema: 2 }, { repository: "Other/OpenGlaido" }, { version: "0.1.2" },
-      { commit: "short" }, { platform: "linux-x86_64" }, { platform: "windows-x86_64" },
+      { commit: "short" }, { platform: "linux-aarch64" }, { platform: "windows-x86_64" },
       { assets: null }, { assets: [] }, { assets: {} },
       { assets: { ...receipt.assets, [macAssets[0]]: "invalid-hash" } },
       { assets: { "../escape": "a".repeat(64) } },
@@ -183,7 +192,11 @@ test("build plans use complete native Apple Silicon and Windows x64 packages", (
     platform: "windows-x86_64", target: "x86_64-pc-windows-msvc", bundles: "nsis,msi",
     assets: windowsAssets.map((name) => `${name.includes("-setup.exe") ? "nsis" : "msi"}/${name}`),
   });
-  for (const [platform, architecture] of [["darwin", "x64"], ["win32", "arm64"], ["linux", "x64"], ["linux", "arm64"]]) {
+  expect(buildPlan("linux", "x64", version)).toEqual({
+    platform: "linux-x86_64", target: "x86_64-unknown-linux-gnu", bundles: "appimage,deb",
+    assets: linuxAssets.map((name) => `${name.includes(".deb") ? "deb" : "appimage"}/${name}`),
+  });
+  for (const [platform, architecture] of [["darwin", "x64"], ["win32", "arm64"], ["linux", "arm64"]]) {
     expect(() => buildPlan(platform, architecture, version)).toThrow();
   }
   expect(() => buildPlan("darwin", "arm64", "0.1.1-beta.1")).toThrow();

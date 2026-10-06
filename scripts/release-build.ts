@@ -20,7 +20,15 @@ export function buildPlan(platform: string, architecture: string, version: strin
       assets: [nsis, `${nsis}.sig`, msi, `${msi}.sig`],
     };
   }
-  throw new Error("Build on an Apple Silicon Mac or an x64 Windows PC; cross-compilation is not supported");
+  if (platform === "linux" && architecture === "x64") {
+    const appimage = `appimage/OpenGlaido_${version}_amd64.AppImage`;
+    const deb = `deb/OpenGlaido_${version}_amd64.deb`;
+    return {
+      platform: "linux-x86_64", target: "x86_64-unknown-linux-gnu", bundles: "appimage,deb",
+      assets: [appimage, `${appimage}.sig`, deb, `${deb}.sig`],
+    };
+  }
+  throw new Error("Build on an Apple Silicon Mac, an x64 Windows PC, or an x64 Linux PC; cross-compilation is not supported");
 }
 
 async function main() {
@@ -32,6 +40,7 @@ Requires a clean committed checkout, Bun, Rust/Clippy and minisign on PATH.
 macOS: Apple Silicon, Xcode tools, CMake, Developer ID identity in Keychain,
   APPLE_SIGNING_IDENTITY, APPLE_API_KEY, APPLE_API_ISSUER, APPLE_API_KEY_PATH.
 Windows: x64, Visual Studio C++/Windows SDK, WebView2, PowerShell.
+Linux: x64, WebKitGTK 4.1, GTK 3, AppIndicator, librsvg, patchelf, ALSA, libxkbcommon, D-Bus.
 Updater key: TAURI_SIGNING_PRIVATE_KEY, or ~/.tauri/openglaido-updater.key.
 Set TAURI_SIGNING_PRIVATE_KEY_PASSWORD if the updater key is encrypted.
 Outputs: release-artifacts/<version>/<platform>/, including release-build.json.
@@ -103,6 +112,8 @@ Existing output directories are never overwritten. Nothing is uploaded.`);
       throw new Error("APPLE_SIGNING_IDENTITY must name an available Developer ID Application identity in Keychain");
     }
     if (!lstatSync(env.APPLE_API_KEY_PATH!).isFile()) throw new Error("APPLE_API_KEY_PATH must point to the local notarization key file");
+  } else if (process.platform === "linux") {
+    if (!Bun.which("pkg-config")) throw new Error("Required tool is missing from PATH: pkg-config");
   } else {
     powershell = Bun.which("pwsh") ?? Bun.which("powershell");
     if (!powershell) throw new Error("PowerShell is required to verify Windows test manifests");

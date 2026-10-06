@@ -25,7 +25,8 @@ cpal = "0.15"
 hound = "3.5"
 base64 = "0.22"
 arboard = "3.4"
-enigo = { version = "0.2" }
+# x11rb is the Linux Ctrl+V backend (pure Rust XTEST). It is unused on macOS and Windows.
+enigo = { version = "0.2", default-features = false, features = ["x11rb"] }
 rusqlite = { version = "0.31", features = ["bundled"] }
 rodio = "0.19"
 uuid = { version = "1", features = ["v4"] }
@@ -33,7 +34,8 @@ chrono = { version = "0.4", features = ["serde"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-notification = "2"
 nnnoiseless = { version = "0.5.2", default-features = false }
-keyring = { version = "3", features = ["apple-native", "windows-native"] }
+# crypto-rust keeps the Linux Secret Service backend off OpenSSL. apple/windows features are no-ops there.
+keyring = { version = "3", features = ["apple-native", "windows-native", "sync-secret-service", "crypto-rust"] }
 futures-util = "0.3.34"
 tokio-tungstenite = { version = "0.30", features = ["native-tls"] }
 evalexpr = "13.1.0"

@@ -212,7 +212,10 @@ fn clipboard_version() -> Option<u64> {
     }
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
-        None
+        // X11 and Wayland selections have no generation counter. A stable value makes the
+        // text readback the ownership check: different clipboard contents fail closed, and
+        // an identical copy by another app is indistinguishable from ours.
+        Some(1)
     }
 }
 
@@ -366,6 +369,9 @@ mod tests {
         // A fresh copy of identical text after our initial sample loses ownership.
         assert_ne!(verified_clipboard_version("dictation", || Some(11), text), owned);
         assert_eq!(verified_clipboard_version("dictation", || None, text), None);
+        // Linux uses this shape: one stable version, so only the text can reject a paste.
+        assert_eq!(verified_clipboard_version("dictation", || Some(1), || Some("dictation".into())), Some(1));
+        assert_eq!(verified_clipboard_version("dictation", || Some(1), || Some("other".into())), None);
         let version = std::cell::Cell::new(10);
         assert_eq!(verified_clipboard_version("dictation", || Some(version.get()), || {
             version.set(11); // Another app copies while readback is in progress.
