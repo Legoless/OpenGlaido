@@ -908,6 +908,9 @@ mod tests {
             ready_rx.await.unwrap();
             if case == "cancel" { drop(live); }
             else {
+                // Feed real audio: with zero bytes the stream shortcuts to an empty
+                // "no speech" result before the server error/close can be observed.
+                let _ = input.tx.send(AudioChunk { samples: vec![0.2; 4800], rate: RATE }).await;
                 if case == "overflow" { input.overflowed.store(true, Ordering::Release); }
                 let error = live.finish().await.unwrap_err();
                 assert!(!error.contains("test-secret"));
