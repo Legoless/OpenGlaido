@@ -449,21 +449,42 @@ pub fn conflict_warning(s: &str) -> Option<String> {
     None
 }
 
+// Plugin defaults: Ctrl+Win plus a letter to hold, Shift added for hands-free (Glaido's Windows
+// defaults are Ctrl+Win and Ctrl+Win+Shift, but the plugin needs a non-modifier key). Windows
+// reserves every Win+Space variant (input switching) and Ctrl+Win+C (color filters); Ctrl+Shift+Space
+// is a common launcher and IDE shortcut; Ctrl+Alt is AltGr on many layouts. G (Glaido) and A (ask)
+// sit under the left hand on QWERTY, QWERTZ and AZERTY, and Windows, Xbox Game Bar and PowerToys
+// don't use them with Ctrl+Win.
 pub fn default_hold() -> &'static str {
-    if cfg!(target_os = "macos") { "Fn" } else { "Control+Shift+Space" }
+    if cfg!(target_os = "macos") { "Fn" } else { "Control+Meta+KeyG" }
 }
 
 pub fn default_toggle() -> &'static str {
-    if cfg!(target_os = "macos") { "Fn+Space" } else { "Control+Shift+Meta+Space" }
+    if cfg!(target_os = "macos") { "Fn+Space" } else { "Control+Shift+Meta+KeyG" }
 }
 
 pub fn default_commands_hold() -> &'static str {
-    // Windows: never Ctrl+Alt without Win (that is AltGr on many layouts).
-    if cfg!(target_os = "macos") { "AltRight" } else { "Control+Meta+KeyC" }
+    if cfg!(target_os = "macos") { "AltRight" } else { "Control+Meta+KeyA" }
 }
 
 pub fn default_commands_toggle() -> &'static str {
-    if cfg!(target_os = "macos") { "AltRight+Space" } else { "Control+Shift+Meta+KeyC" }
+    if cfg!(target_os = "macos") { "AltRight+Space" } else { "Control+Shift+Meta+KeyA" }
+}
+
+/// Moves a pair still on the first plugin defaults, which Windows reserves, to the current ones.
+/// Turning beta on cleared a taken commands hold, so ("", old toggle) counts as untouched too.
+/// Returns whether it changed anything.
+pub fn replace_reserved_defaults(hold: &mut String, toggle: &mut String, commands: bool) -> bool {
+    let (old, new): (&[[&str; 2]], _) = if commands {
+        (&[["Control+Meta+KeyC", "Control+Shift+Meta+KeyC"], ["", "Control+Shift+Meta+KeyC"]], [default_commands_hold(), default_commands_toggle()])
+    } else {
+        (&[["Control+Shift+Space", "Control+Shift+Meta+Space"]], [default_hold(), default_toggle()])
+    };
+    if NATIVE || !old.iter().any(|[h, t]| h == hold && t == toggle) {
+        return false;
+    }
+    (*hold, *toggle) = (new[0].to_string(), new[1].to_string());
+    true
 }
 
 #[cfg(test)]
@@ -474,9 +495,13 @@ mod tests {
     fn defaults_are_valid_and_distinct() {
         assert!(validate_binding(default_hold()).is_ok());
         assert!(validate_binding(default_toggle()).is_ok());
-        // The Windows defaults are valid there too (none uses Ctrl+Alt without Win).
-        for b in ["Control+Shift+Space", "Control+Shift+Meta+Space", "Control+Meta+KeyC", "Control+Shift+Meta+KeyC"] {
-            assert!(chord::validate_for(false, b).is_ok(), "{b}");
+        // The Windows defaults are valid there too (none uses Ctrl+Alt without Win), and none fires on another's keys.
+        let windows = ["Control+Meta+KeyG", "Control+Shift+Meta+KeyG", "Control+Meta+KeyA", "Control+Shift+Meta+KeyA"];
+        for (i, b) in windows.iter().enumerate() {
+            let binding = chord::validate_for(false, b).unwrap().unwrap();
+            for other in &windows[..i] {
+                assert!(!chord::overlaps(&binding, &chord::parse(other).unwrap().unwrap()), "{b} / {other}");
+            }
         }
         let all = [default_hold(), default_toggle(), default_commands_hold(), default_commands_toggle()];
         for (i, b) in all.iter().enumerate() {
@@ -502,6 +527,30 @@ mod tests {
         assert!(!chord::overlaps(&left, &right));
         assert_eq!(clash(&left, &right), !NATIVE);
         assert!(!clash(&b("Fn"), &b("AltRight")));
+    }
+
+    #[test]
+    fn untouched_reserved_defaults_move_to_the_current_ones() {
+        let replace = |hold: &str, toggle: &str, commands| {
+            let (mut hold, mut toggle) = (hold.to_string(), toggle.to_string());
+            let changed = replace_reserved_defaults(&mut hold, &mut toggle, commands);
+            (changed, hold, toggle)
+        };
+        let kept = |hold: &str, toggle: &str| (false, hold.to_string(), toggle.to_string());
+        if NATIVE {
+            assert_eq!(replace("Control+Shift+Space", "Control+Shift+Meta+Space", false), kept("Control+Shift+Space", "Control+Shift+Meta+Space"));
+            return;
+        }
+        let dictation = (true, default_hold().to_string(), default_toggle().to_string());
+        let commands = (true, default_commands_hold().to_string(), default_commands_toggle().to_string());
+        assert_eq!(replace("Control+Shift+Space", "Control+Shift+Meta+Space", false), dictation);
+        assert_eq!(replace("Control+Meta+KeyC", "Control+Shift+Meta+KeyC", true), commands);
+        assert_eq!(replace("", "Control+Shift+Meta+KeyC", true), commands);
+        // A pair the user changed stays, even half of it.
+        assert_eq!(replace("Control+Shift+F8", "Control+Shift+Meta+Space", false), kept("Control+Shift+F8", "Control+Shift+Meta+Space"));
+        assert_eq!(replace("", "", true), kept("", ""));
+        // The old dictation pair is only the dictation pair's.
+        assert_eq!(replace("Control+Shift+Space", "Control+Shift+Meta+Space", true), kept("Control+Shift+Space", "Control+Shift+Meta+Space"));
     }
 
     #[test]

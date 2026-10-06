@@ -503,6 +503,9 @@ fn load_config(path: &Path) -> TranscriptionConfig {
             migrated = true;
         }
     }
+    // The first Windows defaults included shortcuts Windows itself reserves; untouched pairs move on.
+    migrated |= hotkeys::replace_reserved_defaults(&mut config.hotkey_hold, &mut config.hotkey_toggle, false);
+    migrated |= hotkeys::replace_reserved_defaults(&mut config.commands_hold, &mut config.commands_toggle, true);
     // Each credential family migrates independently; failed migration must not rewrite plaintext keys.
     let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty() || !config.llm_api_key.is_empty();
     let search_loaded = if config.search_keys_migrated {
