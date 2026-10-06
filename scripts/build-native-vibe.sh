@@ -41,7 +41,7 @@ cmake -S "$root/native-vibe" -B "$cache/build" -DVIBE_SOURCE="$source_dir" \
 cmake --build "$cache/build" --target asr_stream_server --parallel "${CMAKE_BUILD_PARALLEL_LEVEL:-4}"
 helper="$cache/build/bin/openglaido-vibe"
 "$helper" --self-test
-lipo -verify_arch "$arch" "$helper"
+lipo "$helper" -verify_arch "$arch"
 mkdir -p "$root/src-tauri/binaries"
 destination="$root/src-tauri/binaries/openglaido-vibe-$target"
 if ! cmp -s "$helper" "$destination"; then
