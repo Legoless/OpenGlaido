@@ -80,6 +80,7 @@ pub fn is_browser(bundle_id: &str) -> bool {
 }
 
 /// Webmail tab titles, for browsers that don't expose the URL through Accessibility.
+#[cfg(any(target_os = "macos", windows, test))]
 fn url_from_title(title: &str) -> Option<String> {
     let t = title.to_ascii_lowercase();
     if t.contains("gmail") {
