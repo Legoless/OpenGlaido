@@ -60,12 +60,24 @@ import {
 
 export type CaptureResult = { binding: string; warning?: string | null; error?: string };
 
-/** Microphones to list and the one shown as chosen. A disconnected choice leaves the list and
- *  System default (what recording then uses) shows instead; the choice stays saved and comes
- *  back when the microphone does. Before the first device list arrives, show the saved choice. */
-export function micChoice(devices: string[] | null, selected: string | null | undefined) {
-  if (devices === null) return { devices: selected ? [selected] : [], value: selected ?? null };
-  return { devices, value: selected && devices.includes(selected) ? selected : null };
+/** Microphones to list and the one shown as chosen: the first saved one that is connected, else
+ *  System default (what recording then uses). Disconnected choices stay saved and come back with
+ *  their microphones. Before the first device list arrives, show the latest choice. */
+export function micChoice(devices: string[] | null, saved: string[]) {
+  if (devices === null) return { devices: saved.slice(0, 1), value: saved[0] ?? null };
+  return { devices, value: saved.find((name) => devices.includes(name)) ?? null };
+}
+
+/** The saved microphones after picking `choice` (null = System default, which forgets them all).
+ *  A microphone moves just ahead of the saved one in use now, so it is used here while the ones
+ *  ranked above that (saved at another desk or computer, not connected here) keep winning there.
+ *  Mirrors `choose_mic` in lib.rs (the menu bar menu). */
+export function chooseMic(saved: string[], choice: string | null, devices: string[]) {
+  if (choice === null) return [];
+  const at = saved.findIndex((name) => name === choice || devices.includes(name));
+  const rest = saved.filter((name) => name !== choice);
+  if (at < 0) return [...rest, choice];
+  return [...rest.slice(0, at), choice, ...rest.slice(at)];
 }
 
 // start/stop_hotkey_capture are async commands; keep them in call order (StrictMode runs the
@@ -479,7 +491,7 @@ export function SettingsModal({
     { id: "model", label: t("Model"), icon: Cpu },
   ];
 
-  const mic = micChoice(devices, config.input_device);
+  const mic = micChoice(devices, config.input_devices);
   const deviceOptions = [
     { value: null, label: t("System default") },
     ...mic.devices.map((d) => ({ value: d, label: d })),
@@ -583,13 +595,13 @@ export function SettingsModal({
                 icon={Mic}
                 title={t("Microphone")}
                 description={t("Select your input device")}
-                note={errorNote("input_device")}
+                note={errorNote("input_devices")}
               >
                 <Dropdown
                   value={mic.value}
-                  saved={config.input_device ?? null}
+                  saved={mic.value ?? config.input_devices[0] ?? null}
                   options={deviceOptions}
-                  onChange={(v) => save({ input_device: v })}
+                  onChange={(v) => save({ input_devices: chooseMic(config.input_devices, v, mic.devices) })}
                   className="w-[346px] max-w-full"
                 />
               </SettingsRow>

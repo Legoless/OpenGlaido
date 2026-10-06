@@ -7,9 +7,9 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 enum AudioCommand {
-    /// Device name (None = system default); replies Ok(true) when the named device was
-    /// missing and the default was used instead.
-    Start(Option<String>, Option<StreamInput>, u32, Sender<Result<bool, String>>),
+    /// Device names, first connected one wins ([] = system default); replies Ok(true) when
+    /// none was connected and the default was used instead.
+    Start(Vec<String>, Option<StreamInput>, u32, Sender<Result<bool, String>>),
     /// Skip this many ms at the start (the start chime) and hand the samples back.
     Stop(u32, Sender<Result<Recording, String>>),
     Cancel,
@@ -406,21 +406,21 @@ impl AudioRecorder {
             level.store(0, Ordering::Relaxed);
             let Ok(cmd) = cmd else { break };
             match cmd {
-                AudioCommand::Start(device_name, stream_input, skip_ms, reply) => {
+                AudioCommand::Start(device_names, stream_input, skip_ms, reply) => {
                     let generation = capture.lock().unwrap().begin();
                     let host = cpal::default_host();
-                    let named = device_name.as_deref().and_then(|name| {
+                    let named = device_names.iter().find_map(|name| {
                         // input_devices() opens audio units for every device on macOS. Only
                         // query matching names, and reuse the config needed to build the stream.
                         host.devices()
                             .ok()?
-                            .filter(|d| d.name().is_ok_and(|n| n == name))
+                            .filter(|d| d.name().is_ok_and(|n| n == *name))
                             .find_map(|device| {
                                 let config = device.default_input_config();
                                 is_input_config(&config).then_some((device, config))
                             })
                     });
-                    let fell_back = device_name.is_some() && named.is_none();
+                    let fell_back = !device_names.is_empty() && named.is_none();
                     let input = named.or_else(|| {
                         host.default_input_device().map(|device| {
                             let config = device.default_input_config();
@@ -537,24 +537,24 @@ impl AudioRecorder {
         }
     }
 
-    /// Starts capturing from `device_name` (None = system default). Returns Ok(true) when that
-    /// device is gone and the system default is recording instead.
-    pub fn start_recording(&self, device_name: Option<&str>) -> Result<bool, String> {
-        self.start_recording_streamed(device_name, None, 0)
+    /// Starts capturing from the first connected of `device_names` ([] = system default). Returns
+    /// Ok(true) when none is connected and the system default is recording instead.
+    pub fn start_recording(&self, device_names: &[String]) -> Result<bool, String> {
+        self.start_recording_streamed(device_names, None, 0)
     }
 
     /// Also forwards new mono samples after the first `skip_ms` to a live transcriber.
     /// Use the same trim in `stop_recording` so saved audio and live audio agree.
     pub fn start_recording_streamed(
         &self,
-        device_name: Option<&str>,
+        device_names: &[String],
         stream: Option<StreamInput>,
         skip_ms: u32,
     ) -> Result<bool, String> {
         let (reply_tx, reply_rx) = channel();
         self.tx
             .send(AudioCommand::Start(
-                device_name.map(str::to_string),
+                device_names.to_vec(),
                 stream,
                 skip_ms,
                 reply_tx,

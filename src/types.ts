@@ -59,7 +59,8 @@ export interface TranscriptionConfig {
   hotkey_toggle: string;
   enter_to_stop: boolean;
   cancel_on_focus_change: boolean;
-  input_device?: string | null;
+  /** Chosen microphones, preferred first; recording uses the first connected one ([] = system default). */
+  input_devices: string[];
   copy_to_clipboard: boolean;
   bar_location: string;
   launch_at_login: boolean;

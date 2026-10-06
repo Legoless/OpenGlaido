@@ -34,7 +34,7 @@ pub struct TranscriptionConfig {
     pub hotkey_toggle: String,      // hands-free binding
     pub enter_to_stop: bool,        // Enter stops & pastes while dictating hands-free
     pub cancel_on_focus_change: bool, // cancel dictation when the original window or field loses focus
-    pub input_device: Option<String>, // cpal device name; None = system default
+    pub input_devices: Vec<String>, // cpal device names, preferred first; the first connected one records ([] = system default)
     pub copy_to_clipboard: bool,    // false = restore the previous clipboard text after pasting
     pub bar_location: String,       // "bottom" | "raised" | "high"
     pub launch_at_login: bool,
@@ -141,7 +141,7 @@ impl Default for TranscriptionConfig {
             hotkey_toggle: hotkeys::default_toggle().to_string(),
             enter_to_stop: false,
             cancel_on_focus_change: false,
-            input_device: None,
+            input_devices: Vec::new(),
             copy_to_clipboard: false,
             bar_location: "bottom".to_string(),
             launch_at_login: false,
@@ -218,6 +218,12 @@ impl TranscriptionConfig {
         }
         if let Some(language) = old_str("language") {
             config.languages = vec![language.to_string()];
+        }
+        // One remembered microphone became a list of them.
+        if old.get("input_devices").is_none() {
+            if let Some(name) = old.get("input_device").and_then(|v| v.as_str()).filter(|s| !s.is_empty()) {
+                config.input_devices = vec![name.to_string()];
+            }
         }
         if old.get("llm_source").is_none() {
             let set = |v: &Option<String>| v.as_deref().is_some_and(|s| !s.trim().is_empty());
@@ -723,7 +729,7 @@ mod tests {
     #[test]
     fn config_json_round_trip() {
         let cfg = TranscriptionConfig {
-            input_device: Some("USB Mic".into()),
+            input_devices: vec!["USB Mic".into(), "MacBook Pro Microphone".into()],
             bar_location: "high".into(),
             ..Default::default()
         };
@@ -754,6 +760,17 @@ mod tests {
             let saved = serde_json::to_string(&cfg).unwrap();
             assert_eq!(TranscriptionConfig::from_json(&saved).unwrap(), cfg);
         }
+    }
+
+    #[test]
+    fn the_old_single_microphone_choice_is_kept() {
+        let cfg = TranscriptionConfig::from_json(r#"{"input_device":"Mikme Microphone"}"#).unwrap();
+        assert_eq!(cfg.input_devices, ["Mikme Microphone"]);
+        for legacy in [r#"{"input_device":null}"#, r#"{"input_device":""}"#, "{}"] {
+            assert!(TranscriptionConfig::from_json(legacy).unwrap().input_devices.is_empty());
+        }
+        let cfg = TranscriptionConfig::from_json(r#"{"input_device":"Old","input_devices":[]}"#).unwrap();
+        assert!(cfg.input_devices.is_empty(), "the list wins once it exists");
     }
 
     #[test]

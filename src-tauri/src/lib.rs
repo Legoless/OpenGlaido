@@ -179,8 +179,8 @@ fn refresh_tray(app: &AppHandle, devices: &[String]) {
     let result = (|| -> tauri::Result<()> {
         let Some(tray) = app.tray_by_id(TRAY_ID) else { return Ok(()) };
         let [microphone, system_default, show, quit] = app.state::<TrayLabels>().0.lock().unwrap().clone();
-        let selected = app.state::<AppState>().config.lock().unwrap().input_device.clone();
-        let in_use = mic_in_use(selected.as_deref(), devices);
+        let saved = app.state::<AppState>().config.lock().unwrap().input_devices.clone();
+        let in_use = mic_in_use(&saved, devices);
         let mics = Submenu::with_id(app, "mic", &microphone, true)?;
         mics.append(&CheckMenuItem::with_id(app, "mic-default", &system_default, true, in_use.is_none(), None::<&str>)?)?;
         mics.append(&PredefinedMenuItem::separator(app)?)?;
@@ -205,10 +205,22 @@ fn refresh_tray(app: &AppHandle, devices: &[String]) {
     }
 }
 
-/// The microphone recording uses: the chosen one while it is connected, else the system default
-/// (None). A disconnected choice stays saved and is used again once it is back.
-fn mic_in_use<'a>(selected: Option<&'a str>, devices: &[String]) -> Option<&'a str> {
-    selected.filter(|name| devices.iter().any(|device| device == name))
+/// The microphone recording uses: the first chosen one that is connected, else the system default
+/// (None). Disconnected choices stay saved and are used again once they are back.
+fn mic_in_use<'a>(saved: &'a [String], devices: &[String]) -> Option<&'a str> {
+    saved.iter().find(|name| devices.contains(name)).map(String::as_str)
+}
+
+/// Remembers a choice from the Microphone menu (None = System Default, which forgets them all).
+/// A microphone moves just ahead of the saved one in use now, so it is used here while the ones
+/// ranked above that (saved at another desk or computer, not connected here) keep winning there.
+// ponytail: one ranked list; a microphone connected at several desks (built-in, AirPods) picked
+// at one can outrank another desk's choice. Remember picks per set of connected devices if that bites.
+fn choose_mic(saved: &mut Vec<String>, choice: Option<String>, devices: &[String]) {
+    let Some(choice) = choice else { return saved.clear() };
+    let at = saved.iter().position(|name| *name == choice || devices.contains(name)).unwrap_or(saved.len());
+    saved.retain(|name| *name != choice);
+    saved.insert(at, choice);
 }
 
 const CHIME_TRIM_MS: u32 = 150;
@@ -870,9 +882,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         return Err(Notice::from_issue(issue));
     }
     let config = state.config.lock().unwrap().clone();
-    let (device, sound_on, mute, beta) = (
-        config.input_device.clone(), config.sound_feedback, config.mute_background, config.beta_features,
-    );
+    let (sound_on, mute, beta) = (config.sound_feedback, config.mute_background, config.beta_features);
     let focus = if purpose == Purpose::Dictation && config.cancel_on_focus_change {
         frontmost::capture_focus()
     } else {
@@ -913,7 +923,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     }
     update_hud(app);
     let fell_back = match state.recorder.start_recording_streamed(
-        device.as_deref(), input, if sound_on { CHIME_TRIM_MS } else { 0 },
+        &config.input_devices, input, if sound_on { CHIME_TRIM_MS } else { 0 },
     ) {
         Ok(fell_back) => fell_back,
         Err(e) => {
@@ -924,7 +934,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     };
     if fell_back {
         let mut vars = BTreeMap::new();
-        vars.insert("name".into(), device.unwrap_or_default());
+        vars.insert("name".into(), config.input_devices.first().cloned().unwrap_or_default());
         report(
             app,
             "Microphone “{name}” not found, using the system default",
@@ -1880,10 +1890,11 @@ pub fn run() {
                         // it waits on the main thread.
                         let app = app.clone();
                         std::thread::spawn(move || {
-                            if let Err(e) = update_config(&app, |c| c.input_device = device) {
+                            let devices = audio::list_input_devices();
+                            if let Err(e) = update_config(&app, |c| choose_mic(&mut c.input_devices, device, &devices)) {
                                 report_error(&app, e);
                             }
-                            refresh_tray(&app, &audio::list_input_devices());
+                            refresh_tray(&app, &devices);
                         });
                     }
                 })
@@ -2122,11 +2133,44 @@ mod tests {
     fn the_chosen_mic_is_used_while_connected_and_returns_after_a_disconnect() {
         let devices = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
         let connected = devices(&["MacBook Pro Microphone", "Mikme Microphone"]);
-        assert_eq!(mic_in_use(Some("Mikme Microphone"), &connected), Some("Mikme Microphone"));
-        assert_eq!(mic_in_use(None, &connected), None, "System Default");
+        assert_eq!(mic_in_use(&devices(&["Mikme Microphone"]), &connected), Some("Mikme Microphone"));
+        assert_eq!(mic_in_use(&[], &connected), None, "System Default");
         // Unplugged: System Default is in use, and the choice itself is untouched.
-        assert_eq!(mic_in_use(Some("Mikme Microphone"), &devices(&["MacBook Pro Microphone"])), None);
-        assert_eq!(mic_in_use(Some("Mikme"), &connected), None, "names match exactly");
+        assert_eq!(mic_in_use(&devices(&["Mikme Microphone"]), &devices(&["MacBook Pro Microphone"])), None);
+        assert_eq!(mic_in_use(&devices(&["Mikme"]), &connected), None, "names match exactly");
+        // The first saved one that is connected wins.
+        assert_eq!(mic_in_use(&devices(&["Desk Mic", "Mikme Microphone", "MacBook Pro Microphone"]), &connected), Some("Mikme Microphone"));
+    }
+
+    #[test]
+    fn each_desk_keeps_its_microphone() {
+        let names = |names: &[&str]| names.iter().map(|n| n.to_string()).collect::<Vec<_>>();
+        let (home, office, travel) = (names(&["Built-in", "Home Mic"]), names(&["Built-in", "Office Mic"]), names(&["Built-in"]));
+        let mut saved = Vec::new();
+        let mut choose = |choice: Option<&str>, here: &[String]| {
+            choose_mic(&mut saved, choice.map(str::to_string), here);
+            saved.clone()
+        };
+        choose(Some("Home Mic"), &home);
+        let saved_list = choose(Some("Office Mic"), &office);
+        assert_eq!(mic_in_use(&saved_list, &home), Some("Home Mic"), "back home");
+        assert_eq!(mic_in_use(&saved_list, &office), Some("Office Mic"));
+        // Picking the built-in while away does not beat the desk microphones at their desks.
+        let saved_list = choose(Some("Built-in"), &travel);
+        assert_eq!(saved_list, ["Home Mic", "Office Mic", "Built-in"]);
+        assert_eq!(mic_in_use(&saved_list, &home), Some("Home Mic"));
+        assert_eq!(mic_in_use(&saved_list, &office), Some("Office Mic"));
+        assert_eq!(mic_in_use(&saved_list, &travel), Some("Built-in"));
+        // Picking it at a desk beats that desk's microphone only.
+        let saved_list = choose(Some("Built-in"), &office);
+        assert_eq!(saved_list, ["Home Mic", "Built-in", "Office Mic"]);
+        assert_eq!(mic_in_use(&saved_list, &office), Some("Built-in"));
+        assert_eq!(mic_in_use(&saved_list, &home), Some("Home Mic"));
+        // Picking the one already in use changes nothing.
+        assert_eq!(choose(Some("Built-in"), &office), saved_list);
+        assert_eq!(choose(Some("Home Mic"), &home), saved_list);
+        // System Default forgets them all.
+        assert!(choose(None, &home).is_empty());
     }
 
     #[test]
