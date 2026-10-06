@@ -589,20 +589,19 @@ export const MODIFIER_CODES = [
   "MetaRight",
 ];
 
+const MODIFIER_NAMES = IS_MAC
+  ? { Control: "^", Alt: "⌥", Shift: "⇧", Meta: "⌘" }
+  : { Control: "Ctrl", Alt: "Alt", Shift: "Shift", Meta: "Win" };
+
 export const KEY_LABELS: Record<string, string> = {
   Fn: "fn",
-  ControlLeft: "Left ^",
-  ControlRight: "Right ^",
-  AltLeft: "Left ⌥",
-  AltRight: "Right ⌥",
-  ShiftLeft: "Left ⇧",
-  ShiftRight: "Right ⇧",
-  MetaLeft: "Left ⌘",
-  MetaRight: "Right ⌘",
-  Control: IS_MAC ? "^" : "Ctrl",
-  Alt: IS_MAC ? "⌥" : "Alt",
-  Shift: "⇧",
-  Meta: IS_MAC ? "⌘" : "Win",
+  ...Object.fromEntries(
+    Object.entries(MODIFIER_NAMES).flatMap(([code, name]) => [
+      [code, name],
+      [`${code}Left`, `Left ${name}`],
+      [`${code}Right`, `Right ${name}`],
+    ]),
+  ),
   Space: "Spacebar",
   Enter: "Enter",
 };

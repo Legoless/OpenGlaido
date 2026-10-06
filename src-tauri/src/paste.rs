@@ -216,7 +216,25 @@ fn clipboard_version() -> Option<u64> {
     }
 }
 
+/// Windows: a Ctrl+Win or Left Ctrl + Left Alt hold ends when its first key comes up. Pasting while
+/// Win or Alt is still down would press Win+Ctrl+V or Ctrl+Alt+V, so wait for them (briefly).
+#[cfg(target_os = "windows")]
+fn wait_for_win_and_alt() {
+    #[link(name = "user32")]
+    extern "system" {
+        fn GetAsyncKeyState(vk: i32) -> i16;
+    }
+    // VK_LWIN, VK_RWIN, VK_LMENU, VK_RMENU
+    let held = || [0x5B, 0x5C, 0xA4, 0xA5].into_iter().any(|vk| unsafe { GetAsyncKeyState(vk) } < 0);
+    let deadline = std::time::Instant::now() + Duration::from_millis(1500);
+    while held() && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(15));
+    }
+}
+
 fn checked_paste(target_app_id: Option<&str>, owned_version: u64, text: &str, cancellation: &Cancellation) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    wait_for_win_and_alt();
     cancellation.check()?;
     let current = verified_clipboard_version(text, clipboard_version, || Clipboard::new().ok()?.get_text().ok());
     if current != Some(owned_version) {

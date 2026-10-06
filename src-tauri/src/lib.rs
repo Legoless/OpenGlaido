@@ -503,9 +503,9 @@ fn load_config(path: &Path) -> TranscriptionConfig {
             migrated = true;
         }
     }
-    // The first Windows defaults included shortcuts Windows itself reserves; untouched pairs move on.
-    migrated |= hotkeys::replace_reserved_defaults(&mut config.hotkey_hold, &mut config.hotkey_toggle, false);
-    migrated |= hotkeys::replace_reserved_defaults(&mut config.commands_hold, &mut config.commands_toggle, true);
+    // Windows pairs still on an earlier default move to Glaido's.
+    migrated |= hotkeys::replace_old_defaults(&mut config.hotkey_hold, &mut config.hotkey_toggle, false);
+    migrated |= hotkeys::replace_old_defaults(&mut config.commands_hold, &mut config.commands_toggle, true);
     // Each credential family migrates independently; failed migration must not rewrite plaintext keys.
     let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty() || !config.llm_api_key.is_empty();
     let search_loaded = if config.search_keys_migrated {
@@ -1792,6 +1792,10 @@ fn delete_snippet(id: String, state: State<'_, AppState>) -> Result<(), String> 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Windows: no raw keyboard input for our windows. While a window of a process registered
+        // for it has focus, Windows skips that process's low-level keyboard hook, so the hotkeys
+        // (and the hotkey recorder) went deaf whenever an OpenGlaido window was in front.
+        .device_event_filter(tauri::DeviceEventFilter::Always)
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())

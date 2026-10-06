@@ -1,5 +1,6 @@
 //! Binding strings + the pure hotkey state machine. No tauri/OS types in here, so everything
-//! unit-tests on any platform; the macOS tap and the plugin backend are thin shells around it.
+//! unit-tests on any platform; the macOS tap, the Windows hook and the plugin backend are thin
+//! shells around it.
 
 use HotkeyEvent::*;
 
@@ -164,26 +165,45 @@ pub fn parse(s: &str) -> Result<Option<Binding>, String> {
     Ok(Some(b))
 }
 
-/// `parse` + the platform rules: only macOS allows `Fn` and modifier-only bindings.
-pub fn validate_for(platform_is_mac: bool, s: &str) -> Result<Option<Binding>, String> {
+/// Which backend's rules `validate_for` applies.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Platform {
+    /// Event tap: Fn and modifier-only bindings.
+    Mac,
+    /// Keyboard hook: modifier-only bindings, but no Fn (Windows never sees it).
+    Windows,
+    /// Global-shortcut plugin: every binding needs a key.
+    Other,
+}
+
+/// `parse` + the platform rules: Fn is macOS only, modifier-only bindings need a native backend.
+pub fn validate_for(platform: Platform, s: &str) -> Result<Option<Binding>, String> {
     let Some(b) = parse(s)? else { return Ok(None) };
-    if platform_is_mac {
+    let held = b.exact | b.any;
+    if platform == Platform::Mac {
         if let Some(key) = b.key.filter(|k| PC_ONLY_KEYS.contains(k)) {
             return Err(format!("{key} doesn't exist on Mac keyboards"));
         }
     } else if b.exact & FN != 0 {
         return Err("fn can't be used on Windows".into());
-    } else if b.key.is_none() {
-        return Err("Add a key — only modifier keys are supported alone on macOS".into());
-    } else if (b.exact | b.any) & GROUPS[0] != 0 && (b.exact | b.any) & GROUPS[1] != 0 && (b.exact | b.any) & GROUPS[3] == 0 {
-        // AltGr arrives as Ctrl+Alt: such a hotkey would eat characters like ć, @ or & on many layouts.
-        return Err("Ctrl+Alt is AltGr on many keyboards — add Win or choose another combination".into());
+    } else if b.key.is_none() && platform == Platform::Other {
+        return Err("Add a key — modifier keys alone only work on macOS and Windows".into());
+    } else if held & GROUPS[0] != 0 && held & GROUPS[1] != 0 && held & GROUPS[3] == 0 {
+        // AltGr arrives as Left Ctrl + Right Alt, and Windows types AltGr characters for any Ctrl+Alt:
+        // a hotkey with a key would eat characters like ć, @ or & on many layouts. Left Ctrl + Left Alt
+        // on its own (Glaido's commands default) types nothing, and AltGr can't complete it.
+        if b.key.is_some() {
+            return Err("Ctrl+Alt is AltGr on many keyboards — add Win or choose another combination".into());
+        }
+        if held & ALT_RIGHT != 0 {
+            return Err("Right Alt is AltGr on many keyboards — use Left Alt or add Win".into());
+        }
     }
     // A typing key without ⌃/⌥/⌘/fn would be swallowed in every app (Shift alone still types).
     if let Some(key) = b.key {
         let bare_ok = PC_ONLY_KEYS.contains(&key) || key.strip_prefix('F').is_some_and(|n| n.parse::<u8>().is_ok());
-        if (b.exact | b.any) & !GROUPS[2] == 0 && !bare_ok {
-            return Err(format!("Add a modifier key — {} alone would stop working for typing in every app", label(&b, platform_is_mac)));
+        if held & !GROUPS[2] == 0 && !bare_ok {
+            return Err(format!("Add a modifier key — {} alone would stop working for typing in every app", label(&b, platform == Platform::Mac)));
         }
     }
     Ok(Some(b))
@@ -269,6 +289,7 @@ pub struct State {
     pub cancel_area: Option<[f64; 4]>,
     pub cancel_processing: bool,
     /// The cancel click's button-up still has to be swallowed.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     swallow_up: bool,
     /// Enter → Submit while set.
     pub submit: bool,
@@ -299,6 +320,8 @@ impl State {
 
     /// Left button down/up at screen point (x, y). Returns (Cancel event, swallow): a click on the
     /// bar's cancel "x" cancels like Esc, and both of its halves are kept from the app underneath.
+    /// Only the macOS tap reports clicks: elsewhere the bar shows no cancel "x".
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub fn click(&mut self, down: bool, x: f64, y: f64) -> (Option<Output>, bool) {
         if !down {
             return (None, std::mem::take(&mut self.swallow_up));
@@ -703,33 +726,72 @@ mod tests {
 
     #[test]
     fn platform_validation() {
+        use Platform::*;
         // macOS: modifier-only and Fn are fine.
         for s in ["", "Fn", "Fn+Space", "AltLeft+ControlLeft", "AltRight", "Control+Shift+Space"] {
-            assert!(validate_for(true, s).is_ok(), "{s}");
+            assert!(validate_for(Mac, s).is_ok(), "{s}");
         }
-        assert_eq!(validate_for(true, "Control+Pause").unwrap_err(), "Pause doesn't exist on Mac keyboards");
-        // Windows: needs a key, no Fn; sides are accepted (registered as generic).
-        for s in ["", "Control+Shift+Space", "Control+Shift+Meta+Space", "ControlLeft+KeyK", "Control+Pause", "F5", "Control+Alt+Meta+KeyC"] {
-            assert!(validate_for(false, s).is_ok(), "{s}");
-        }
-        // Ctrl+Alt without Win is AltGr on many layouts (ć, @, &): refused on Windows only.
-        for s in ["Control+Alt+KeyC", "ControlLeft+AltRight+Shift+Space"] {
-            assert!(validate_for(false, s).unwrap_err().contains("AltGr"), "{s}");
-        }
-        assert!(validate_for(true, "Control+Alt+KeyC").is_ok());
-        assert_eq!(validate_for(false, "Fn").unwrap_err(), "fn can't be used on Windows");
-        assert_eq!(validate_for(false, "Fn+Space").unwrap_err(), "fn can't be used on Windows");
-        assert_eq!(validate_for(false, "AltLeft+ControlLeft").unwrap_err(), "Add a key — only modifier keys are supported alone on macOS");
-        assert!(validate_for(false, "Control+Nope").is_err());
-        // Bare typing keys (or Shift + typing key) would block typing everywhere; F-keys are fine.
-        for mac in [true, false] {
-            for s in ["Space", "KeyA", "Enter", "Tab", "Digit1", "ShiftLeft+KeyA", "Shift+Space", "ArrowUp"] {
-                assert!(validate_for(mac, s).unwrap_err().starts_with("Add a modifier key"), "{s}");
+        assert_eq!(validate_for(Mac, "Control+Pause").unwrap_err(), "Pause doesn't exist on Mac keyboards");
+        // Windows and the plugin: no Fn; sides are accepted (the plugin registers them as generic).
+        for platform in [Windows, Other] {
+            for s in ["", "Control+Shift+Space", "Control+Shift+Meta+Space", "ControlLeft+KeyK", "Control+Pause", "F5", "Control+Alt+Meta+KeyC"] {
+                assert!(validate_for(platform, s).is_ok(), "{s}");
             }
-            assert!(validate_for(mac, "F5").is_ok());
-            assert!(validate_for(mac, "Shift+F5").is_ok());
+            // Ctrl+Alt + a key is AltGr on many layouts (ć, @, &): refused off macOS.
+            for s in ["Control+Alt+KeyC", "ControlLeft+AltRight+Shift+Space", "ControlLeft+AltLeft+KeyQ"] {
+                assert!(validate_for(platform, s).unwrap_err().contains("AltGr"), "{s}");
+            }
+            assert_eq!(validate_for(platform, "Fn").unwrap_err(), "fn can't be used on Windows");
+            assert_eq!(validate_for(platform, "Fn+Space").unwrap_err(), "fn can't be used on Windows");
+            assert!(validate_for(platform, "Control+Nope").is_err());
         }
-        assert!(validate_for(true, "Fn+Space").is_ok());
+        assert!(validate_for(Mac, "Control+Alt+KeyC").is_ok());
+        // The Windows hook takes modifier-only bindings (Glaido's defaults); the plugin can't.
+        for s in ["Control+Meta", "Control+Shift+Meta", "ControlLeft+AltLeft", "ControlLeft+AltLeft+Shift", "AltRight", "MetaLeft"] {
+            assert!(validate_for(Windows, s).is_ok(), "{s}");
+            assert_eq!(validate_for(Other, s).unwrap_err(), "Add a key — modifier keys alone only work on macOS and Windows", "{s}");
+        }
+        // AltGr is Left Ctrl + Right Alt, so a modifier-only Ctrl + (Right) Alt would fire while typing ć or @.
+        for s in ["Control+Alt", "ControlLeft+AltRight", "Control+Alt+Shift"] {
+            assert!(validate_for(Windows, s).unwrap_err().contains("AltGr"), "{s}");
+        }
+        assert!(validate_for(Windows, "Control+Alt+Meta").is_ok());
+        // Bare typing keys (or Shift + typing key) would block typing everywhere; F-keys are fine.
+        for platform in [Mac, Windows, Other] {
+            for s in ["Space", "KeyA", "Enter", "Tab", "Digit1", "ShiftLeft+KeyA", "Shift+Space", "ArrowUp"] {
+                assert!(validate_for(platform, s).unwrap_err().starts_with("Add a modifier key"), "{s}");
+            }
+            assert!(validate_for(platform, "F5").is_ok());
+            assert!(validate_for(platform, "Shift+F5").is_ok());
+        }
+        assert!(validate_for(Mac, "Fn+Space").is_ok());
+    }
+
+    #[test]
+    fn glaido_windows_defaults() {
+        // Dictation: Ctrl+Win (either side) to hold, Ctrl+Win+Shift tapped for hands-free.
+        let mut st = state("Control+Meta", "Control+Shift+Meta");
+        st.set_command_bindings(parse("ControlLeft+AltLeft").unwrap(), parse("ControlLeft+AltLeft+Shift").unwrap());
+        assert_eq!(run(&mut st, vec![down(CONTROL_RIGHT), down(META_LEFT), up(META_LEFT), up(CONTROL_RIGHT)]).0, vec![HoldPressed, HoldReleased]);
+        // Shift joining ends the hold (its delayed start never happened); releasing taps hands-free.
+        assert_eq!(
+            run(&mut st, vec![down(CONTROL_LEFT), down(META_LEFT), down(SHIFT_LEFT), up(SHIFT_LEFT), up(META_LEFT), up(CONTROL_LEFT)]).0,
+            vec![HoldPressed, HoldAborted, TogglePressed]
+        );
+        // Shift first: straight to the tap.
+        assert_eq!(run(&mut st, vec![down(SHIFT_RIGHT), down(CONTROL_LEFT), down(META_RIGHT), up(META_RIGHT), up(CONTROL_LEFT), up(SHIFT_RIGHT)]).0, vec![TogglePressed]);
+        // Ctrl+Win+→ (switch desktops) is the system's: the hold aborts, the key goes through.
+        assert_eq!(run(&mut st, vec![down(CONTROL_LEFT), down(META_LEFT), kd("ArrowRight")]), (vec![HoldPressed, HoldAborted], false));
+        run(&mut st, vec![ku("ArrowRight"), up(META_LEFT), up(CONTROL_LEFT)]);
+        // Commands: Left Ctrl + Left Alt only; AltGr (Left Ctrl + Right Alt) types ć and @ untouched.
+        assert_eq!(run(&mut st, vec![down(CONTROL_LEFT), down(ALT_LEFT), up(ALT_LEFT), up(CONTROL_LEFT)]).0, vec![CommandHoldPressed, CommandHoldReleased]);
+        assert_eq!(run(&mut st, vec![down(CONTROL_LEFT), down(ALT_RIGHT), kd("KeyQ")]), (vec![], false));
+        run(&mut st, vec![ku("KeyQ"), up(ALT_RIGHT), up(CONTROL_LEFT)]);
+        assert_eq!(run(&mut st, vec![down(CONTROL_RIGHT), down(ALT_LEFT), up(ALT_LEFT), up(CONTROL_RIGHT)]).0, vec![]);
+        assert_eq!(
+            run(&mut st, vec![down(SHIFT_LEFT), down(CONTROL_LEFT), down(ALT_LEFT), up(ALT_LEFT), up(CONTROL_LEFT), up(SHIFT_LEFT)]).0,
+            vec![CommandTogglePressed]
+        );
     }
 
     #[test]

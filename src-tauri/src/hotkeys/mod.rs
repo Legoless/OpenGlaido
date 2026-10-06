@@ -7,17 +7,21 @@
 //! - keys: `KeyboardEvent.code` names (`Space`, `KeyA`, `Digit1`, `F5`, `Enter`, `ArrowUp`, ...)
 //! - "" means "disabled".
 //!
-//! macOS allows modifier-only bindings (e.g. `Fn`, `AltLeft+ControlLeft`); other platforms
-//! require exactly one non-modifier key and no `Fn`.
+//! macOS and Windows allow modifier-only bindings (e.g. `Fn`, `Control+Meta`,
+//! `ControlLeft+AltLeft`); `Fn` is macOS only, and other platforms require exactly one
+//! non-modifier key.
 //!
-//! `chord` holds the parser and the pure state machine, `macos` the native event tap. This file
-//! is the tauri glue plus the tauri-plugin-global-shortcut backend used off macOS.
+//! `chord` holds the parser and the pure state machine, `macos` the native event tap, `win` the
+//! Windows keyboard hook. This file is the tauri glue plus the tauri-plugin-global-shortcut
+//! backend used elsewhere.
 
-// The state machine itself only runs behind the macOS tap; elsewhere it just holds settings.
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+// The state machine only runs behind the macOS tap and the Windows hook; elsewhere it just holds settings.
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 mod chord;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(windows)]
+mod win;
 
 pub use chord::HotkeyEvent;
 
@@ -30,12 +34,21 @@ use tauri::{AppHandle, Emitter};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 use HotkeyEvent::*;
 
-/// macOS runs the native event tap; everything else the global-shortcut plugin.
-const NATIVE: bool = cfg!(target_os = "macos");
+/// macOS labels (⌘, fn) and ⌘C instead of Ctrl+C.
+const MAC: bool = cfg!(target_os = "macos");
+/// macOS runs the native event tap and Windows a keyboard hook; elsewhere the global-shortcut plugin.
+const NATIVE: bool = cfg!(any(target_os = "macos", windows));
+const PLATFORM: chord::Platform = if MAC {
+    chord::Platform::Mac
+} else if cfg!(windows) {
+    chord::Platform::Windows
+} else {
+    chord::Platform::Other
+};
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct HotkeyStatus {
-    /// "native" (macOS event tap) or "plugin" (tauri-plugin-global-shortcut).
+    /// "native" (macOS event tap, Windows keyboard hook) or "plugin" (tauri-plugin-global-shortcut).
     pub engine: String,
     /// False when the OS permission the engine needs (macOS Accessibility) is missing.
     pub permission_granted: bool,
@@ -43,7 +56,7 @@ pub struct HotkeyStatus {
     pub error: Option<String>,
 }
 
-#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "macos", windows)), allow(dead_code))]
 enum Msg {
     Out(Output),
     /// Plugin shortcut id + pressed. Resolved on the dispatcher thread because the plugin holds
@@ -82,7 +95,7 @@ impl Inner {
 impl HotkeyEngine {
     /// Starts the platform backend. `on_event` runs on a background thread and must not block.
     pub fn start(app: &AppHandle, on_event: impl Fn(HotkeyEvent) + Send + Sync + 'static) -> Self {
-        let copy_group = if NATIVE { chord::GROUPS[3] } else { chord::GROUPS[0] };
+        let copy_group = if MAC { chord::GROUPS[3] } else { chord::GROUPS[0] };
         let mut state = State::default();
         state.copy_group = copy_group;
         let state = Arc::new(Mutex::new(state));
@@ -111,7 +124,9 @@ impl HotkeyEngine {
             let error = (!granted).then(|| macos::NEEDS_ACCESS.to_string());
             HotkeyStatus { engine: "native".into(), permission_granted: granted, error }
         };
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(windows)]
+        let status = HotkeyStatus { engine: "native".into(), permission_granted: true, error: None };
+        #[cfg(not(any(target_os = "macos", windows)))]
         let status = HotkeyStatus { engine: "plugin".into(), permission_granted: true, error: None };
 
         let inner = Arc::new(Inner { app: app.clone(), state, status: Mutex::new(status), tx });
@@ -124,6 +139,17 @@ impl HotkeyEngine {
                     let _ = tx.send(Msg::Out(output));
                 },
                 move |granted, error| status_inner.set_status(granted, error),
+            );
+        }
+        #[cfg(windows)]
+        {
+            let (tx, status_inner) = (inner.tx.clone(), inner.clone());
+            win::spawn(
+                inner.state.clone(),
+                move |output| {
+                    let _ = tx.send(Msg::Out(output));
+                },
+                move |error| status_inner.set_status(true, error),
             );
         }
         Self { inner }
@@ -158,8 +184,8 @@ impl HotkeyEngine {
     }
 
     fn set_pair(&self, idx: usize, hold: &str, toggle: &str, same_msg: &str, strict: bool) -> Result<(), String> {
-        let hold = chord::validate_for(NATIVE, hold)?;
-        let toggle = chord::validate_for(NATIVE, toggle)?;
+        let hold = chord::validate_for(PLATFORM, hold)?;
+        let toggle = chord::validate_for(PLATFORM, toggle)?;
         if hold.is_some() && hold == toggle {
             return Err(same_msg.into());
         }
@@ -180,7 +206,7 @@ impl HotkeyEngine {
             .find(|b| [&other.hold, &other.toggle].into_iter().flatten().any(|o| clash(b, o)));
         if let Some(b) = taken {
             let what = if idx == 0 { "a command" } else { "a dictation" };
-            return Err(format!("{} is already {what} hotkey", chord::label(b, NATIVE)));
+            return Err(format!("{} is already {what} hotkey", chord::label(b, MAC)));
         }
         for output in st.abort_active() {
             let _ = self.inner.tx.send(Msg::Out(output));
@@ -224,7 +250,7 @@ impl HotkeyEngine {
     }
 
     /// Screen rect (points) of the dictation bar's cancel "x", or None while it isn't shown.
-    /// macOS only: the tap turns a click there into `HotkeyEvent::Cancel`.
+    /// macOS only: the tap turns a click there into `HotkeyEvent::Cancel` (the Windows hook doesn't).
     pub fn set_cancel_area(&self, area: Option<[f64; 4]>, processing: bool) {
         let mut state = self.lock();
         state.cancel_area = area;
@@ -273,7 +299,7 @@ impl HotkeyEngine {
             let _ = self.inner.tx.send(Msg::Out(output));
         }
         st.set_capture(true);
-        // Without a live tap (no Accessibility / tap failed) the webview has to capture keys itself.
+        // Without a live tap or hook (no Accessibility / it failed) the webview has to capture keys itself.
         let status = self.status();
         NATIVE && status.permission_granted && status.error.is_none()
     }
@@ -429,7 +455,7 @@ fn plugin_event(st: &State, id: u32, pressed: bool) -> Option<HotkeyEvent> {
 
 /// Ok if `s` is "" or a binding this platform can register.
 pub fn validate_binding(s: &str) -> Result<(), String> {
-    chord::validate_for(NATIVE, s).map(|_| ())
+    chord::validate_for(PLATFORM, s).map(|_| ())
 }
 
 /// Human-readable warning when another app already owns `s` (macOS: exclusive Carbon probe).
@@ -449,38 +475,40 @@ pub fn conflict_warning(s: &str) -> Option<String> {
     None
 }
 
-// Plugin defaults: Ctrl+Win plus a letter to hold, Shift added for hands-free (Glaido's Windows
-// defaults are Ctrl+Win and Ctrl+Win+Shift, but the plugin needs a non-modifier key). Windows
-// reserves every Win+Space variant (input switching) and Ctrl+Win+C (color filters); Ctrl+Shift+Space
-// is a common launcher and IDE shortcut; Ctrl+Alt is AltGr on many layouts. G (Glaido) and A (ask)
-// sit under the left hand on QWERTY, QWERTZ and AZERTY, and Windows, Xbox Game Bar and PowerToys
-// don't use them with Ctrl+Win.
+// Windows uses Glaido's defaults (docs.glaido.com/docs/configuration/hotkeys): hold Ctrl+Win to
+// dictate and Left Ctrl + Left Alt for commands, Shift added for hands-free. The commands ones are
+// side-specific so AltGr (Left Ctrl + Right Alt) still types @ and €. The plugin backend needs a
+// non-modifier key, so elsewhere it's Ctrl+Win+G / Ctrl+Win+A (Shift for hands-free).
 pub fn default_hold() -> &'static str {
-    if cfg!(target_os = "macos") { "Fn" } else { "Control+Meta+KeyG" }
+    if MAC { "Fn" } else if cfg!(windows) { "Control+Meta" } else { "Control+Meta+KeyG" }
 }
 
 pub fn default_toggle() -> &'static str {
-    if cfg!(target_os = "macos") { "Fn+Space" } else { "Control+Shift+Meta+KeyG" }
+    if MAC { "Fn+Space" } else if cfg!(windows) { "Control+Shift+Meta" } else { "Control+Shift+Meta+KeyG" }
 }
 
 pub fn default_commands_hold() -> &'static str {
-    if cfg!(target_os = "macos") { "AltRight" } else { "Control+Meta+KeyA" }
+    if MAC { "AltRight" } else if cfg!(windows) { "ControlLeft+AltLeft" } else { "Control+Meta+KeyA" }
 }
 
 pub fn default_commands_toggle() -> &'static str {
-    if cfg!(target_os = "macos") { "AltRight+Space" } else { "Control+Shift+Meta+KeyA" }
+    if MAC { "AltRight+Space" } else if cfg!(windows) { "ControlLeft+AltLeft+Shift" } else { "Control+Shift+Meta+KeyA" }
 }
 
-/// Moves a pair still on the first plugin defaults, which Windows reserves, to the current ones.
-/// Turning beta on cleared a taken commands hold, so ("", old toggle) counts as untouched too.
-/// Returns whether it changed anything.
-pub fn replace_reserved_defaults(hold: &mut String, toggle: &mut String, commands: bool) -> bool {
+/// Windows: moves a pair still on an earlier default to the current one. The first plugin
+/// defaults included shortcuts Windows reserves (every Win+Space variant, Ctrl+Win+C), and
+/// Ctrl+Win+G / Ctrl+Win+A briefly replaced them. Turning beta on cleared a taken commands hold,
+/// so ("", old toggle) counts as untouched too. Returns whether it changed anything.
+pub fn replace_old_defaults(hold: &mut String, toggle: &mut String, commands: bool) -> bool {
     let (old, new): (&[[&str; 2]], _) = if commands {
-        (&[["Control+Meta+KeyC", "Control+Shift+Meta+KeyC"], ["", "Control+Shift+Meta+KeyC"]], [default_commands_hold(), default_commands_toggle()])
+        (
+            &[["Control+Meta+KeyC", "Control+Shift+Meta+KeyC"], ["", "Control+Shift+Meta+KeyC"], ["Control+Meta+KeyA", "Control+Shift+Meta+KeyA"]],
+            [default_commands_hold(), default_commands_toggle()],
+        )
     } else {
-        (&[["Control+Shift+Space", "Control+Shift+Meta+Space"]], [default_hold(), default_toggle()])
+        (&[["Control+Shift+Space", "Control+Shift+Meta+Space"], ["Control+Meta+KeyG", "Control+Shift+Meta+KeyG"]], [default_hold(), default_toggle()])
     };
-    if NATIVE || !old.iter().any(|[h, t]| h == hold && t == toggle) {
+    if !cfg!(windows) || !old.iter().any(|[h, t]| h == hold && t == toggle) {
         return false;
     }
     (*hold, *toggle) = (new[0].to_string(), new[1].to_string());
@@ -495,12 +523,15 @@ mod tests {
     fn defaults_are_valid_and_distinct() {
         assert!(validate_binding(default_hold()).is_ok());
         assert!(validate_binding(default_toggle()).is_ok());
-        // The Windows defaults are valid there too (none uses Ctrl+Alt without Win), and none fires on another's keys.
-        let windows = ["Control+Meta+KeyG", "Control+Shift+Meta+KeyG", "Control+Meta+KeyA", "Control+Shift+Meta+KeyA"];
-        for (i, b) in windows.iter().enumerate() {
-            let binding = chord::validate_for(false, b).unwrap().unwrap();
-            for other in &windows[..i] {
-                assert!(!chord::overlaps(&binding, &chord::parse(other).unwrap().unwrap()), "{b} / {other}");
+        // Each platform's defaults are valid there, and none fires on another's keys.
+        let windows = ["Control+Meta", "Control+Shift+Meta", "ControlLeft+AltLeft", "ControlLeft+AltLeft+Shift"];
+        let plugin = ["Control+Meta+KeyG", "Control+Shift+Meta+KeyG", "Control+Meta+KeyA", "Control+Shift+Meta+KeyA"];
+        for (platform, defaults) in [(chord::Platform::Windows, windows), (chord::Platform::Other, plugin)] {
+            for (i, b) in defaults.iter().enumerate() {
+                let binding = chord::validate_for(platform, b).unwrap().unwrap();
+                for other in &defaults[..i] {
+                    assert!(!chord::overlaps(&binding, &chord::parse(other).unwrap().unwrap()), "{b} / {other}");
+                }
             }
         }
         let all = [default_hold(), default_toggle(), default_commands_hold(), default_commands_toggle()];
@@ -530,22 +561,24 @@ mod tests {
     }
 
     #[test]
-    fn untouched_reserved_defaults_move_to_the_current_ones() {
+    fn untouched_old_defaults_move_to_the_current_ones() {
         let replace = |hold: &str, toggle: &str, commands| {
             let (mut hold, mut toggle) = (hold.to_string(), toggle.to_string());
-            let changed = replace_reserved_defaults(&mut hold, &mut toggle, commands);
+            let changed = replace_old_defaults(&mut hold, &mut toggle, commands);
             (changed, hold, toggle)
         };
         let kept = |hold: &str, toggle: &str| (false, hold.to_string(), toggle.to_string());
-        if NATIVE {
+        if !cfg!(windows) {
             assert_eq!(replace("Control+Shift+Space", "Control+Shift+Meta+Space", false), kept("Control+Shift+Space", "Control+Shift+Meta+Space"));
             return;
         }
-        let dictation = (true, default_hold().to_string(), default_toggle().to_string());
-        let commands = (true, default_commands_hold().to_string(), default_commands_toggle().to_string());
+        let dictation = (true, "Control+Meta".to_string(), "Control+Shift+Meta".to_string());
+        let commands = (true, "ControlLeft+AltLeft".to_string(), "ControlLeft+AltLeft+Shift".to_string());
         assert_eq!(replace("Control+Shift+Space", "Control+Shift+Meta+Space", false), dictation);
+        assert_eq!(replace("Control+Meta+KeyG", "Control+Shift+Meta+KeyG", false), dictation);
         assert_eq!(replace("Control+Meta+KeyC", "Control+Shift+Meta+KeyC", true), commands);
         assert_eq!(replace("", "Control+Shift+Meta+KeyC", true), commands);
+        assert_eq!(replace("Control+Meta+KeyA", "Control+Shift+Meta+KeyA", true), commands);
         // A pair the user changed stays, even half of it.
         assert_eq!(replace("Control+Shift+F8", "Control+Shift+Meta+Space", false), kept("Control+Shift+F8", "Control+Shift+Meta+Space"));
         assert_eq!(replace("", "", true), kept("", ""));
