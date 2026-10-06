@@ -1,6 +1,9 @@
 name: Deploy website
 
 on:
+  push:
+    branches: [main]
+    paths: ["website/**"]
   workflow_dispatch:
 
 permissions:
