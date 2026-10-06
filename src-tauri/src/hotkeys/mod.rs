@@ -134,16 +134,30 @@ impl HotkeyEngine {
     }
 
     /// Validates and applies both bindings atomically; on Err the previous bindings stay active.
+    /// A binding this changes must register; one it keeps may stay taken by another app (see
+    /// `restore_bindings`).
     pub fn set_bindings(&self, hold: &str, toggle: &str) -> Result<(), String> {
-        self.set_pair(0, hold, toggle, "Dictation and hands-free dictation need different hotkeys")
+        self.set_pair(0, hold, toggle, DICTATION_SAME, true)
     }
 
     /// Commands hold/hands-free bindings; same rules as `set_bindings`, unique across all four.
     pub fn set_command_bindings(&self, hold: &str, toggle: &str) -> Result<(), String> {
-        self.set_pair(1, hold, toggle, "Commands and hands-free commands need different hotkeys")
+        self.set_pair(1, hold, toggle, COMMANDS_SAME, true)
     }
 
-    fn set_pair(&self, idx: usize, hold: &str, toggle: &str, same_msg: &str) -> Result<(), String> {
+    /// Applies dictation bindings that were already accepted (saved settings at startup, undoing a
+    /// failed save). One that another app owns now stays assigned but inactive and is reported in
+    /// `status()`, instead of taking the other hotkeys down with it.
+    pub fn restore_bindings(&self, hold: &str, toggle: &str) -> Result<(), String> {
+        self.set_pair(0, hold, toggle, DICTATION_SAME, false)
+    }
+
+    /// `restore_bindings` for the commands pair.
+    pub fn restore_command_bindings(&self, hold: &str, toggle: &str) -> Result<(), String> {
+        self.set_pair(1, hold, toggle, COMMANDS_SAME, false)
+    }
+
+    fn set_pair(&self, idx: usize, hold: &str, toggle: &str, same_msg: &str, strict: bool) -> Result<(), String> {
         let hold = chord::validate_for(NATIVE, hold)?;
         let toggle = chord::validate_for(NATIVE, toggle)?;
         if hold.is_some() && hold == toggle {
@@ -179,11 +193,17 @@ impl HotkeyEngine {
         let old = (st.pairs[idx].hold.clone(), st.pairs[idx].toggle.clone());
         self.plugin_off(&st);
         set(&mut st, hold, toggle);
-        if let Err(e) = self.plugin_on(&st) {
+        let failed = self.plugin_on(&st);
+        let new = [&st.pairs[idx].hold, &st.pairs[idx].toggle];
+        let refused = strict.then(|| newly_unavailable([&old.0, &old.1], new, &failed)).flatten();
+        if let Some(e) = refused.map(|b| format!("{} is already used by another app", chord::label(b, false))) {
+            self.plugin_off(&st);
             set(&mut st, old.0, old.1);
-            let _ = self.plugin_on(&st);
+            let failed = self.plugin_on(&st);
+            self.report_unavailable(&failed);
             return Err(e);
         }
+        self.report_unavailable(&failed);
         Ok(())
     }
 
@@ -265,9 +285,8 @@ impl HotkeyEngine {
         }
         st.set_capture(false);
         if !NATIVE {
-            if let Err(e) = self.plugin_on(&st) {
-                self.inner.set_status(true, Some(e));
-            }
+            let failed = self.plugin_on(&st);
+            self.report_unavailable(&failed);
         }
     }
 
@@ -282,26 +301,29 @@ impl HotkeyEngine {
         }
     }
 
-    /// Plugin backend: registers hold/toggle (rolling back on failure), then Esc/Enter if armed.
-    fn plugin_on(&self, st: &State) -> Result<(), String> {
+    /// Plugin backend: registers each hold/toggle binding on its own, so a shortcut another app
+    /// owns only disables itself, then Esc/Enter if armed. Returns the bindings that didn't register.
+    fn plugin_on(&self, st: &State) -> Vec<Binding> {
         let gs = self.inner.app.global_shortcut();
-        let mut registered = Vec::new();
+        let mut failed = Vec::new();
         for b in bindings(st) {
             let Some(s) = shortcut(b) else { continue };
             if let Err(e) = gs.register(s) {
-                for s in registered {
-                    let _ = gs.unregister(s);
-                }
-                return Err(format!("{} is already used by another app ({e})", chord::label(b, false)));
+                eprintln!("[hotkeys] couldn't register {}: {e}", chord::label(b, false));
+                failed.push(b.clone());
             }
-            registered.push(s);
         }
         for (s, on) in [esc(), enter(), copy()].into_iter().zip(armed(st)) {
             if on {
                 self.plugin_arm(s, true);
             }
         }
-        Ok(())
+        failed
+    }
+
+    /// Plugin backend: hotkeys another app owns stay assigned but do nothing; `status()` says which.
+    fn report_unavailable(&self, failed: &[Binding]) {
+        self.inner.set_status(true, unavailable_message(failed));
     }
 
     fn plugin_off(&self, st: &State) {
@@ -319,6 +341,25 @@ impl HotkeyEngine {
         } else if let Err(e) = gs.register(s) {
             eprintln!("[hotkeys] couldn't register {}: {e}", s.into_string());
         }
+    }
+}
+
+const DICTATION_SAME: &str = "Dictation and hands-free dictation need different hotkeys";
+const COMMANDS_SAME: &str = "Commands and hands-free commands need different hotkeys";
+
+/// The first binding that didn't register and that the pair didn't have before.
+fn newly_unavailable<'a>(old: [&Option<Binding>; 2], new: [&Option<Binding>; 2], failed: &'a [Binding]) -> Option<&'a Binding> {
+    let has = |pair: [&Option<Binding>; 2], b: &Binding| pair.iter().any(|p| p.as_ref() == Some(b));
+    failed.iter().find(|b| has(new, b) && !has(old, b))
+}
+
+/// Status text for hotkeys that couldn't be registered; None when all of them work.
+fn unavailable_message(failed: &[Binding]) -> Option<String> {
+    let labels: Vec<String> = failed.iter().map(|b| chord::label(b, false)).collect();
+    match labels.as_slice() {
+        [] => None,
+        [one] => Some(format!("{one} is already used by another app. Choose a different hotkey in Settings › Hotkeys.")),
+        many => Some(format!("{} are already used by other apps. Choose different hotkeys in Settings › Hotkeys.", many.join(", "))),
     }
 }
 
@@ -461,6 +502,34 @@ mod tests {
         assert!(!chord::overlaps(&left, &right));
         assert_eq!(clash(&left, &right), !NATIVE);
         assert!(!clash(&b("Fn"), &b("AltRight")));
+    }
+
+    #[test]
+    fn only_a_newly_assigned_hotkey_that_is_taken_refuses_the_change() {
+        let b = |s| chord::parse(s).unwrap();
+        let (taken_hold, taken_toggle, free) = (b("Control+Shift+Space"), b("Control+Shift+Meta+Space"), b("Control+Shift+F8"));
+        // Replacing a taken hold while the kept toggle is taken too: the new hold works, so it's accepted.
+        let failed = [taken_toggle.clone().unwrap()];
+        assert_eq!(newly_unavailable([&taken_hold, &taken_toggle], [&free, &taken_toggle], &failed), None);
+        // Picking a hold that is taken is refused.
+        let failed = [taken_hold.clone().unwrap(), taken_toggle.clone().unwrap()];
+        assert_eq!(newly_unavailable([&free, &taken_toggle], [&taken_hold, &taken_toggle], &failed), taken_hold.as_ref());
+        // At startup nothing is assigned yet, so a strict apply would refuse; restore_bindings doesn't ask.
+        assert_eq!(newly_unavailable([&None, &None], [&taken_hold, &free], &failed[..1]), taken_hold.as_ref());
+    }
+
+    #[test]
+    fn unavailable_hotkeys_are_named_in_the_status() {
+        let b = |s| chord::parse(s).unwrap().unwrap();
+        assert_eq!(unavailable_message(&[]), None);
+        assert_eq!(
+            unavailable_message(&[b("Control+Shift+Space")]).as_deref(),
+            Some("Ctrl+Shift+Space is already used by another app. Choose a different hotkey in Settings › Hotkeys.")
+        );
+        assert_eq!(
+            unavailable_message(&[b("Control+Shift+Space"), b("Control+Meta+KeyC")]).as_deref(),
+            Some("Ctrl+Shift+Space, Ctrl+Win+C are already used by other apps. Choose different hotkeys in Settings › Hotkeys.")
+        );
     }
 
     #[test]

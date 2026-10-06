@@ -1494,12 +1494,12 @@ async fn save_config(
     }
     let restore_hotkeys = || {
         if dictation_changed {
-            if let Err(e) = engine.set_bindings(&old.hotkey_hold, &old.hotkey_toggle) {
+            if let Err(e) = engine.restore_bindings(&old.hotkey_hold, &old.hotkey_toggle) {
                 eprintln!("Failed to restore previous hotkeys: {}", e);
             }
         }
         let (hold, toggle) = command_bindings(&old);
-        if let Err(e) = engine.set_command_bindings(hold, toggle) {
+        if let Err(e) = engine.restore_command_bindings(hold, toggle) {
             eprintln!("Failed to restore previous command hotkeys: {}", e);
         }
     };
@@ -1915,13 +1915,14 @@ pub fn run() {
                 });
             }
 
-            // Apply the persisted settings. Failures are reported but never stop the app.
-            if let Err(e) = engine.set_bindings(&config.hotkey_hold, &config.hotkey_toggle) {
+            // Apply the persisted settings. Failures are reported but never stop the app; a hotkey
+            // another app owns stays assigned and shows up in the hotkey status.
+            if let Err(e) = engine.restore_bindings(&config.hotkey_hold, &config.hotkey_toggle) {
                 report_error(app.handle(), format!("Couldn't register hotkeys: {}", e));
             }
             // === commands wiring: begin ===
             let (hold, toggle) = command_bindings(&config);
-            if let Err(e) = engine.set_command_bindings(hold, toggle) {
+            if let Err(e) = engine.restore_command_bindings(hold, toggle) {
                 report_error(app.handle(), format!("Couldn't register command hotkeys: {}", e));
             }
             commands::init(app.handle());
