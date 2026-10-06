@@ -357,7 +357,7 @@ mod imp {
             if let Some(chunk) = collect_audio(&mut rx, &mut finish, &mut finishing)? {
                 resampler.push(chunk, &mut pending)?;
                 let complete = pending.len() / LIVE_FRAME * LIVE_FRAME;
-                for samples in pending[..complete].chunks_exact(LIVE_FRAME) {
+                for samples in pending[..complete].as_chunks::<LIVE_FRAME>().0 {
                     relay_frame(&tx, samples.to_vec(), overflowed)?;
                 }
                 pending.drain(..complete);
