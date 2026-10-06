@@ -1929,6 +1929,7 @@ pub fn run() {
             if let Err(e) = set_launch_at_login(app.handle(), config.launch_at_login) {
                 report_error(app.handle(), e);
             }
+            create_windows(app)?;
             apply_ui_settings(app.handle(), &config, None);
             load_local_models(app.handle(), &config, None);
 
@@ -2055,6 +2056,20 @@ pub fn run() {
         });
 }
 
+/// Builds the windows from tauri.conf.json, where they have `"create": false`. Tauri would build
+/// them before `setup`, and their pages call commands as soon as they load: on Windows a warm
+/// WebView2 profile loads the main page while the other windows are still being built, and the
+/// first commands then found no managed state and aborted the app. So setup manages every piece
+/// of state first and builds the windows last.
+fn create_windows(app: &tauri::App) -> tauri::Result<()> {
+    for window in &app.config().app.windows {
+        if app.get_webview_window(&window.label).is_none() {
+            tauri::WebviewWindowBuilder::from_config(app.handle(), window)?.build()?;
+        }
+    }
+    Ok(())
+}
+
 fn prepare_exit(app: &AppHandle) {
     commands::shutdown(app);
     // ponytail: waits for a running local transcription; whisper's abort callback if that grows.
@@ -2066,6 +2081,17 @@ fn prepare_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn windows_wait_for_setup() {
+        // create_windows builds them after every command's state is managed; Tauri must not build them first.
+        let config: serde_json::Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let windows = config["app"]["windows"].as_array().unwrap();
+        assert!(!windows.is_empty());
+        for window in windows {
+            assert_eq!(window["create"], serde_json::json!(false), "{}", window["label"]);
+        }
+    }
 
     #[test]
     fn focus_cancellation_only_matches_the_active_recording() {

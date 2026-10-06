@@ -14,6 +14,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "OpenGlaido",
         "width": 1280,
         "height": 820,
@@ -29,6 +30,7 @@
       },
       {
         "label": "hud",
+        "create": false,
         "title": "OpenGlaido HUD",
         "width": 420,
         "height": 72,
@@ -47,6 +49,7 @@
       },
       {
         "label": "command",
+        "create": false,
         "title": "OpenGlaido Command",
         "width": 560,
         "height": 380,
