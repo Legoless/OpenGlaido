@@ -2,7 +2,7 @@
 use crate::audio::{AudioChunk, StreamInput};
 use crate::transcribe::TranscriptionConfig;
 use base64::{engine::general_purpose::STANDARD, Engine};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{future::Either, stream::FuturesOrdered, SinkExt, StreamExt};
 use serde_json::{json, Value};
 use std::io::Cursor;
 use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
@@ -40,16 +40,7 @@ impl LiveTranscription {
         let microsoft = config.model_name == crate::microsoft::LIVE_MODEL;
         let final_timeout = if microsoft { Duration::from_secs(240) } else { FINAL_TIMEOUT };
         let setup_timeout = if microsoft { Duration::from_secs(30) } else { IO_TIMEOUT };
-        let url = if microsoft { crate::microsoft::live_url(config)? } else if elevenlabs { elevenlabs_url(config, &vocabulary)? } else { realtime_url(&config.endpoint_url)? };
-        if config.api_key.trim().is_empty() {
-            return Err("Transcription failed: check the API key in Settings › Model".into());
-        }
-        let mut request = url.into_client_request().map_err(|_| "Transcription failed: check the endpoint URL in Settings › Model")?;
-        let (header, value) = if microsoft { ("api-key", config.api_key.trim().to_string()) } else if elevenlabs { ("xi-api-key", config.api_key.trim().to_string()) } else { ("Authorization", format!("Bearer {}", config.api_key.trim())) };
-        let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
-            .map_err(|_| "Transcription failed: check the API key in Settings › Model")?;
-        value.set_sensitive(true);
-        request.headers_mut().insert(header, value);
+        let request = connection_request(config, &vocabulary)?;
         let session = (!elevenlabs).then(|| if microsoft { crate::microsoft::live_session(config, RATE) } else { session_update(config, &vocabulary) });
         let api_key = config.api_key.trim().to_string();
         // ponytail: bounded callback queue; batch in the audio worker if very small buffers need more setup time.
@@ -108,6 +99,88 @@ impl Drop for LiveTranscription {
         if let Some(cancellation) = &self.local_cancel { cancellation.cancel(); }
         self.task.abort();
     }
+}
+
+/// Performs the same local validation as starting a session, without opening a socket.
+pub fn validate_live_config(config: &TranscriptionConfig) -> Result<(), String> {
+    connection_request(config, &[]).map(|_| ())
+}
+
+fn connection_request(config: &TranscriptionConfig, vocabulary: &[String]) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
+    if !is_live_model(&config.model_name) {
+        return Err("Backup transcription providers must use a real-time model".into());
+    }
+    let elevenlabs = config.model_name == "scribe_v2_realtime";
+    let microsoft = config.model_name == crate::microsoft::LIVE_MODEL;
+    if microsoft { crate::microsoft::validate_endpoint(config)?; }
+    let url = if microsoft { crate::microsoft::live_url(config)? } else if elevenlabs { elevenlabs_url(config, vocabulary)? } else { realtime_url(&config.endpoint_url)? };
+    if config.api_key.trim().is_empty() {
+        return Err("Transcription failed: check the API key in Settings › Model".into());
+    }
+    let mut request = url.into_client_request().map_err(|_| "Transcription failed: check the endpoint URL in Settings › Model")?;
+    let (header, value) = if microsoft { ("api-key", config.api_key.trim().to_string()) } else if elevenlabs { ("xi-api-key", config.api_key.trim().to_string()) } else { ("Authorization", format!("Bearer {}", config.api_key.trim())) };
+    let mut value = tokio_tungstenite::tungstenite::http::HeaderValue::from_str(&value)
+        .map_err(|_| "Transcription failed: check the API key in Settings › Model")?;
+    value.set_sensitive(true);
+    request.headers_mut().insert(header, value);
+    Ok(request)
+}
+
+/// All configured live providers receive the recording from the start. Results are
+/// preferred in settings order, while each provider's finalization runs concurrently.
+pub struct LiveTranscriptionGroup {
+    attempts: Vec<Result<LiveTranscription, String>>,
+}
+
+impl LiveTranscriptionGroup {
+    pub fn start_with_primary(
+        config: &TranscriptionConfig,
+        primary: Result<(LiveTranscription, StreamInput), String>,
+        vocabulary: Vec<String>,
+    ) -> Result<(Self, Vec<StreamInput>), String> {
+        let mut attempts = Vec::new();
+        let mut inputs = Vec::new();
+        for attempt in std::iter::once(primary).chain(config.live_backup_configs().into_iter().map(|backup| LiveTranscription::start(&backup, vocabulary.clone()))) {
+            match attempt {
+                Ok((live, input)) => {
+                    attempts.push(Ok(live));
+                    inputs.push(input);
+                }
+                Err(error) => attempts.push(Err(error)),
+            }
+        }
+        if inputs.is_empty() {
+            return Err(attempts.into_iter().find_map(Result::err).unwrap_or_else(|| "Transcription failed: check the endpoint URL in Settings › Model".into()));
+        }
+        Ok((Self { attempts }, inputs))
+    }
+
+    pub fn finish_input(&mut self) {
+        for live in self.attempts.iter_mut().flatten() { live.finish_input(); }
+    }
+
+    pub async fn finish(mut self) -> Result<String, String> {
+        self.finish_input();
+        let mut pending = FuturesOrdered::new();
+        for attempt in self.attempts {
+            pending.push_back(async move {
+                match attempt { Ok(live) => live.finish().await, Err(error) => Err(error) }
+            });
+        }
+        preferred_result(pending).await
+    }
+}
+
+async fn preferred_result<F: std::future::Future<Output = Result<String, String>>>(mut pending: FuturesOrdered<F>) -> Result<String, String> {
+    let mut first_error = None;
+    while let Some(result) = pending.next().await {
+        match result {
+            // An empty successful transcript retains the usual quiet no-speech behavior.
+            Ok(text) => return Ok(text),
+            Err(error) => { first_error.get_or_insert(error); }
+        }
+    }
+    Err(first_error.unwrap_or_else(|| "Transcription failed: check the endpoint URL in Settings › Model".into()))
 }
 
 fn websocket_url(endpoint: &str) -> Result<reqwest::Url, String> {
@@ -404,6 +477,32 @@ impl PcmResampler {
 
 /// Retry/history uses the same live protocol when its selected model is live-only.
 pub async fn transcribe_wav(config: &TranscriptionConfig, wav_bytes: Vec<u8>, vocabulary: Vec<String>) -> Result<String, String> {
+    if !config.has_live_backups() {
+        return transcribe_wav_single(config, wav_bytes, vocabulary).await;
+    }
+    let primary = transcribe_wav_single(config, wav_bytes.clone(), vocabulary.clone());
+    with_live_backups(config, primary, wav_bytes, vocabulary).await
+}
+
+/// Retry providers replay independently, including Scribe's required real-time pacing.
+/// Cancelling this future or selecting a result drops every unfinished live session.
+pub async fn with_live_backups<F: std::future::Future<Output = Result<String, String>>>(
+    config: &TranscriptionConfig,
+    primary: F,
+    wav_bytes: Vec<u8>,
+    vocabulary: Vec<String>,
+) -> Result<String, String> {
+    let mut pending = FuturesOrdered::new();
+    pending.push_back(Either::Left(primary));
+    for backup in config.live_backup_configs() {
+        let wav_bytes = wav_bytes.clone();
+        let vocabulary = vocabulary.clone();
+        pending.push_back(Either::Right(async move { transcribe_wav_single(&backup, wav_bytes, vocabulary).await }));
+    }
+    preferred_result(pending).await
+}
+
+async fn transcribe_wav_single(config: &TranscriptionConfig, wav_bytes: Vec<u8>, vocabulary: Vec<String>) -> Result<String, String> {
     let mut reader = hound::WavReader::new(Cursor::new(wav_bytes)).map_err(|_| "Transcription failed: invalid audio recording")?;
     let spec = reader.spec();
     if spec.channels == 0 || spec.sample_rate == 0 || !(1..=32).contains(&spec.bits_per_sample) {
@@ -469,6 +568,191 @@ mod tests {
         assert_eq!(read(&mut socket).await["type"], "session.update");
         write(&mut socket, json!({ "type": "session.updated" })).await;
         socket
+    }
+
+    fn set_backups(config: &mut TranscriptionConfig, first: &TranscriptionConfig, second: &TranscriptionConfig) {
+        config.stt_backup_1_enabled = true;
+        config.stt_backup_1_provider = "openai".into();
+        config.stt_backup_1_endpoint_url = first.endpoint_url.clone();
+        config.stt_backup_1_model_name = first.model_name.clone();
+        config.stt_backup_1_api_key = first.api_key.clone();
+        config.stt_backup_2_enabled = true;
+        config.stt_backup_2_provider = "openai".into();
+        config.stt_backup_2_endpoint_url = second.endpoint_url.clone();
+        config.stt_backup_2_model_name = second.model_name.clone();
+        config.stt_backup_2_api_key = second.api_key.clone();
+    }
+
+    async fn serve_result(listener: TcpListener, result: Result<&str, &str>) {
+        let mut socket = ready(listener).await;
+        let mut bytes = 0;
+        loop {
+            let event = read(&mut socket).await;
+            if event["type"] == "input_audio_buffer.commit" { break; }
+            assert_eq!(event["type"], "input_audio_buffer.append");
+            bytes += STANDARD.decode(event["audio"].as_str().unwrap()).unwrap().len();
+        }
+        assert_eq!(bytes, 9600);
+        match result {
+            Ok(text) => {
+                write(&mut socket, json!({ "type": "input_audio_buffer.committed", "item_id": "result" })).await;
+                write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.completed", "item_id": "result", "transcript": text })).await;
+            }
+            Err(message) => write(&mut socket, json!({ "type": "error", "error": { "message": message } })).await,
+        }
+    }
+
+    #[tokio::test]
+    async fn live_group_streams_to_five_providers_and_falls_back_in_priority_order() {
+        for preferred in 0..5 {
+            let (primary_listener, mut config) = bind_server().await;
+            let (first_listener, first) = bind_server().await;
+            let (second_listener, second) = bind_server().await;
+            let (third_listener, third) = bind_server().await;
+            let (fourth_listener, fourth) = bind_server().await;
+            set_backups(&mut config, &first, &second);
+            config.stt_backup_3_enabled = true;
+            config.stt_backup_3_provider = "openai".into();
+            config.stt_backup_3_endpoint_url = third.endpoint_url;
+            config.stt_backup_3_model_name = third.model_name;
+            config.stt_backup_3_api_key = third.api_key;
+            config.stt_backup_4_enabled = true;
+            config.stt_backup_4_provider = "openai".into();
+            config.stt_backup_4_endpoint_url = fourth.endpoint_url;
+            config.stt_backup_4_model_name = fourth.model_name;
+            config.stt_backup_4_api_key = fourth.api_key;
+            let names = ["primary", "first backup", "second backup", "third backup", "fourth backup"];
+            let servers: Vec<_> = [primary_listener, first_listener, second_listener, third_listener, fourth_listener].into_iter().enumerate().map(|(index, listener)| {
+                tokio::spawn(serve_result(listener, if index < preferred { Err("unavailable") } else { Ok(names[index]) }))
+            }).collect();
+            let primary = LiveTranscription::start(&config, vec![]);
+            let (mut group, inputs) = LiveTranscriptionGroup::start_with_primary(&config, primary, vec![]).unwrap();
+            assert_eq!(inputs.len(), 5);
+            for input in &inputs {
+                input.tx.send(AudioChunk { samples: vec![0.2; 4800], rate: RATE }).await.unwrap();
+            }
+            group.finish_input();
+            for server in servers { server.await.unwrap(); }
+            assert_eq!(group.finish().await.unwrap(), names[preferred]);
+            assert!(inputs.iter().all(|input| input.tx.is_closed()));
+        }
+    }
+
+    #[tokio::test]
+    async fn live_group_recovers_from_invalid_primary_and_retry_replays_backups() {
+        for retry in [false, true] {
+            let (first_listener, first) = bind_server().await;
+            let (second_listener, second) = bind_server().await;
+            let mut config = first.clone();
+            config.api_key.clear();
+            set_backups(&mut config, &first, &second);
+            let first_server = tokio::spawn(serve_result(first_listener, Err("unavailable")));
+            let second_server = tokio::spawn(serve_result(second_listener, Ok("recovered")));
+            let text = if retry {
+                let mut wav = Cursor::new(Vec::new());
+                let mut writer = hound::WavWriter::new(&mut wav, hound::WavSpec { channels: 1, sample_rate: RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int }).unwrap();
+                for _ in 0..4800 { writer.write_sample(10000_i16).unwrap(); }
+                writer.finalize().unwrap();
+                transcribe_wav(&config, wav.into_inner(), vec![]).await.unwrap()
+            } else {
+                let primary = LiveTranscription::start(&config, vec![]);
+                let (group, inputs) = LiveTranscriptionGroup::start_with_primary(&config, primary, vec![]).unwrap();
+                assert_eq!(inputs.len(), 2);
+                for input in inputs {
+                    input.tx.send(AudioChunk { samples: vec![0.2; 4800], rate: RATE }).await.unwrap();
+                }
+                group.finish().await.unwrap()
+            };
+            assert_eq!(text, "recovered");
+            first_server.await.unwrap();
+            second_server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn retry_uses_the_fifth_provider_when_only_that_backup_is_enabled() {
+        let (listener, backup) = bind_server().await;
+        let mut config = backup.clone();
+        config.api_key.clear();
+        config.stt_backup_4_enabled = true;
+        config.stt_backup_4_provider = "openai".into();
+        config.stt_backup_4_endpoint_url = backup.endpoint_url;
+        config.stt_backup_4_model_name = backup.model_name;
+        config.stt_backup_4_api_key = backup.api_key;
+        let server = tokio::spawn(serve_result(listener, Ok("fifth provider recovered")));
+        let mut wav = Cursor::new(Vec::new());
+        let mut writer = hound::WavWriter::new(&mut wav, hound::WavSpec {
+            channels: 1, sample_rate: RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int,
+        }).unwrap();
+        for _ in 0..4800 { writer.write_sample(10000_i16).unwrap(); }
+        writer.finalize().unwrap();
+        assert_eq!(transcribe_wav(&config, wav.into_inner(), vec![]).await.unwrap(), "fifth provider recovered");
+        server.await.unwrap();
+    }
+
+    fn pending_local() -> (LiveTranscription, crate::processing::Cancellation) {
+        let (finish_tx, _finish_rx) = oneshot::channel();
+        let cancellation = crate::processing::Cancellation::default();
+        let task = tauri::async_runtime::spawn(std::future::pending::<Result<String, String>>());
+        (LiveTranscription::from_local(task, finish_tx, cancellation.clone()), cancellation)
+    }
+
+    #[tokio::test]
+    async fn live_group_finalization_deadlines_run_concurrently() {
+        let (release, primary_gate) = oneshot::channel();
+        let (finish_tx, _finish_rx) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async move { primary_gate.await.unwrap(); Err("primary failed".into()) });
+        let primary = LiveTranscription::from_local(task, finish_tx, crate::processing::Cancellation::default());
+        let (mut backup, cancelled) = pending_local();
+        backup.final_timeout = Duration::from_millis(1);
+        let (finish_tx, _finish_rx) = oneshot::channel();
+        let task = tauri::async_runtime::spawn(async { Ok("third result".into()) });
+        let third = LiveTranscription::from_local(task, finish_tx, crate::processing::Cancellation::default());
+        let group = LiveTranscriptionGroup { attempts: vec![Ok(primary), Ok(backup), Ok(third)] };
+        let result = tokio::spawn(group.finish());
+        // The backup must time out while the primary is still waiting, rather than
+        // beginning its timeout only after the primary's failure.
+        timeout(Duration::from_secs(3), cancelled.cancelled()).await.unwrap();
+        release.send(()).unwrap();
+        assert_eq!(result.await.unwrap().unwrap(), "third result");
+    }
+
+    #[tokio::test]
+    async fn live_group_preserves_empty_success_and_aborts_unused_or_cancelled_sessions() {
+        let (backup, backup_cancelled) = pending_local();
+        let (third, third_cancelled) = pending_local();
+        let (fourth, fourth_cancelled) = pending_local();
+        let (fifth, fifth_cancelled) = pending_local();
+        let (finish_tx, _finish_rx) = oneshot::channel();
+        let primary_cancelled = crate::processing::Cancellation::default();
+        let task = tauri::async_runtime::spawn(async { Ok(String::new()) });
+        let primary = LiveTranscription::from_local(task, finish_tx, primary_cancelled.clone());
+        let group = LiveTranscriptionGroup { attempts: vec![Ok(primary), Ok(backup), Ok(third), Ok(fourth), Ok(fifth)] };
+        assert_eq!(group.finish().await.unwrap(), "");
+        assert!(primary_cancelled.is_cancelled() && backup_cancelled.is_cancelled() && third_cancelled.is_cancelled());
+        assert!(fourth_cancelled.is_cancelled() && fifth_cancelled.is_cancelled());
+
+        let (primary, primary_cancelled) = pending_local();
+        let (backup, backup_cancelled) = pending_local();
+        let (third, third_cancelled) = pending_local();
+        let (fourth, fourth_cancelled) = pending_local();
+        let (fifth, fifth_cancelled) = pending_local();
+        let group = LiveTranscriptionGroup { attempts: vec![Ok(primary), Ok(backup), Ok(third), Ok(fourth), Ok(fifth)] };
+        let cancellation = crate::processing::Cancellation::default();
+        cancellation.cancel();
+        assert_eq!(cancellation.run(group.finish()).await.unwrap_err(), crate::processing::CANCELLED);
+        assert!(primary_cancelled.is_cancelled() && backup_cancelled.is_cancelled() && third_cancelled.is_cancelled());
+        assert!(fourth_cancelled.is_cancelled() && fifth_cancelled.is_cancelled());
+    }
+
+    #[tokio::test]
+    async fn live_group_reports_failure_only_when_all_providers_fail() {
+        let group = LiveTranscriptionGroup { attempts: vec![Err("primary failure".into()), Err("backup failure".into()), Err("third failure".into())] };
+        assert_eq!(group.finish().await.unwrap_err(), "primary failure");
+        let mut config = config(1);
+        config.api_key.clear();
+        let primary = LiveTranscription::start(&config, vec![]);
+        assert!(LiveTranscriptionGroup::start_with_primary(&config, primary, vec![]).is_err());
     }
 
     #[test]

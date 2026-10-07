@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "支持包括斯洛文尼亚语在内的 51 种语言；在 macOS 14 及以上的 Apple Silicon 上录音后处理。",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "支持十种语言的本地实时转录；需要 macOS 14 及以上的 Apple Silicon。初始音频窗口约为 3.5 秒。",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "支持八种语音语言；在 macOS 14 及以上的 Apple Silicon 上录音后处理。",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "缺少 Microsoft 本地转录运行环境。请重新安装 OpenGlaido。"
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "缺少 Microsoft 本地转录运行环境。请重新安装 OpenGlaido。",
+ "Live transcription backups": "实时转写备用服务商",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "所有已启用的服务商都会同时收到你的音频，并且可能分别收费。如果前面的服务商失败，将按顺序使用首个成功的服务商。",
+ "Choose a real-time primary transcription model to use backups.": "请选择实时转写模型作为主要模型，以使用备用服务商。",
+ "Second provider": "第二服务商",
+ "Third provider": "第三服务商",
+ "Runs while you speak and is used if earlier providers fail.": "在你说话时运行，并在前面的服务商失败时使用。",
+ "Backup transcription providers must use a real-time model": "备用转写服务商必须使用实时模型",
+ "Provider {number}": "服务商 {number}",
+ "Add provider": "添加服务商",
+ "Remove provider {number}": "移除服务商 {number}",
+ "{count} of {max} providers": "{count} / {max} 个服务商"
 }

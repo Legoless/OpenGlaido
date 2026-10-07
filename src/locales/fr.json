@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 langues, dont le slovène ; s’exécute après l’enregistrement sur Apple Silicon avec macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Transcription locale en direct dans dix langues ; Apple Silicon avec macOS 14+. La fenêtre audio initiale est d’environ 3,5 secondes.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Huit langues parlées ; s’exécute après l’enregistrement sur Apple Silicon avec macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "L’environnement local de transcription Microsoft est manquant. Réinstallez OpenGlaido."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "L’environnement local de transcription Microsoft est manquant. Réinstallez OpenGlaido.",
+ "Live transcription backups": "Fournisseurs de secours pour la transcription en direct",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Tous les fournisseurs activés reçoivent votre audio simultanément et peuvent chacun facturer des frais. Si les fournisseurs précédents échouent, le premier fournisseur qui réussit dans cet ordre est utilisé.",
+ "Choose a real-time primary transcription model to use backups.": "Choisissez un modèle principal de transcription en temps réel pour utiliser les fournisseurs de secours.",
+ "Second provider": "Deuxième fournisseur",
+ "Third provider": "Troisième fournisseur",
+ "Runs while you speak and is used if earlier providers fail.": "Fonctionne pendant que vous parlez et est utilisé si les fournisseurs précédents échouent.",
+ "Backup transcription providers must use a real-time model": "Les fournisseurs de transcription de secours doivent utiliser un modèle en temps réel",
+ "Provider {number}": "Fournisseur {number}",
+ "Add provider": "Ajouter un fournisseur",
+ "Remove provider {number}": "Retirer le fournisseur {number}",
+ "{count} of {max} providers": "{count} fournisseurs sur {max}"
 }

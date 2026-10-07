@@ -47,6 +47,35 @@ export interface TranscriptionConfig {
   stt_provider: string;
   /** Azure realtime deployment name; empty uses Microsoft's default name. */
   stt_deployment: string;
+  /** Optional cloud live providers, run simultaneously in priority order after the primary. */
+  stt_backup_1_enabled: boolean;
+  stt_backup_1_provider: string;
+  stt_backup_1_endpoint_url: string;
+  stt_backup_1_model_name: string;
+  /** Lives in the OS keychain. */
+  stt_backup_1_api_key: string;
+  stt_backup_1_deployment: string;
+  stt_backup_2_enabled: boolean;
+  stt_backup_2_provider: string;
+  stt_backup_2_endpoint_url: string;
+  stt_backup_2_model_name: string;
+  /** Lives in the OS keychain. */
+  stt_backup_2_api_key: string;
+  stt_backup_2_deployment: string;
+  stt_backup_3_enabled: boolean;
+  stt_backup_3_provider: string;
+  stt_backup_3_endpoint_url: string;
+  stt_backup_3_model_name: string;
+  /** Lives in the OS keychain. */
+  stt_backup_3_api_key: string;
+  stt_backup_3_deployment: string;
+  stt_backup_4_enabled: boolean;
+  stt_backup_4_provider: string;
+  stt_backup_4_endpoint_url: string;
+  stt_backup_4_model_name: string;
+  /** Lives in the OS keychain. */
+  stt_backup_4_api_key: string;
+  stt_backup_4_deployment: string;
   /** LocalModel id. */
   local_stt_model: string;
   llm_source: "off" | "cloud" | "local";

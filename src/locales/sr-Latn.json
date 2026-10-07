@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 jezik uključujući slovenački; radi nakon snimanja na Apple Silicon čipu sa macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Lokalna transkripcija uživo na deset jezika; Apple Silicon sa macOS 14+. Početni audio prozor traje oko 3,5 sekunde.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Osam govornih jezika; radi nakon snimanja na Apple Silicon čipu sa macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Nedostaje lokalno Microsoft okruženje za transkripciju. Ponovo instaliraj OpenGlaido."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Nedostaje lokalno Microsoft okruženje za transkripciju. Ponovo instaliraj OpenGlaido.",
+ "Live transcription backups": "Rezervni provajderi transkripcije uživo",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Svi uključeni provajderi istovremeno primaju vaš zvuk i svaki može da naplati uslugu. Ako prethodni provajderi ne uspeju, koristi se prvi uspešan provajder po redosledu.",
+ "Choose a real-time primary transcription model to use backups.": "Izaberite primarni model transkripcije u realnom vremenu da biste koristili rezervne provajdere.",
+ "Second provider": "Drugi provajder",
+ "Third provider": "Treći provajder",
+ "Runs while you speak and is used if earlier providers fail.": "Radi dok govorite i koristi se ako prethodni provajderi ne uspeju.",
+ "Backup transcription providers must use a real-time model": "Rezervni provajderi transkripcije moraju da koriste model u realnom vremenu",
+ "Provider {number}": "Provajder {number}",
+ "Add provider": "Dodaj provajdera",
+ "Remove provider {number}": "Ukloni provajdera {number}",
+ "{count} of {max} providers": "{count} od {max} provajdera"
 }

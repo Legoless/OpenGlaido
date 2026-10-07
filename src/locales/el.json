@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 γλώσσες, συμπεριλαμβανομένων των σλοβενικών· εκτελείται μετά την εγγραφή σε Apple Silicon με macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Τοπική ζωντανή μεταγραφή σε δέκα γλώσσες· Apple Silicon με macOS 14+. Το αρχικό παράθυρο ήχου είναι περίπου 3,5 δευτερόλεπτα.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Οκτώ γλώσσες ομιλίας· εκτελείται μετά την εγγραφή σε Apple Silicon με macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Λείπει το τοπικό περιβάλλον μεταγραφής Microsoft. Εγκατάστησε ξανά το OpenGlaido."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Λείπει το τοπικό περιβάλλον μεταγραφής Microsoft. Εγκατάστησε ξανά το OpenGlaido.",
+ "Live transcription backups": "Εφεδρικοί πάροχοι ζωντανής απομαγνητοφώνησης",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Όλοι οι ενεργοποιημένοι πάροχοι λαμβάνουν τον ήχο σας ταυτόχρονα και ο καθένας μπορεί να χρεώσει. Αν αποτύχουν οι προηγούμενοι πάροχοι, χρησιμοποιείται ο πρώτος επιτυχής πάροχος με βάση τη σειρά.",
+ "Choose a real-time primary transcription model to use backups.": "Επιλέξτε ένα κύριο μοντέλο απομαγνητοφώνησης σε πραγματικό χρόνο για να χρησιμοποιήσετε εφεδρικούς παρόχους.",
+ "Second provider": "Δεύτερος πάροχος",
+ "Third provider": "Τρίτος πάροχος",
+ "Runs while you speak and is used if earlier providers fail.": "Λειτουργεί όσο μιλάτε και χρησιμοποιείται αν αποτύχουν οι προηγούμενοι πάροχοι.",
+ "Backup transcription providers must use a real-time model": "Οι εφεδρικοί πάροχοι απομαγνητοφώνησης πρέπει να χρησιμοποιούν μοντέλο πραγματικού χρόνου",
+ "Provider {number}": "Πάροχος {number}",
+ "Add provider": "Προσθήκη παρόχου",
+ "Remove provider {number}": "Αφαίρεση παρόχου {number}",
+ "{count} of {max} providers": "{count} από {max} παρόχους"
 }

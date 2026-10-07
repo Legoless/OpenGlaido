@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 язык, включая словенский; обрабатывает запись после завершения на Apple Silicon с macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Локальная транскрипция в реальном времени на десяти языках; Apple Silicon с macOS 14+. Начальное окно аудио — около 3,5 секунды.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Восемь языков речи; обрабатывает запись после завершения на Apple Silicon с macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Отсутствует локальная среда транскрипции Microsoft. Переустанови OpenGlaido."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Отсутствует локальная среда транскрипции Microsoft. Переустанови OpenGlaido.",
+ "Live transcription backups": "Резервные провайдеры транскрипции в реальном времени",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Все включённые провайдеры получают аудио одновременно, и каждый может взимать плату. Если предыдущие провайдеры не справляются, используется первый успешный провайдер в заданном порядке.",
+ "Choose a real-time primary transcription model to use backups.": "Чтобы использовать резервных провайдеров, выберите основную модель транскрипции в реальном времени.",
+ "Second provider": "Второй провайдер",
+ "Third provider": "Третий провайдер",
+ "Runs while you speak and is used if earlier providers fail.": "Работает во время речи и используется, если предыдущие провайдеры не справляются.",
+ "Backup transcription providers must use a real-time model": "Резервные провайдеры транскрипции должны использовать модель реального времени",
+ "Provider {number}": "Провайдер {number}",
+ "Add provider": "Добавить провайдера",
+ "Remove provider {number}": "Удалить провайдера {number}",
+ "{count} of {max} providers": "{count} из {max} провайдеров"
 }

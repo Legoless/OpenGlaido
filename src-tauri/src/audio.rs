@@ -9,7 +9,7 @@ use std::thread;
 enum AudioCommand {
     /// Device names, first connected one wins ([] = system default); replies Ok(true) when
     /// none was connected and the default was used instead.
-    Start(Vec<String>, Option<StreamInput>, u32, Sender<Result<bool, String>>),
+    Start(Vec<String>, Vec<StreamInput>, u32, Sender<Result<bool, String>>),
     /// Skip this many ms at the start (the start chime) and hand the samples back.
     Stop(u32, Sender<Result<Recording, String>>),
     Cancel,
@@ -29,7 +29,7 @@ pub struct StreamInput {
 }
 
 struct StreamFeed {
-    input: Option<StreamInput>,
+    inputs: Vec<StreamInput>,
     rate: u32,
     skip: usize,
     generation: u64,
@@ -37,26 +37,23 @@ struct StreamFeed {
 
 impl StreamFeed {
     fn push(&mut self, samples: &[f32]) {
-        let Some(input) = self.input.as_ref() else { return };
-        if input.overflowed.load(Ordering::Acquire) {
-            self.input = None;
-            return;
-        }
         let skip = self.skip.min(samples.len());
         self.skip -= skip;
         let samples = &samples[skip..];
-        if samples.is_empty() {
-            return;
-        }
-        // The audio callback must never wait for a network consumer.
-        match input.tx.try_send(AudioChunk { samples: samples.to_vec(), rate: self.rate }) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                input.overflowed.store(true, Ordering::Release);
-                self.input = None;
+        if samples.is_empty() { return; }
+        // Each provider has its own queue. A slow or disconnected consumer must never
+        // block the audio callback or stop another provider from receiving speech.
+        self.inputs.retain(|input| {
+            if input.overflowed.load(Ordering::Acquire) { return false; }
+            match input.tx.try_send(AudioChunk { samples: samples.to_vec(), rate: self.rate }) {
+                Ok(()) => true,
+                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                    input.overflowed.store(true, Ordering::Release);
+                    false
+                }
+                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
             }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => self.input = None,
-        }
+        });
     }
 }
 
@@ -458,7 +455,7 @@ impl AudioRecorder {
                     let samples_clone = Arc::clone(&capture);
                     let level_clone = Arc::clone(&level);
                     let mut feed = StreamFeed {
-                        input: stream_input,
+                        inputs: stream_input,
                         rate: sample_rate,
                         skip: sample_rate as usize * skip_ms as usize / 1000,
                         generation,
@@ -540,22 +537,22 @@ impl AudioRecorder {
     /// Starts capturing from the first connected of `device_names` ([] = system default). Returns
     /// Ok(true) when none is connected and the system default is recording instead.
     pub fn start_recording(&self, device_names: &[String]) -> Result<bool, String> {
-        self.start_recording_streamed(device_names, None, 0)
+        self.start_recording_streamed(device_names, Vec::new(), 0)
     }
 
-    /// Also forwards new mono samples after the first `skip_ms` to a live transcriber.
+    /// Also forwards new mono samples after the first `skip_ms` to live transcribers.
     /// Use the same trim in `stop_recording` so saved audio and live audio agree.
     pub fn start_recording_streamed(
         &self,
         device_names: &[String],
-        stream: Option<StreamInput>,
+        streams: Vec<StreamInput>,
         skip_ms: u32,
     ) -> Result<bool, String> {
         let (reply_tx, reply_rx) = channel();
         self.tx
             .send(AudioCommand::Start(
                 device_names.to_vec(),
-                stream,
+                streams,
                 skip_ms,
                 reply_tx,
             ))
@@ -614,7 +611,7 @@ mod tests {
     fn capture_errors_keep_partial_audio_and_ignore_stale_callbacks() {
         let capture = Mutex::new(CaptureState::default());
         let generation = capture.lock().unwrap().begin();
-        let mut feed = StreamFeed { input: None, rate: 16000, skip: 0, generation };
+        let mut feed = StreamFeed { inputs: Vec::new(), rate: 16000, skip: 0, generation };
         let level = AtomicU32::new(0);
         let mut meter = Loudness::new(16000);
         record_chunk(&[0.25, 0.5], 1, |x| x, &capture, &mut meter, &level, &mut feed);
@@ -672,7 +669,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let overflowed = Arc::new(AtomicBool::new(false));
         let mut feed = StreamFeed {
-            input: Some(StreamInput { tx, overflowed: overflowed.clone() }),
+            inputs: vec![StreamInput { tx, overflowed: overflowed.clone() }],
             rate: 1000,
             skip: 3,
             generation: 1,
@@ -704,7 +701,7 @@ mod tests {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let overflowed = Arc::new(AtomicBool::new(false));
         let mut feed = StreamFeed {
-            input: Some(StreamInput { tx, overflowed: overflowed.clone() }),
+            inputs: vec![StreamInput { tx, overflowed: overflowed.clone() }],
             rate: 16000,
             skip: 0,
             generation: 1,
@@ -716,7 +713,7 @@ mod tests {
             record_chunk(&[sample], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &mut feed);
         }
         assert!(overflowed.load(Ordering::Acquire));
-        assert!(feed.input.is_none());
+        assert!(feed.inputs.is_empty());
         assert_eq!(rx.try_recv().unwrap().samples, vec![0.5]);
         record_chunk(&[0i16], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &mut feed);
         assert!(rx.try_recv().is_err());
@@ -728,15 +725,53 @@ mod tests {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let overflowed = Arc::new(AtomicBool::new(false));
         let mut feed = StreamFeed {
-            input: Some(StreamInput { tx, overflowed: overflowed.clone() }),
+            inputs: vec![StreamInput { tx, overflowed: overflowed.clone() }],
             rate: 16000,
             skip: 0,
             generation: 1,
         };
         drop(rx);
         feed.push(&[0.5]);
-        assert!(feed.input.is_none());
+        assert!(feed.inputs.is_empty());
         assert!(!overflowed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn live_backups_receive_identical_trimmed_audio_and_isolate_failed_queues() {
+        let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel(1);
+        let (backup_tx, mut backup_rx) = tokio::sync::mpsc::channel(4);
+        let (third_tx, third_rx) = tokio::sync::mpsc::channel(4);
+        let primary_overflow = Arc::new(AtomicBool::new(false));
+        let backup_overflow = Arc::new(AtomicBool::new(false));
+        let third_overflow = Arc::new(AtomicBool::new(false));
+        let mut feed = StreamFeed {
+            inputs: vec![
+                StreamInput { tx: primary_tx, overflowed: primary_overflow.clone() },
+                StreamInput { tx: backup_tx, overflowed: backup_overflow.clone() },
+                StreamInput { tx: third_tx, overflowed: third_overflow.clone() },
+            ],
+            rate: 16000, skip: 2, generation: 1,
+        };
+        let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
+        let level = AtomicU32::new(0);
+        let mut meter = Loudness::new(16000);
+        record_chunk(&[0.1, 0.2, 0.3], 1, |x| x, &samples, &mut meter, &level, &mut feed);
+        assert_eq!(primary_rx.try_recv().unwrap().samples, [0.3]);
+        assert_eq!(backup_rx.try_recv().unwrap().samples, [0.3]);
+        let mut third_rx = third_rx;
+        assert_eq!(third_rx.try_recv().unwrap().samples, [0.3]);
+        drop(third_rx);
+        record_chunk(&[0.4], 1, |x| x, &samples, &mut meter, &level, &mut feed);
+        record_chunk(&[0.5], 1, |x| x, &samples, &mut meter, &level, &mut feed);
+        record_chunk(&[0.6], 1, |x| x, &samples, &mut meter, &level, &mut feed);
+        assert!(primary_overflow.load(Ordering::Acquire));
+        assert!(!backup_overflow.load(Ordering::Acquire));
+        assert!(!third_overflow.load(Ordering::Acquire));
+        assert_eq!(feed.inputs.len(), 1);
+        assert_eq!(primary_rx.try_recv().unwrap().samples, [0.4]);
+        let remaining: Vec<_> = std::iter::from_fn(|| backup_rx.try_recv().ok()).flat_map(|chunk| chunk.samples).collect();
+        assert_eq!(remaining, [0.4, 0.5, 0.6]);
+        assert_eq!(samples.lock().unwrap().samples, [0.1, 0.2, 0.3, 0.4, 0.5, 0.6]);
     }
 
     #[test]
@@ -875,7 +910,7 @@ mod tests {
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let mut feed = StreamFeed {
-            input: Some(StreamInput { tx, overflowed: Arc::new(AtomicBool::new(false)) }),
+            inputs: vec![StreamInput { tx, overflowed: Arc::new(AtomicBool::new(false)) }],
             rate: 48_000,
             skip: 0,
             generation: 1,

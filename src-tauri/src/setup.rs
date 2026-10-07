@@ -10,7 +10,7 @@ use tauri::{AppHandle, Manager};
 
 #[derive(Serialize, Clone, Debug, PartialEq)]
 pub struct SetupIssue {
-    /// "accessibility" | "microphone" | "no_microphone" | "hotkeys" | "stt" | "llm"
+    /// "accessibility" | "microphone" | "no_microphone" | "hotkeys" | "stt" | "stt_backup_1"…"stt_backup_4" | "llm"
     pub id: String,
     /// "error" (dictation can't work) | "warning" (works, but degraded)
     pub level: String,
@@ -45,6 +45,8 @@ pub struct Checks<'a> {
     pub mic: Mic,
     pub has_microphone: bool,
     pub stt_model: ModelFile,
+    /// Unsupported runtime/languages for a local live primary, if its model file is ready.
+    pub stt_live_error: Option<&'a str>,
     pub llm_model: ModelFile,
 }
 
@@ -78,6 +80,12 @@ pub fn compute(c: &Checks) -> Vec<SetupIssue> {
     let config = c.config;
     let model_name = |id: &str| models::find(id).map_or(id.to_string(), |m| m.name.to_string());
     let open_model = Some("open_model");
+    let backups = if config.uses_live_transcription() { config.live_backup_configs() } else { Vec::new() };
+    let stt_level = if backups.iter().any(|backup| crate::realtime::validate_live_config(backup).is_ok()) {
+        "warning"
+    } else {
+        "error"
+    };
 
     if !c.hotkeys.permission_granted {
         add(
@@ -120,24 +128,51 @@ pub fn compute(c: &Checks) -> Vec<SetupIssue> {
         let model = model_name(&config.local_stt_model);
         let title = match c.stt_model {
             ModelFile::Ready => None,
-            // Still an error: dictation can't work until it's done.
+            // A cloud live backup can keep dictation available while this downloads.
             ModelFile::Downloading => Some("Downloading {model}…"),
             ModelFile::Missing => Some("Download the transcription model"),
         };
         if let Some(title) = title {
-            add("stt", "error", title, "{model} isn't on this Mac yet.", &[("model", &model)], open_model);
+            add("stt", stt_level, title, "{model} isn't on this Mac yet.", &[("model", &model)], open_model);
+        } else if config.uses_live_transcription() {
+            if let Some(error) = c.stt_live_error {
+                add("stt", stt_level, "Set up transcription", error, &[], open_model);
+            }
         }
     } else if config.endpoint_url.trim().is_empty() {
-        add("stt", "error", "Set up transcription", "Choose where your audio is transcribed.", &[], open_model);
+        add("stt", stt_level, "Set up transcription", "Choose where your audio is transcribed.", &[], open_model);
     } else if let Some(provider) = keyed_provider(&config.stt_provider).filter(|_| config.api_key.trim().is_empty()) {
         add(
             "stt",
-            "error",
+            stt_level,
             "Add your {provider} API key",
             "Transcription needs it. Paste it in Settings › Model.",
             &[("provider", provider)],
             open_model,
         );
+    } else if config.uses_live_transcription() {
+        if let Err(error) = crate::realtime::validate_live_config(config) {
+            add("stt", stt_level, "Set up transcription", &error, &[], open_model);
+        }
+    }
+
+    let backup_ids = config.live_backup_slots()
+        .into_iter().filter(|(_, enabled)| *enabled).map(|(id, _)| id);
+    for (id, backup) in backup_ids.zip(&backups) {
+        if backup.endpoint_url.trim().is_empty() || !crate::realtime::is_live_model(&backup.model_name) {
+            add(id, "warning", "Set up transcription", "Choose where your audio is transcribed.", &[], open_model);
+        } else if let Some(provider) = keyed_provider(&backup.stt_provider).filter(|_| backup.api_key.trim().is_empty()) {
+            add(
+                id,
+                "warning",
+                "Add your {provider} API key",
+                "Transcription needs it. Paste it in Settings › Model.",
+                &[("provider", provider)],
+                open_model,
+            );
+        } else if let Err(error) = crate::realtime::validate_live_config(backup) {
+            add(id, "warning", "Set up transcription", &error, &[], open_model);
+        }
     }
 
     match config.llm_source.as_str() {
@@ -182,12 +217,23 @@ fn collect(app: &AppHandle, fresh_mic: bool) -> Vec<SetupIssue> {
         }
         _ => ModelFile::Missing,
     };
+    let stt_live_error = local.iter().find(|m| m.model.id == config.local_stt_model).and_then(|m| {
+        if !m.runtime_supported {
+            Some("Microsoft local models require an Apple Silicon Mac with macOS 14 or later.")
+        } else if m.supported_languages.is_some_and(|supported| config.languages.iter()
+            .map(|language| language.trim()).filter(|language| !language.is_empty()).any(|language| !supported.contains(&language))) {
+            Some("This model does not support the selected dictation languages. Choose another model or change the languages in Settings.")
+        } else {
+            None
+        }
+    });
     compute(&Checks {
         config: &config,
         hotkeys: &hotkeys,
         mic: mic_permission(fresh_mic),
         has_microphone: audio::has_input_device(),
         stt_model: file(&config.local_stt_model),
+        stt_live_error,
         llm_model: file(&config.local_llm_model),
     })
 }
@@ -309,7 +355,7 @@ mod tests {
     /// Everything granted and on disk.
     fn checks<'a>(config: &'a TranscriptionConfig, hotkeys: &'a HotkeyStatus) -> Checks<'a> {
         let (stt_model, llm_model) = (ModelFile::Ready, ModelFile::Ready);
-        Checks { config, hotkeys, mic: Mic::Granted, has_microphone: true, stt_model, llm_model }
+        Checks { config, hotkeys, mic: Mic::Granted, has_microphone: true, stt_model, stt_live_error: None, llm_model }
     }
 
     /// Cloud Groq with both keys.
@@ -381,6 +427,184 @@ mod tests {
         // Language model off: nothing to download.
         let off = TranscriptionConfig { llm_source: "off".into(), ..local.clone() };
         assert!(compute(&Checks { llm_model: ModelFile::Missing, ..checks(&off, &OK) }).is_empty());
+    }
+
+    fn live_config() -> TranscriptionConfig {
+        TranscriptionConfig {
+            stt_provider: "openai".into(),
+            endpoint_url: "https://api.openai.com/v1/audio/transcriptions".into(),
+            model_name: "gpt-live-transcribe".into(),
+            api_key: "primary-key".into(),
+            llm_source: "off".into(),
+            stt_backup_1_enabled: true,
+            stt_backup_1_provider: "elevenlabs".into(),
+            stt_backup_1_endpoint_url: "https://api.elevenlabs.io/v1/speech-to-text".into(),
+            stt_backup_1_model_name: "scribe_v2_realtime".into(),
+            stt_backup_1_api_key: "second-key".into(),
+            stt_backup_2_enabled: true,
+            stt_backup_2_provider: "microsoft".into(),
+            stt_backup_2_endpoint_url: "https://test.services.ai.azure.com".into(),
+            stt_backup_2_model_name: crate::microsoft::LIVE_MODEL.into(),
+            stt_backup_2_api_key: "third-key".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_valid_live_backup_makes_an_unconfigured_primary_nonblocking() {
+        assert!(compute(&checks(&live_config(), &OK)).is_empty());
+        for (key, endpoint) in [("", "https://api.openai.com/v1/audio/transcriptions"), ("primary-key", ""), ("primary-key", "invalid-url")] {
+            let config = TranscriptionConfig { api_key: key.into(), endpoint_url: endpoint.into(), ..live_config() };
+            let issues = compute(&checks(&config, &OK));
+            assert_eq!(levels(&issues), [("stt", "warning")]);
+            assert!(!issues.iter().any(|issue| blocks(issue, Purpose::Dictation) || blocks(issue, Purpose::Command)));
+        }
+        // The third provider remains usable when the first two have no key.
+        let config = TranscriptionConfig { api_key: String::new(), stt_backup_1_api_key: String::new(), ..live_config() };
+        let issues = compute(&checks(&config, &OK));
+        assert_eq!(levels(&issues), [("stt", "warning"), ("stt_backup_1", "warning")]);
+    }
+
+    fn five_provider_config() -> TranscriptionConfig {
+        TranscriptionConfig {
+            stt_backup_3_enabled: true,
+            stt_backup_3_provider: "elevenlabs".into(),
+            stt_backup_3_endpoint_url: "https://api.elevenlabs.io/v1/speech-to-text".into(),
+            stt_backup_3_model_name: "scribe_v2_realtime".into(),
+            stt_backup_3_api_key: "fourth-key".into(),
+            stt_backup_4_enabled: true,
+            stt_backup_4_provider: "openai".into(),
+            stt_backup_4_endpoint_url: "https://api.openai.com/v1/audio/transcriptions".into(),
+            stt_backup_4_model_name: "gpt-live-transcribe".into(),
+            stt_backup_4_api_key: "fifth-key".into(),
+            ..live_config()
+        }
+    }
+
+    #[test]
+    fn a_working_fifth_provider_keeps_dictation_available_when_the_first_four_are_unusable() {
+        let config = TranscriptionConfig {
+            api_key: String::new(),
+            stt_backup_1_api_key: String::new(),
+            stt_backup_2_api_key: String::new(),
+            stt_backup_3_endpoint_url: "invalid-url".into(),
+            ..five_provider_config()
+        };
+        let issues = compute(&checks(&config, &OK));
+        assert_eq!(levels(&issues), [("stt", "warning"), ("stt_backup_1", "warning"), ("stt_backup_2", "warning"), ("stt_backup_3", "warning")]);
+        assert!(!issues.iter().any(|issue| blocks(issue, Purpose::Dictation) || blocks(issue, Purpose::Command)));
+        let unusable = TranscriptionConfig { stt_backup_4_api_key: "invalid\nkey".into(), ..config.clone() };
+        assert_eq!(levels(&compute(&checks(&unusable, &OK))), [
+            ("stt", "error"), ("stt_backup_1", "warning"), ("stt_backup_2", "warning"), ("stt_backup_3", "warning"), ("stt_backup_4", "warning"),
+        ]);
+        let local = TranscriptionConfig { stt_source: "local".into(), local_stt_model: "vibevoice-asr-streaming-7b".into(), ..config };
+        let issues = compute(&Checks { stt_model: ModelFile::Missing, ..checks(&local, &OK) });
+        assert_eq!(issues[0].level, "warning");
+        assert!(!issues.iter().any(|issue| blocks(issue, Purpose::Dictation)));
+    }
+
+    #[test]
+    fn backup_warning_ids_keep_settings_order_with_nonconsecutive_enabled_slots() {
+        let config = TranscriptionConfig {
+            stt_backup_1_enabled: false,
+            stt_backup_2_api_key: String::new(),
+            stt_backup_3_enabled: false,
+            stt_backup_4_api_key: String::new(),
+            ..five_provider_config()
+        };
+        let issues = compute(&checks(&config, &OK));
+        assert_eq!(levels(&issues), [("stt_backup_2", "warning"), ("stt_backup_4", "warning")]);
+        assert_eq!(issues[0].vars["provider"], "Microsoft Azure");
+        assert_eq!(issues[1].vars["provider"], "OpenAI");
+        assert!(!issues.iter().any(|issue| blocks(issue, Purpose::Dictation)));
+        let consecutive = TranscriptionConfig { stt_backup_3_enabled: true, stt_backup_3_api_key: String::new(), ..config };
+        assert_eq!(levels(&compute(&checks(&consecutive, &OK))), [("stt_backup_2", "warning"), ("stt_backup_3", "warning"), ("stt_backup_4", "warning")]);
+    }
+
+    #[test]
+    fn four_enabled_backups_are_inactive_for_primary_completed_recording_models() {
+        let config = TranscriptionConfig {
+            model_name: "gpt-transcribe".into(),
+            stt_backup_1_api_key: String::new(),
+            stt_backup_2_api_key: String::new(),
+            stt_backup_3_model_name: "scribe_v2".into(),
+            stt_backup_4_endpoint_url: "invalid-url".into(),
+            ..five_provider_config()
+        };
+        assert!(compute(&checks(&config, &OK)).is_empty());
+        let missing_primary = TranscriptionConfig { api_key: String::new(), ..config.clone() };
+        assert_eq!(levels(&compute(&checks(&missing_primary, &OK))), [("stt", "error")]);
+        let local = TranscriptionConfig { stt_source: "local".into(), local_stt_model: "whisper-tiny".into(), ..config };
+        assert!(compute(&Checks { stt_live_error: Some("unavailable runtime"), ..checks(&local, &OK) }).is_empty());
+    }
+
+    #[test]
+    fn invalid_live_backups_warn_without_blocking_a_working_primary() {
+        let config = TranscriptionConfig {
+            stt_backup_1_endpoint_url: "https://api.elevenlabs.io/v1/chat/completions".into(),
+            stt_backup_2_deployment: "invalid\ndeployment".into(),
+            ..live_config()
+        };
+        let issues = compute(&checks(&config, &OK));
+        assert_eq!(levels(&issues), [("stt_backup_1", "warning"), ("stt_backup_2", "warning")]);
+        assert!(!issues.iter().any(|issue| blocks(issue, Purpose::Dictation)));
+        let disabled = TranscriptionConfig { stt_backup_1_enabled: false, stt_backup_2_enabled: false, ..config };
+        assert!(compute(&checks(&disabled, &OK)).is_empty());
+        let third_only = TranscriptionConfig { stt_backup_1_enabled: false, stt_backup_2_api_key: String::new(), ..live_config() };
+        assert_eq!(levels(&compute(&checks(&third_only, &OK))), [("stt_backup_2", "warning")]);
+    }
+
+    #[test]
+    fn only_valid_enabled_live_backups_can_satisfy_transcription_readiness() {
+        let no_primary_key = TranscriptionConfig { api_key: String::new(), stt_backup_2_enabled: false, ..live_config() };
+        for backup in [
+            TranscriptionConfig { stt_backup_1_enabled: false, ..no_primary_key.clone() },
+            TranscriptionConfig { stt_backup_1_model_name: "scribe_v2".into(), ..no_primary_key.clone() },
+            TranscriptionConfig { stt_backup_1_endpoint_url: "not-a-url".into(), ..no_primary_key.clone() },
+            TranscriptionConfig { stt_backup_1_endpoint_url: "http://example.com/v1/speech-to-text".into(), ..no_primary_key.clone() },
+            TranscriptionConfig { stt_backup_1_endpoint_url: "https://user:password@example.com/v1/speech-to-text".into(), ..no_primary_key.clone() },
+            TranscriptionConfig { stt_backup_1_api_key: String::new(), ..no_primary_key.clone() },
+            TranscriptionConfig { stt_backup_1_api_key: "invalid\nkey".into(), ..no_primary_key.clone() },
+        ] {
+            let issues = compute(&checks(&backup, &OK));
+            assert_eq!((issues[0].id.as_str(), issues[0].level.as_str()), ("stt", "error"));
+            assert!(blocks(&issues[0], Purpose::Dictation));
+        }
+        let batch = TranscriptionConfig { model_name: "gpt-transcribe".into(), api_key: String::new(), ..live_config() };
+        assert_eq!(levels(&compute(&checks(&batch, &OK))), [("stt", "error")]);
+    }
+
+    #[test]
+    fn a_live_backup_keeps_local_live_dictation_available_while_the_primary_is_unavailable() {
+        let local = TranscriptionConfig { stt_source: "local".into(), local_stt_model: "vibevoice-asr-streaming-7b".into(), ..live_config() };
+        for stt_model in [ModelFile::Missing, ModelFile::Downloading] {
+            let issues = compute(&Checks { stt_model, ..checks(&local, &OK) });
+            assert_eq!(levels(&issues), [("stt", "warning")]);
+            assert!(!blocks(&issues[0], Purpose::Dictation));
+        }
+        for error in [
+            "Microsoft local models require an Apple Silicon Mac with macOS 14 or later.",
+            "This model does not support the selected dictation languages. Choose another model or change the languages in Settings.",
+        ] {
+            let issues = compute(&Checks { stt_live_error: Some(error), ..checks(&local, &OK) });
+            assert_eq!(levels(&issues), [("stt", "warning")]);
+            assert_eq!(issues[0].detail, error);
+            let no_backup = TranscriptionConfig { stt_backup_1_enabled: false, stt_backup_2_enabled: false, ..local.clone() };
+            let issues = compute(&Checks { stt_live_error: Some(error), ..checks(&no_backup, &OK) });
+            assert_eq!(levels(&issues), [("stt", "error")]);
+        }
+        let local_batch = TranscriptionConfig { local_stt_model: "whisper-tiny".into(), ..local };
+        assert_eq!(levels(&compute(&Checks { stt_model: ModelFile::Missing, ..checks(&local_batch, &OK) })), [("stt", "error")]);
+    }
+
+    #[test]
+    fn live_backups_never_bypass_permissions_devices_or_language_model_readiness() {
+        let config = TranscriptionConfig { api_key: String::new(), llm_source: "cloud".into(), llm_api_key: String::new(), ..live_config() };
+        let issues = compute(&Checks { mic: Mic::Denied, has_microphone: false, ..checks(&config, &OK) });
+        assert_eq!(levels(&issues), [("microphone", "error"), ("no_microphone", "error"), ("stt", "warning"), ("llm", "warning")]);
+        let only_models = compute(&checks(&config, &OK));
+        assert!(!only_models.iter().any(|issue| blocks(issue, Purpose::Dictation)));
+        assert_eq!(only_models.iter().filter(|issue| blocks(issue, Purpose::Command)).map(|issue| issue.id.as_str()).collect::<Vec<_>>(), ["llm"]);
     }
 
     #[test]

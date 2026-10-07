@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "スロベニア語を含む 51 言語に対応。macOS 14 以降の Apple Silicon で録音後に処理します。",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "10 言語に対応するローカルのライブ文字起こし。macOS 14 以降の Apple Silicon が必要です。最初の音声ウィンドウは約 3.5 秒です。",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "8 言語の音声に対応。macOS 14 以降の Apple Silicon で録音後に処理します。",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Microsoft のローカル文字起こしランタイムがありません。OpenGlaido を再インストールしてください。"
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Microsoft のローカル文字起こしランタイムがありません。OpenGlaido を再インストールしてください。",
+ "Live transcription backups": "ライブ文字起こしの予備プロバイダー",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "有効にしたすべてのプロバイダーに音声が同時に送信され、それぞれで料金が発生する場合があります。先のプロバイダーが失敗した場合、順番に従って最初に成功したプロバイダーを使用します。",
+ "Choose a real-time primary transcription model to use backups.": "予備プロバイダーを使うには、メインの文字起こしモデルをリアルタイムモデルに設定してください。",
+ "Second provider": "2番目のプロバイダー",
+ "Third provider": "3番目のプロバイダー",
+ "Runs while you speak and is used if earlier providers fail.": "話している間に動作し、先のプロバイダーが失敗した場合に使用されます。",
+ "Backup transcription providers must use a real-time model": "予備の文字起こしプロバイダーにはリアルタイムモデルが必要です",
+ "Provider {number}": "プロバイダー {number}",
+ "Add provider": "プロバイダーを追加",
+ "Remove provider {number}": "プロバイダー {number} を削除",
+ "{count} of {max} providers": "プロバイダー {count} / {max}"
 }

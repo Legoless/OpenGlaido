@@ -22,6 +22,31 @@ pub struct TranscriptionConfig {
     pub stt_source: String,         // "cloud" | "local"
     pub stt_deployment: String,     // Microsoft Foundry live deployment; empty uses the model default
     pub stt_provider: String,       // cloud preset id ("groq", "openai", …, "custom")
+    // Optional cloud providers run alongside a live primary, in this priority order.
+    pub stt_backup_1_enabled: bool,
+    pub stt_backup_1_provider: String,
+    pub stt_backup_1_endpoint_url: String,
+    pub stt_backup_1_model_name: String,
+    pub stt_backup_1_api_key: String,
+    pub stt_backup_1_deployment: String,
+    pub stt_backup_2_enabled: bool,
+    pub stt_backup_2_provider: String,
+    pub stt_backup_2_endpoint_url: String,
+    pub stt_backup_2_model_name: String,
+    pub stt_backup_2_api_key: String,
+    pub stt_backup_2_deployment: String,
+    pub stt_backup_3_enabled: bool,
+    pub stt_backup_3_provider: String,
+    pub stt_backup_3_endpoint_url: String,
+    pub stt_backup_3_model_name: String,
+    pub stt_backup_3_api_key: String,
+    pub stt_backup_3_deployment: String,
+    pub stt_backup_4_enabled: bool,
+    pub stt_backup_4_provider: String,
+    pub stt_backup_4_endpoint_url: String,
+    pub stt_backup_4_model_name: String,
+    pub stt_backup_4_api_key: String,
+    pub stt_backup_4_deployment: String,
     pub local_stt_model: String,    // models catalog id (kind "stt")
     pub llm_source: String,         // "off" | "cloud" | "local"
     pub llm_provider: String,       // cloud preset id
@@ -129,6 +154,30 @@ impl Default for TranscriptionConfig {
             stt_source: "cloud".to_string(),
             stt_provider: "groq".to_string(),
             stt_deployment: String::new(),
+            stt_backup_1_enabled: false,
+            stt_backup_1_provider: "elevenlabs".into(),
+            stt_backup_1_endpoint_url: "https://api.elevenlabs.io/v1/speech-to-text".into(),
+            stt_backup_1_model_name: "scribe_v2_realtime".into(),
+            stt_backup_1_api_key: String::new(),
+            stt_backup_1_deployment: String::new(),
+            stt_backup_2_enabled: false,
+            stt_backup_2_provider: "openai".into(),
+            stt_backup_2_endpoint_url: "https://api.openai.com/v1/audio/transcriptions".into(),
+            stt_backup_2_model_name: "gpt-live-transcribe".into(),
+            stt_backup_2_api_key: String::new(),
+            stt_backup_2_deployment: String::new(),
+            stt_backup_3_enabled: false,
+            stt_backup_3_provider: "elevenlabs".into(),
+            stt_backup_3_endpoint_url: "https://api.elevenlabs.io/v1/speech-to-text".into(),
+            stt_backup_3_model_name: "scribe_v2_realtime".into(),
+            stt_backup_3_api_key: String::new(),
+            stt_backup_3_deployment: String::new(),
+            stt_backup_4_enabled: false,
+            stt_backup_4_provider: "openai".into(),
+            stt_backup_4_endpoint_url: "https://api.openai.com/v1/audio/transcriptions".into(),
+            stt_backup_4_model_name: "gpt-live-transcribe".into(),
+            stt_backup_4_api_key: String::new(),
+            stt_backup_4_deployment: String::new(),
             local_stt_model: "whisper-large-v3-turbo-q5".to_string(),
             llm_source: "cloud".to_string(),
             llm_provider: "groq".to_string(),
@@ -191,6 +240,54 @@ const CODE_PROMPT: &str = "Write spoken programming terms as code syntax (e.g. '
 const STANDARD_PROMPT: &str = "You are a voice dictation text cleanup assistant. Clean up this raw transcription: fix capitalization and punctuation, and remove conversational filler sounds (um, uh). Keep exact words and meaning. Return ONLY the cleaned text with no introductory or meta commentary.";
 
 impl TranscriptionConfig {
+    pub fn live_backup_slots(&self) -> [(&'static str, bool); 4] {
+        [
+            ("stt_backup_1", self.stt_backup_1_enabled),
+            ("stt_backup_2", self.stt_backup_2_enabled),
+            ("stt_backup_3", self.stt_backup_3_enabled),
+            ("stt_backup_4", self.stt_backup_4_enabled),
+        ]
+    }
+
+    pub fn has_live_backups(&self) -> bool {
+        self.live_backup_slots().into_iter().any(|(_, enabled)| enabled)
+    }
+
+    pub fn uses_live_transcription(&self) -> bool {
+        match self.stt_source.as_str() {
+            "cloud" => crate::realtime::is_live_model(&self.model_name),
+            "local" => models::stt::is_live_model(&self.local_stt_model),
+            _ => false,
+        }
+    }
+
+    /// Independent cloud settings, retaining this recording's language and formatting context.
+    pub fn live_backup_configs(&self) -> Vec<Self> {
+        [
+            (self.stt_backup_1_enabled, &self.stt_backup_1_provider, &self.stt_backup_1_endpoint_url,
+                &self.stt_backup_1_model_name, &self.stt_backup_1_api_key, &self.stt_backup_1_deployment),
+            (self.stt_backup_2_enabled, &self.stt_backup_2_provider, &self.stt_backup_2_endpoint_url,
+                &self.stt_backup_2_model_name, &self.stt_backup_2_api_key, &self.stt_backup_2_deployment),
+            (self.stt_backup_3_enabled, &self.stt_backup_3_provider, &self.stt_backup_3_endpoint_url,
+                &self.stt_backup_3_model_name, &self.stt_backup_3_api_key, &self.stt_backup_3_deployment),
+            (self.stt_backup_4_enabled, &self.stt_backup_4_provider, &self.stt_backup_4_endpoint_url,
+                &self.stt_backup_4_model_name, &self.stt_backup_4_api_key, &self.stt_backup_4_deployment),
+        ].into_iter().filter(|(enabled, ..)| *enabled).map(|(_, provider, endpoint, model, key, deployment)| {
+            let mut config = self.clone();
+            config.stt_source = "cloud".into();
+            config.stt_provider = provider.clone();
+            config.endpoint_url = endpoint.clone();
+            config.model_name = model.clone();
+            config.api_key = key.clone();
+            config.stt_deployment = deployment.clone();
+            config.stt_backup_1_enabled = false;
+            config.stt_backup_2_enabled = false;
+            config.stt_backup_3_enabled = false;
+            config.stt_backup_4_enabled = false;
+            config
+        }).collect()
+    }
+
     /// Parses config.json, migrating the fields removed in batch 2 when the file still has them:
     /// `mode`, `enable_llm_formatting`, `custom_formatting_prompt` and `language`; and filling in
     /// the model sources and providers from the endpoints of files older than them.
@@ -425,6 +522,14 @@ impl TranscriptionConfig {
         if self.stt_source == "cloud" && self.stt_provider == "microsoft" && !self.endpoint_url.trim().is_empty() {
             crate::microsoft::validate_endpoint(self)?;
         }
+        for backup in self.live_backup_configs() {
+            if !crate::realtime::is_live_model(&backup.model_name) {
+                return Err("Backup transcription providers must use a real-time model".into());
+            }
+            if backup.stt_provider == "microsoft" && !backup.endpoint_url.trim().is_empty() {
+                crate::microsoft::validate_endpoint(&backup)?;
+            }
+        }
         Ok(())
     }
 }
@@ -474,7 +579,11 @@ pub async fn transcribe_raw_cancellable(
     cancellation.run(async {
         if config.stt_source == "local" {
             let initial_prompt = (!vocabulary.is_empty()).then(|| vocabulary.join(", "));
-            return models::stt::transcribe_cancellable(app, &config.local_stt_model, wav_bytes, &config.languages, initial_prompt, cancellation.clone()).await;
+            if !config.uses_live_transcription() || !config.has_live_backups() {
+                return models::stt::transcribe_cancellable(app, &config.local_stt_model, wav_bytes, &config.languages, initial_prompt, cancellation.clone()).await;
+            }
+            let primary = models::stt::transcribe_cancellable(app, &config.local_stt_model, wav_bytes.clone(), &config.languages, initial_prompt, cancellation.clone());
+            return crate::realtime::with_live_backups(config, primary, wav_bytes, vocabulary).await;
         }
         // History Retry still uses the selected model: feed the saved WAV through its live
         // protocol instead of sending a live-only model to the file transcription endpoint.
@@ -981,6 +1090,108 @@ mod tests {
         assert!(cfg.validate_models().is_err());
         // A stale id doesn't matter while the source is cloud.
         cfg = TranscriptionConfig { local_stt_model: "gone".into(), ..Default::default() };
+        assert!(cfg.validate_models().is_ok());
+    }
+
+    #[test]
+    fn live_backups_default_off_and_keep_priority_and_recording_preferences() {
+        let mut cfg = TranscriptionConfig::from_json("{}").unwrap();
+        assert!(cfg.live_backup_configs().is_empty());
+        assert!(!cfg.uses_live_transcription());
+        cfg.model_name = "gpt-live-transcribe".into();
+        cfg.stt_backup_1_enabled = true;
+        cfg.stt_backup_2_enabled = true;
+        cfg.stt_backup_1_api_key = "second-key".into();
+        cfg.stt_backup_2_api_key = "third-key".into();
+        cfg.languages = vec!["sl".into(), "en".into()];
+        cfg.llm_source = "off".into();
+        cfg.raw_text = true;
+        assert!(cfg.uses_live_transcription());
+        let backups = cfg.live_backup_configs();
+        assert_eq!(backups.len(), 2);
+        assert_eq!((&backups[0].model_name, &backups[0].api_key), (&cfg.stt_backup_1_model_name, &cfg.stt_backup_1_api_key));
+        assert_eq!((&backups[1].model_name, &backups[1].api_key), (&cfg.stt_backup_2_model_name, &cfg.stt_backup_2_api_key));
+        for backup in &backups {
+            assert_eq!(backup.languages, cfg.languages);
+            assert_eq!(backup.llm_source, "off");
+            assert!(backup.raw_text && backup.live_backup_configs().is_empty());
+        }
+        cfg.stt_backup_1_enabled = false;
+        assert_eq!(cfg.live_backup_configs()[0].api_key, "third-key");
+        cfg.stt_source = "local".into();
+        cfg.local_stt_model = "vibevoice-asr-streaming-7b".into();
+        assert!(cfg.uses_live_transcription());
+        cfg.local_stt_model = TranscriptionConfig::default().local_stt_model;
+        assert!(!cfg.uses_live_transcription());
+    }
+
+    #[test]
+    fn four_backup_slots_preserve_existing_settings_and_bound_provider_count() {
+        let mut cfg = TranscriptionConfig::from_json(r#"{
+            "stt_backup_1_enabled": true, "stt_backup_1_api_key": "existing-first",
+            "stt_backup_2_enabled": true, "stt_backup_2_api_key": "existing-second",
+            "stt_backup_5_enabled": true, "stt_backup_5_api_key": "unsupported-extra"
+        }"#).unwrap();
+        assert_eq!(cfg.live_backup_configs().len(), 2);
+        assert_eq!(cfg.stt_backup_3_provider, "elevenlabs");
+        assert_eq!(cfg.stt_backup_3_model_name, "scribe_v2_realtime");
+        assert_eq!(cfg.stt_backup_4_provider, "openai");
+        assert_eq!(cfg.stt_backup_4_model_name, "gpt-live-transcribe");
+        assert!(!cfg.stt_backup_3_enabled && !cfg.stt_backup_4_enabled);
+        cfg.stt_backup_3_enabled = true;
+        cfg.stt_backup_4_enabled = true;
+        cfg.stt_backup_3_api_key = "fourth-provider".into();
+        cfg.stt_backup_4_api_key = "fifth-provider".into();
+        cfg.languages = vec!["sl".into()];
+        cfg.llm_source = "off".into();
+        let backups = cfg.live_backup_configs();
+        assert_eq!(backups.len(), 4);
+        assert_eq!(backups.iter().map(|backup| backup.api_key.as_str()).collect::<Vec<_>>(),
+            ["existing-first", "existing-second", "fourth-provider", "fifth-provider"]);
+        assert_eq!(cfg.live_backup_slots(), [("stt_backup_1", true), ("stt_backup_2", true), ("stt_backup_3", true), ("stt_backup_4", true)]);
+        assert!(backups.iter().all(|backup| !backup.has_live_backups() && backup.languages == cfg.languages && backup.llm_source == "off"));
+        cfg.stt_backup_1_enabled = false;
+        cfg.stt_backup_2_enabled = false;
+        cfg.stt_backup_3_enabled = false;
+        assert!(cfg.has_live_backups());
+        assert_eq!(cfg.live_backup_configs()[0].api_key, "fifth-provider");
+        cfg.stt_backup_4_enabled = false;
+        assert!(!cfg.has_live_backups());
+    }
+
+    #[test]
+    fn fourth_and_fifth_providers_validate_live_models_and_azure_settings() {
+        let mut cfg = TranscriptionConfig { stt_backup_3_model_name: "scribe_v2".into(), stt_backup_4_model_name: "whisper-1".into(), ..Default::default() };
+        assert!(cfg.validate_models().is_ok());
+        cfg.stt_backup_3_enabled = true;
+        assert!(cfg.validate_models().unwrap_err().contains("real-time model"));
+        cfg.stt_backup_3_model_name = "scribe_v2_realtime".into();
+        cfg.stt_backup_4_enabled = true;
+        assert!(cfg.validate_models().unwrap_err().contains("real-time model"));
+        cfg.stt_backup_4_provider = "microsoft".into();
+        cfg.stt_backup_4_model_name = crate::microsoft::LIVE_MODEL.into();
+        cfg.stt_backup_4_endpoint_url = "https://other.example".into();
+        assert!(cfg.validate_models().is_err());
+        cfg.stt_backup_4_endpoint_url = "https://speech.services.ai.azure.com".into();
+        assert!(cfg.validate_models().is_ok());
+        cfg.stt_backup_4_deployment = "invalid\ndeployment".into();
+        assert!(cfg.validate_models().is_err());
+    }
+
+    #[test]
+    fn enabled_backups_require_live_models_and_validate_azure_resources() {
+        let mut cfg = TranscriptionConfig::default();
+        cfg.stt_backup_1_model_name = "scribe_v2".into();
+        assert!(cfg.validate_models().is_ok()); // Disabled choices do not affect saves.
+        cfg.stt_backup_1_enabled = true;
+        assert!(cfg.validate_models().unwrap_err().contains("real-time model"));
+        cfg.stt_backup_1_provider = "microsoft".into();
+        cfg.stt_backup_1_model_name = crate::microsoft::LIVE_MODEL.into();
+        cfg.stt_backup_1_endpoint_url = "https://example.com".into();
+        assert!(cfg.validate_models().is_err());
+        cfg.stt_backup_1_endpoint_url = "https://speech.services.ai.azure.com".into();
+        assert!(cfg.validate_models().is_ok());
+        cfg.stt_backup_1_endpoint_url.clear(); // Allow entering resource settings incrementally.
         assert!(cfg.validate_models().is_ok());
     }
 

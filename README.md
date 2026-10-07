@@ -72,6 +72,7 @@ When you stop recording, your words are cleaned up and pasted into the text fiel
 - Downloaded models are Mac only, and some need macOS 12+ or 14+. On Windows and Linux, use the cloud or a server on your own computer: Ollama or LM Studio for the language model, or **Custom** for either.
 - **Custom** works with any server that speaks the OpenAI API.
 - **Real time** models turn your speech into text as you talk, but paste only once you stop.
+- **Live backups:** in Settings › Model, use **+ Add provider** to add up to four cloud backups (five providers total). Provider cards can be expanded to edit settings or removed from the list. All added providers receive the audio simultaneously; the first successful transcript in priority order wins after earlier providers fail or time out. Backups also work with History Retry and a local streaming primary. They remain inactive with models that transcribe after recording.
 
 Details: [local transcription models](docs/local-transcription-models.md), [Microsoft models, including Azure setup](docs/microsoft-transcription-models.md).
 
@@ -90,12 +91,12 @@ Details: [local transcription models](docs/local-transcription-models.md), [Micr
 
 ## Privacy and cost
 
-- **Cost:** you pay cloud providers directly. Models on your Mac have no per-request fees. Dictionary hints add 20% to ElevenLabs costs.
+- **Cost:** you pay cloud providers directly. Each enabled live backup may charge for the recording, even when its transcript is unused. Models on your Mac have no per-request fees. Dictionary hints add 20% to ElevenLabs costs.
 - **On your computer:** settings, history (until you delete it), dictionary, snippets and recordings. API keys go in the system keychain.
 - **Sent to cloud transcription:** your recording and dictionary hints. **Real time** models send your raw audio while you're still speaking.
 - **Sent to a cloud language model:** the transcript, your style and instructions. Commands also send your request, the app's name, any text you've selected (Mac) and whatever their tools look up.
 - Web searches go only to your search provider. Reading a page or YouTube video fetches it from that site. Models come from Hugging Face; update checks go to GitHub.
-- **Fully offline on a Mac:** pick a downloaded transcription model and set the language model to **On this Mac** or **Off**.
+- **Fully offline on a Mac:** pick a downloaded transcription model, disable live cloud backups, and set the language model to **On this Mac** or **Off**.
 - No analytics or telemetry code.
 
 ## Known limitations

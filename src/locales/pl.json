@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 języków, w tym słoweński; działa po nagraniu na Apple Silicon z macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Lokalna transkrypcja na żywo w dziesięciu językach; Apple Silicon z macOS 14+. Początkowe okno dźwięku trwa około 3,5 sekundy.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Osiem języków mowy; działa po nagraniu na Apple Silicon z macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Brak lokalnego środowiska transkrypcji Microsoft. Zainstaluj ponownie OpenGlaido."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Brak lokalnego środowiska transkrypcji Microsoft. Zainstaluj ponownie OpenGlaido.",
+ "Live transcription backups": "Zapasowi dostawcy transkrypcji na żywo",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Wszyscy włączeni dostawcy otrzymują dźwięk jednocześnie i każdy może naliczać opłaty. Jeśli wcześniejsi dostawcy zawiodą, używany jest pierwszy dostawca w kolejności, który zakończy transkrypcję pomyślnie.",
+ "Choose a real-time primary transcription model to use backups.": "Wybierz główny model transkrypcji w czasie rzeczywistym, aby korzystać z zapasowych dostawców.",
+ "Second provider": "Drugi dostawca",
+ "Third provider": "Trzeci dostawca",
+ "Runs while you speak and is used if earlier providers fail.": "Działa podczas mówienia i jest używany, gdy wcześniejsi dostawcy zawiodą.",
+ "Backup transcription providers must use a real-time model": "Zapasowi dostawcy transkrypcji muszą używać modelu działającego w czasie rzeczywistym",
+ "Provider {number}": "Dostawca {number}",
+ "Add provider": "Dodaj dostawcę",
+ "Remove provider {number}": "Usuń dostawcę {number}",
+ "{count} of {max} providers": "{count} z {max} dostawców"
 }

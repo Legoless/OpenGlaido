@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 talen, waaronder Sloveens; werkt na de opname op Apple Silicon met macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Lokale live-transcriptie in tien talen; Apple Silicon met macOS 14+. Het eerste audiovenster duurt ongeveer 3,5 seconden.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Acht gesproken talen; werkt na de opname op Apple Silicon met macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "De lokale Microsoft-transcriptieruntime ontbreekt. Installeer OpenGlaido opnieuw."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "De lokale Microsoft-transcriptieruntime ontbreekt. Installeer OpenGlaido opnieuw.",
+ "Live transcription backups": "Reserveproviders voor live transcriptie",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Alle ingeschakelde providers ontvangen je audio tegelijk en kunnen elk kosten in rekening brengen. Als eerdere providers uitvallen, wordt de eerste succesvolle provider in de volgorde gebruikt.",
+ "Choose a real-time primary transcription model to use backups.": "Kies een primair transcriptiemodel dat in realtime werkt om reserveproviders te gebruiken.",
+ "Second provider": "Tweede provider",
+ "Third provider": "Derde provider",
+ "Runs while you speak and is used if earlier providers fail.": "Werkt terwijl je spreekt en wordt gebruikt als eerdere providers uitvallen.",
+ "Backup transcription providers must use a real-time model": "Reserveproviders voor transcriptie moeten een model gebruiken dat in realtime werkt",
+ "Provider {number}": "Provider {number}",
+ "Add provider": "Provider toevoegen",
+ "Remove provider {number}": "Provider {number} verwijderen",
+ "{count} of {max} providers": "{count} van {max} providers"
 }

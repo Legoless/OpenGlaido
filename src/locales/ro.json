@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 de limbi, inclusiv slovena; rulează după înregistrare pe Apple Silicon cu macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Transcriere locală live în zece limbi; Apple Silicon cu macOS 14+. Fereastra audio inițială este de aproximativ 3,5 secunde.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Opt limbi vorbite; rulează după înregistrare pe Apple Silicon cu macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Lipsește mediul local de transcriere Microsoft. Reinstalează OpenGlaido."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Lipsește mediul local de transcriere Microsoft. Reinstalează OpenGlaido.",
+ "Live transcription backups": "Furnizori de rezervă pentru transcriere în timp real",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Toți furnizorii activați primesc sunetul simultan și fiecare poate percepe taxe. Dacă furnizorii anteriori eșuează, este folosit primul furnizor din ordine care reușește.",
+ "Choose a real-time primary transcription model to use backups.": "Alege un model principal de transcriere în timp real pentru a folosi furnizorii de rezervă.",
+ "Second provider": "Al doilea furnizor",
+ "Third provider": "Al treilea furnizor",
+ "Runs while you speak and is used if earlier providers fail.": "Rulează în timp ce vorbești și este folosit dacă furnizorii anteriori eșuează.",
+ "Backup transcription providers must use a real-time model": "Furnizorii de rezervă pentru transcriere trebuie să folosească un model în timp real",
+ "Provider {number}": "Furnizorul {number}",
+ "Add provider": "Adaugă un furnizor",
+ "Remove provider {number}": "Elimină furnizorul {number}",
+ "{count} of {max} providers": "{count} din {max} furnizori"
 }

@@ -149,7 +149,7 @@ pub struct Session {
     pub chime: bool,
     /// Model and formatting choices for this recording, even if settings change meanwhile.
     pub config: TranscriptionConfig,
-    pub live: Option<realtime::LiveTranscription>,
+    pub live: Option<realtime::LiveTranscriptionGroup>,
     recorded_at: String,
     context_task: Option<tokio::sync::oneshot::Receiver<(AppContext, Option<String>)>>,
     delivery: Option<paste::DeliveryTicket>,
@@ -507,7 +507,9 @@ fn load_config(path: &Path) -> TranscriptionConfig {
     migrated |= hotkeys::replace_old_defaults(&mut config.hotkey_hold, &mut config.hotkey_toggle, false);
     migrated |= hotkeys::replace_old_defaults(&mut config.commands_hold, &mut config.commands_toggle, true);
     // Each credential family migrates independently; failed migration must not rewrite plaintext keys.
-    let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty() || !config.llm_api_key.is_empty();
+    let plaintext = !config.api_key.is_empty() || !config.search_api_key.is_empty() || !config.llm_api_key.is_empty()
+        || !config.stt_backup_1_api_key.is_empty() || !config.stt_backup_2_api_key.is_empty()
+        || !config.stt_backup_3_api_key.is_empty() || !config.stt_backup_4_api_key.is_empty();
     let search_loaded = if config.search_keys_migrated {
         config.search_api_key.clear();
         Ok(())
@@ -522,6 +524,10 @@ fn load_config(path: &Path) -> TranscriptionConfig {
     let keys_loaded = if config.provider_keys_migrated {
         config.api_key.clear();
         config.llm_api_key.clear();
+        config.stt_backup_1_api_key.clear();
+        config.stt_backup_2_api_key.clear();
+        config.stt_backup_3_api_key.clear();
+        config.stt_backup_4_api_key.clear();
         Ok(())
     } else {
         hydrate_legacy_model_keys(&mut config).map(|()| {
@@ -597,13 +603,19 @@ fn read_config(path: &Path) -> TranscriptionConfig {
 
 /// Never write credentials to config.json. Failed legacy migration leaves the original file intact.
 fn config_json(config: &TranscriptionConfig) -> Result<String, String> {
-    if (!config.provider_keys_migrated && (!config.api_key.is_empty() || !config.llm_api_key.is_empty()))
+    if (!config.provider_keys_migrated && (!config.api_key.is_empty() || !config.llm_api_key.is_empty()
+        || !config.stt_backup_1_api_key.is_empty() || !config.stt_backup_2_api_key.is_empty()
+        || !config.stt_backup_3_api_key.is_empty() || !config.stt_backup_4_api_key.is_empty()))
         || (!config.search_keys_migrated && !config.search_api_key.is_empty()) {
         return Err("Couldn't save settings until API keys are secured in the system keychain".into());
     }
     let mut on_disk = config.clone();
     on_disk.api_key.clear();
     on_disk.llm_api_key.clear();
+    on_disk.stt_backup_1_api_key.clear();
+    on_disk.stt_backup_2_api_key.clear();
+    on_disk.stt_backup_3_api_key.clear();
+    on_disk.stt_backup_4_api_key.clear();
     on_disk.search_api_key.clear();
     serde_json::to_string_pretty(&on_disk).map_err(|e| e.to_string())
 }
@@ -901,16 +913,17 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         });
         rx
     });
-    let (live, input) = if config.stt_source == "cloud" && realtime::is_live_model(&config.model_name) {
+    let (live, inputs) = if config.uses_live_transcription() {
         let vocabulary = if purpose == Purpose::Dictation { vocab_terms(&state.db) } else { Vec::new() };
-        let (live, input) = realtime::LiveTranscription::start(&config, vocabulary).map_err(Notice::model_error)?;
-        (Some(live), Some(input))
-    } else if config.stt_source == "local" && models::stt::is_live_model(&config.local_stt_model) {
-        let vocabulary = if purpose == Purpose::Dictation { vocab_terms(&state.db) } else { Vec::new() };
-        let (live, input) = models::stt::start_live(app, &config.local_stt_model, vocabulary, config.languages.clone()).map_err(Notice::model_error)?;
-        (Some(live), Some(input))
+        let primary = if config.stt_source == "local" {
+            models::stt::start_live(app, &config.local_stt_model, vocabulary.clone(), config.languages.clone())
+        } else {
+            realtime::LiveTranscription::start(&config, vocabulary.clone())
+        };
+        let (live, inputs) = realtime::LiveTranscriptionGroup::start_with_primary(&config, primary, vocabulary).map_err(Notice::model_error)?;
+        (Some(live), inputs)
     } else {
-        (None, None)
+        (None, Vec::new())
     };
     // Acknowledge the press while the device opens. Bars stay at rest until real mic levels
     // arrive; the start chime still means the microphone is ready.
@@ -926,7 +939,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     }
     update_hud(app);
     let fell_back = match state.recorder.start_recording_streamed(
-        &config.input_devices, input, if sound_on { CHIME_TRIM_MS } else { 0 },
+        &config.input_devices, inputs, if sound_on { CHIME_TRIM_MS } else { 0 },
     ) {
         Ok(fell_back) => fell_back,
         Err(e) => {
@@ -2373,12 +2386,18 @@ mod tests {
             provider_keys_migrated: true,
             search_keys_migrated: true,
             api_key: "stt-secret".into(),
+            stt_backup_1_api_key: "backup-one-secret".into(),
+            stt_backup_2_api_key: "backup-two-secret".into(),
+            stt_backup_3_api_key: "backup-three-secret".into(),
+            stt_backup_4_api_key: "backup-four-secret".into(),
             llm_api_key: "llm-secret".into(),
             search_api_key: "search-secret".into(),
             ..Default::default()
         };
         let saved: TranscriptionConfig = serde_json::from_str(&config_json(&config).unwrap()).unwrap();
         assert!(saved.api_key.is_empty() && saved.llm_api_key.is_empty() && saved.search_api_key.is_empty());
+        assert!(saved.stt_backup_1_api_key.is_empty() && saved.stt_backup_2_api_key.is_empty());
+        assert!(saved.stt_backup_3_api_key.is_empty() && saved.stt_backup_4_api_key.is_empty());
         assert!(saved.provider_keys_migrated && saved.search_keys_migrated);
         // Failed first-time migration cannot rewrite or lose the original plaintext file.
         config.provider_keys_migrated = false;
@@ -2394,6 +2413,21 @@ mod tests {
         assert!(write_config(&path, &config).is_err());
         assert_eq!(fs::read_to_string(&path).unwrap(), original);
         fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn new_backup_credentials_require_secure_migration_even_when_primary_keys_are_empty() {
+        for key in ["stt_backup_3_api_key", "stt_backup_4_api_key"] {
+            let mut value = serde_json::to_value(TranscriptionConfig::default()).unwrap();
+            value[key] = serde_json::json!("new-slot-secret");
+            let mut config: TranscriptionConfig = serde_json::from_value(value).unwrap();
+            assert!(config_json(&config).is_err());
+            config.provider_keys_migrated = true;
+            let saved = config_json(&config).unwrap();
+            assert!(!saved.contains("new-slot-secret"));
+            let saved: TranscriptionConfig = serde_json::from_str(&saved).unwrap();
+            assert!(saved.stt_backup_3_api_key.is_empty() && saved.stt_backup_4_api_key.is_empty());
+        }
     }
 
     #[test]

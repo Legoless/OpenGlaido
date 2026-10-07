@@ -1,4 +1,4 @@
-import { MODEL_FIELDS, PROVIDERS, baseFromUrl, modelKeyScope } from "./providers";
+import { BACKUP_ROLES, MODEL_FIELDS, PROVIDERS, baseFromUrl, hasLivePrimary, isBackupRole, isCloudLiveModel, modelKeyScope, type ModelRole } from "./providers";
 import type { TranscriptionConfig } from "./types";
 
 export type HomeKeyCheck = { id: string; provider: string; baseUrl: string; apiKey: string };
@@ -7,14 +7,18 @@ export type HomeKeyResult = { id: string; result: "verified" | "unsupported" | "
 /** Check only active cloud credentials with a known authenticated check. */
 export function homeKeyChecks(config: TranscriptionConfig | null): HomeKeyCheck[] {
   if (!config) return [];
-  return (["stt", "llm"] as const).flatMap((kind) => {
-    if (config[`${kind}_source`] !== "cloud") return [];
-    const f = MODEL_FIELDS[kind];
+  const roles: ModelRole[] = ["stt", "llm", ...(hasLivePrimary(config) ? BACKUP_ROLES : [])];
+  return roles.flatMap((role) => {
+    if (isBackupRole(role)) {
+      const f = MODEL_FIELDS[role];
+      if (!config[f.enabled] || !isCloudLiveModel(config[f.model])) return [];
+    } else if (config[`${role}_source`] !== "cloud") return [];
+    const f = MODEL_FIELDS[role];
     const apiKey = config[f.key];
     const baseUrl = baseFromUrl(config[f.url] ?? "");
     const provider = PROVIDERS.find((p) => p.baseUrl === baseUrl && p.keyUrl);
     if (!apiKey.trim() || !provider) return [];
-    return [{ id: JSON.stringify([modelKeyScope(config, kind), apiKey]), provider: provider.name, baseUrl, apiKey }];
+    return [{ id: JSON.stringify([modelKeyScope(config, role), apiKey]), provider: provider.name, baseUrl, apiKey }];
   });
 }
 

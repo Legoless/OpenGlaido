@@ -491,5 +491,16 @@
  "51 languages including Slovenian; runs after recording on Apple Silicon, macOS 14+.": "51 Sprachen einschließlich Slowenisch; läuft nach der Aufnahme auf Apple Silicon mit macOS 14+.",
  "Live local transcription in ten languages; Apple Silicon, macOS 14+. Initial audio window is about 3.5 seconds.": "Lokale Live-Transkription in zehn Sprachen; Apple Silicon mit macOS 14+. Das erste Audiofenster dauert etwa 3,5 Sekunden.",
  "Eight speech languages; runs after recording on Apple Silicon, macOS 14+.": "Acht gesprochene Sprachen; läuft nach der Aufnahme auf Apple Silicon mit macOS 14+.",
- "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Die lokale Microsoft-Transkriptionslaufzeit fehlt. Installiere OpenGlaido erneut."
+ "The local Microsoft transcription runtime is missing. Reinstall OpenGlaido.": "Die lokale Microsoft-Transkriptionslaufzeit fehlt. Installiere OpenGlaido erneut.",
+ "Live transcription backups": "Ersatzanbieter für Live-Transkription",
+ "All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.": "Alle aktivierten Anbieter erhalten dein Audio gleichzeitig und können jeweils Gebühren berechnen. Wenn vorherige Anbieter ausfallen, wird der erste erfolgreiche Anbieter in der Reihenfolge verwendet.",
+ "Choose a real-time primary transcription model to use backups.": "Wähle ein Echtzeitmodell als primäres Transkriptionsmodell, um Ersatzanbieter zu nutzen.",
+ "Second provider": "Zweiter Anbieter",
+ "Third provider": "Dritter Anbieter",
+ "Runs while you speak and is used if earlier providers fail.": "Läuft, während du sprichst, und wird verwendet, wenn vorherige Anbieter ausfallen.",
+ "Backup transcription providers must use a real-time model": "Ersatzanbieter für die Transkription müssen ein Echtzeitmodell verwenden",
+ "Provider {number}": "Anbieter {number}",
+ "Add provider": "Anbieter hinzufügen",
+ "Remove provider {number}": "Anbieter {number} entfernen",
+ "{count} of {max} providers": "{count} von {max} Anbietern"
 }

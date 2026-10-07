@@ -6,6 +6,33 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const SERVICE: &str = "com.openglaido.app";
+const MODEL_ROLES: [(&str, &str); 6] = [
+    ("stt", "api_key"), ("llm", "llm_api_key"),
+    ("stt_backup_1", "stt_backup_1_api_key"), ("stt_backup_2", "stt_backup_2_api_key"),
+    ("stt_backup_3", "stt_backup_3_api_key"), ("stt_backup_4", "stt_backup_4_api_key"),
+];
+
+fn model_key<'a>(config: &'a TranscriptionConfig, role: &str) -> &'a str {
+    match role {
+        "stt" => &config.api_key,
+        "stt_backup_1" => &config.stt_backup_1_api_key,
+        "stt_backup_2" => &config.stt_backup_2_api_key,
+        "stt_backup_3" => &config.stt_backup_3_api_key,
+        "stt_backup_4" => &config.stt_backup_4_api_key,
+        _ => &config.llm_api_key,
+    }
+}
+
+fn set_model_key(config: &mut TranscriptionConfig, role: &str, key: String) {
+    match role {
+        "stt" => config.api_key = key,
+        "stt_backup_1" => config.stt_backup_1_api_key = key,
+        "stt_backup_2" => config.stt_backup_2_api_key = key,
+        "stt_backup_3" => config.stt_backup_3_api_key = key,
+        "stt_backup_4" => config.stt_backup_4_api_key = key,
+        _ => config.llm_api_key = key,
+    }
+}
 
 fn entry(account: &str) -> Result<keyring::Entry, String> {
     keyring::Entry::new(SERVICE, account).map_err(|e| keychain_error("open", e))
@@ -41,10 +68,13 @@ pub fn set(account: &str, value: &str) -> Result<(), String> {
 }
 
 fn account(config: &TranscriptionConfig, role: &str) -> String {
-    let (provider, endpoint) = if role == "stt" {
-        (config.stt_provider.as_str(), config.endpoint_url.as_str())
-    } else {
-        (config.llm_provider.as_str(), config.llm_endpoint_url.as_deref().unwrap_or_default())
+    let (provider, endpoint) = match role {
+        "stt" => (config.stt_provider.as_str(), config.endpoint_url.as_str()),
+        "stt_backup_1" => (config.stt_backup_1_provider.as_str(), config.stt_backup_1_endpoint_url.as_str()),
+        "stt_backup_2" => (config.stt_backup_2_provider.as_str(), config.stt_backup_2_endpoint_url.as_str()),
+        "stt_backup_3" => (config.stt_backup_3_provider.as_str(), config.stt_backup_3_endpoint_url.as_str()),
+        "stt_backup_4" => (config.stt_backup_4_provider.as_str(), config.stt_backup_4_endpoint_url.as_str()),
+        _ => (config.llm_provider.as_str(), config.llm_endpoint_url.as_deref().unwrap_or_default()),
     };
     let provider = match provider {
         "groq" | "openai" | "elevenlabs" | "openrouter" | "mistral" | "gemini" | "ollama" | "lmstudio" => provider,
@@ -67,6 +97,24 @@ fn account(config: &TranscriptionConfig, role: &str) -> String {
 
 fn other_role(account: &str, role: &str) -> String {
     account.replacen(&format!("_{role}_"), if role == "stt" { "_llm_" } else { "_stt_" }, 1)
+}
+
+fn related_accounts(account: &str, role: &str) -> Vec<String> {
+    if matches!(role, "stt" | "llm") {
+        vec![other_role(account, role)]
+    } else {
+        ["stt", "llm"].into_iter().map(|target| account.replacen(&format!("_{role}_"), &format!("_{target}_"), 1)).collect()
+    }
+}
+
+fn resolve_key(account: &str, role: &str, updates: &BTreeMap<String, String>, read: &ReadKey) -> Result<String, String> {
+    if let Some(key) = lookup(account, updates, read)? { return Ok(key); }
+    for related in related_accounts(account, role) {
+        if let Some(key) = lookup(&related, updates, read)?.filter(|key| !key.is_empty()) {
+            return Ok(key);
+        }
+    }
+    Ok(String::new())
 }
 
 fn decode(value: Option<String>) -> Result<Option<String>, String> {
@@ -154,39 +202,25 @@ fn load_model_keys_with(
     read: &ReadKey,
     write: impl Fn(&str, Option<&str>) -> Result<(), String> + 'static,
 ) -> Result<bool, String> {
+    let mut updates = BTreeMap::new();
     if !config.provider_keys_migrated {
-        let mut updates = BTreeMap::new();
-        let mut resolved = Vec::new();
-        for (role, legacy) in [("stt", &config.api_key), ("llm", &config.llm_api_key)] {
+        for (role, _) in MODEL_ROLES {
+            let legacy = model_key(config, role);
+            if !matches!(role, "stt" | "llm") && legacy.is_empty() { continue; }
             let target = account(config, role);
-            let key = match decode(read(&target)?)? {
-                Some(key) => key, // A prior migration may have saved keys before config.json failed.
-                None => {
-                    updates.insert(target, encode(legacy));
-                    legacy.clone()
-                }
-            };
-            resolved.push(key);
+            // A prior migration may have saved keys before config.json failed.
+            if decode(read(&target)?)?.is_none() { updates.insert(target, encode(legacy)); }
         }
-        apply(updates, read, write)?.commit();
-        config.api_key = resolved.remove(0);
-        config.llm_api_key = resolved.remove(0);
-        config.provider_keys_migrated = true;
-        return Ok(true);
     }
-    let resolve = |role: &str| -> Result<String, String> {
-        let account = account(config, role);
-        match decode(read(&account)?)? {
-            Some(key) => Ok(key),
-            None => Ok(decode(read(&other_role(&account, role))?)?.unwrap_or_default()),
-        }
-    };
-    // Resolve both first: a read failure must not half-change the runtime config.
-    let stt = resolve("stt")?;
-    let llm = resolve("llm")?;
-    config.api_key = stt;
-    config.llm_api_key = llm;
-    Ok(false)
+    // Resolve every slot first: a read failure must not half-change the runtime config.
+    let resolved = MODEL_ROLES.into_iter().map(|(role, _)| {
+        resolve_key(&account(config, role), role, &updates, read).map(|key| (role, key))
+    }).collect::<Result<Vec<_>, String>>()?;
+    apply(updates, read, write)?.commit();
+    for (role, key) in resolved { set_model_key(config, role, key); }
+    let migrated = !config.provider_keys_migrated;
+    config.provider_keys_migrated = true;
+    Ok(migrated)
 }
 
 pub fn save_model_keys(old: &TranscriptionConfig, new: &mut TranscriptionConfig, edited_model_keys: &[&str]) -> Result<ModelKeyUpdate, String> {
@@ -200,37 +234,29 @@ fn save_model_keys_with(
     read: &ReadKey,
     write: impl Fn(&str, Option<&str>) -> Result<(), String> + 'static,
 ) -> Result<ModelKeyUpdate, String> {
-    let roles = [("stt", &old.api_key, &new.api_key), ("llm", &old.llm_api_key, &new.llm_api_key)];
     let mut updates = BTreeMap::new();
-    for (role, old_key, new_key) in roles {
+    for (role, key_field) in MODEL_ROLES {
+        let old_key = model_key(old, role);
         let old_account = account(old, role);
-        if (!old.provider_keys_migrated || !old_key.is_empty()) && read(&old_account)?.is_none() {
+        if ((!old.provider_keys_migrated && matches!(role, "stt" | "llm")) || !old_key.is_empty()) && read(&old_account)?.is_none() {
             updates.insert(old_account.clone(), encode(old_key));
         }
         // A scope switch carries the old key in the UI snapshot: never save it under the new scope.
-        let key_field = if role == "stt" { "api_key" } else { "llm_api_key" };
         if old_account == account(new, role) && edited_model_keys.contains(&key_field) {
-            updates.insert(old_account, encode(new_key));
+            updates.insert(old_account, encode(model_key(new, role)));
         }
     }
     let mut resolved = Vec::new();
-    for (role, _, _) in roles {
+    for (role, _) in MODEL_ROLES {
         let target = account(new, role);
-        let key = match lookup(&target, &updates, read)? {
-            Some(key) => key, // Includes an explicit clear; never refill it from the other role.
-            None => match lookup(&other_role(&target, role), &updates, read)? {
-                Some(key) if !key.is_empty() => {
-                    updates.insert(target, encode(&key));
-                    key
-                }
-                _ => String::new(),
-            },
-        };
-        resolved.push(key);
+        let key = resolve_key(&target, role, &updates, read)?;
+        if !key.is_empty() && lookup(&target, &updates, read)?.is_none() {
+            updates.insert(target, encode(&key));
+        }
+        resolved.push((role, key));
     }
     let transaction = apply(updates, read, write)?;
-    new.api_key = resolved.remove(0);
-    new.llm_api_key = resolved.remove(0);
+    for (role, key) in resolved { set_model_key(new, role, key); }
     new.provider_keys_migrated = true;
     Ok(transaction)
 }
@@ -425,6 +451,141 @@ mod tests {
         vault.save(&away, &mut back, &[]).unwrap().commit();
         assert!(back.llm_api_key.is_empty());
         assert_eq!(back.api_key, "openai-stt");
+    }
+
+    #[test]
+    fn backup_keys_are_independent_and_explicit_clears_survive_restart() {
+        let vault = Vault::default();
+        let mut primary = legacy();
+        openai(&mut primary, "stt");
+        primary.api_key = "primary-key".into();
+        vault.load(&mut primary).unwrap();
+        assert_eq!(primary.stt_backup_2_api_key, "primary-key");
+        assert_eq!(primary.stt_backup_4_api_key, "primary-key");
+        let mut keyed = primary.clone();
+        keyed.stt_backup_1_api_key = "second-key".into();
+        keyed.stt_backup_2_api_key = "third-key".into();
+        keyed.stt_backup_3_api_key = "fourth-key".into();
+        keyed.stt_backup_4_api_key = "fifth-key".into();
+        vault.save(&primary, &mut keyed, &["stt_backup_1_api_key", "stt_backup_2_api_key", "stt_backup_3_api_key", "stt_backup_4_api_key"]).unwrap().commit();
+        assert_eq!(keyed.api_key, "primary-key");
+        let mut restarted = keyed.clone();
+        restarted.api_key.clear();
+        restarted.stt_backup_1_api_key.clear();
+        restarted.stt_backup_2_api_key.clear();
+        restarted.stt_backup_3_api_key.clear();
+        restarted.stt_backup_4_api_key.clear();
+        vault.load(&mut restarted).unwrap();
+        assert_eq!((restarted.api_key.as_str(), restarted.stt_backup_1_api_key.as_str(), restarted.stt_backup_2_api_key.as_str()),
+            ("primary-key", "second-key", "third-key"));
+        assert_eq!((restarted.stt_backup_3_api_key.as_str(), restarted.stt_backup_4_api_key.as_str()), ("fourth-key", "fifth-key"));
+        let mut cleared = restarted.clone();
+        cleared.stt_backup_2_api_key.clear();
+        cleared.stt_backup_3_api_key.clear();
+        cleared.stt_backup_4_api_key.clear();
+        vault.save(&restarted, &mut cleared, &["stt_backup_2_api_key", "stt_backup_3_api_key", "stt_backup_4_api_key"]).unwrap().commit();
+        vault.load(&mut cleared).unwrap();
+        assert!(cleared.stt_backup_2_api_key.is_empty());
+        assert!(cleared.stt_backup_3_api_key.is_empty() && cleared.stt_backup_4_api_key.is_empty());
+        assert_eq!(cleared.api_key, "primary-key");
+        assert_eq!(cleared.stt_backup_1_api_key, "second-key");
+    }
+
+    #[test]
+    fn backup_provider_switch_does_not_transfer_secrets_and_failed_save_rolls_back() {
+        let vault = Vault::default();
+        let mut old = legacy();
+        vault.load(&mut old).unwrap();
+        let mut keyed = old.clone();
+        keyed.stt_backup_1_api_key = "elevenlabs-secret".into();
+        vault.save(&old, &mut keyed, &["stt_backup_1_api_key"]).unwrap().commit();
+        let mut switched = keyed.clone();
+        switched.stt_backup_1_provider = "custom".into();
+        switched.stt_backup_1_endpoint_url = "https://other.example/v1/audio/transcriptions".into();
+        vault.save(&keyed, &mut switched, &["stt_backup_1_api_key"]).unwrap().commit();
+        assert!(switched.stt_backup_1_api_key.is_empty());
+        let mut back = keyed.clone();
+        back.stt_backup_1_api_key.clear();
+        vault.save(&switched, &mut back, &[]).unwrap().commit();
+        assert_eq!(back.stt_backup_1_api_key, "elevenlabs-secret");
+        let before = vault.values.borrow().clone();
+        let mut changed = back.clone();
+        changed.stt_backup_1_api_key = "changed-second".into();
+        changed.stt_backup_2_api_key = "changed-third".into();
+        drop(vault.save(&back, &mut changed, &["stt_backup_1_api_key", "stt_backup_2_api_key"]).unwrap());
+        assert_eq!(*vault.values.borrow(), before);
+        *vault.fail_read.borrow_mut() = Some(account(&back, "stt_backup_2"));
+        let original = back.clone();
+        assert!(vault.load(&mut back).is_err());
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn fourth_and_fifth_provider_keys_migrate_and_inherit_matching_primary_roles() {
+        let vault = Vault::default();
+        let mut config = TranscriptionConfig {
+            stt_backup_3_api_key: "fourth-legacy-secret".into(),
+            stt_backup_4_api_key: "fifth-legacy-secret".into(),
+            ..legacy()
+        };
+        assert!(vault.load(&mut config).unwrap());
+        config.stt_backup_3_api_key.clear();
+        config.stt_backup_4_api_key.clear();
+        assert!(!vault.load(&mut config).unwrap());
+        assert_eq!(config.stt_backup_3_api_key, "fourth-legacy-secret");
+        assert_eq!(config.stt_backup_4_api_key, "fifth-legacy-secret");
+
+        let vault = Vault::default();
+        let mut primary = legacy();
+        openai(&mut primary, "stt");
+        primary.api_key = "openai-primary".into();
+        primary.llm_provider = "elevenlabs".into();
+        primary.llm_endpoint_url = Some("https://api.elevenlabs.io/v1/speech-to-text".into());
+        primary.llm_api_key = "matching-elevenlabs".into();
+        vault.load(&mut primary).unwrap();
+        assert_eq!(primary.stt_backup_3_api_key, "matching-elevenlabs");
+        assert_eq!(primary.stt_backup_4_api_key, "openai-primary");
+        assert_ne!(account(&primary, "stt_backup_3"), account(&primary, "stt_backup_1"));
+        assert_ne!(account(&primary, "stt_backup_4"), account(&primary, "stt_backup_2"));
+    }
+
+    #[test]
+    fn fourth_and_fifth_provider_scope_switches_and_failed_writes_preserve_credentials() {
+        let vault = Vault::default();
+        let mut old = legacy();
+        vault.load(&mut old).unwrap();
+        let mut keyed = old.clone();
+        keyed.stt_backup_3_api_key = "fourth-secret".into();
+        keyed.stt_backup_4_api_key = "fifth-secret".into();
+        let fields = ["stt_backup_3_api_key", "stt_backup_4_api_key"];
+        vault.save(&old, &mut keyed, &fields).unwrap().commit();
+        let mut switched = keyed.clone();
+        switched.stt_backup_3_provider = "custom".into();
+        switched.stt_backup_3_endpoint_url = "https://other.example/v1/audio/transcriptions".into();
+        switched.stt_backup_4_provider = "custom".into();
+        switched.stt_backup_4_endpoint_url = "https://other.example/v1/audio/transcriptions".into();
+        vault.save(&keyed, &mut switched, &fields).unwrap().commit();
+        assert!(switched.stt_backup_3_api_key.is_empty() && switched.stt_backup_4_api_key.is_empty());
+        let mut back = keyed.clone();
+        back.stt_backup_3_api_key.clear();
+        back.stt_backup_4_api_key.clear();
+        vault.save(&switched, &mut back, &[]).unwrap().commit();
+        assert_eq!(back.stt_backup_3_api_key, "fourth-secret");
+        assert_eq!(back.stt_backup_4_api_key, "fifth-secret");
+
+        let before = vault.values.borrow().clone();
+        let mut changed = back.clone();
+        changed.stt_backup_3_api_key = "changed-fourth".into();
+        changed.stt_backup_4_api_key = "changed-fifth".into();
+        drop(vault.save(&back, &mut changed, &fields).unwrap());
+        assert_eq!(*vault.values.borrow(), before);
+        vault.fail_write.set(Some(vault.writes.get() + 2));
+        assert!(vault.save(&back, &mut changed, &fields).is_err());
+        assert_eq!(*vault.values.borrow(), before);
+        *vault.fail_read.borrow_mut() = Some(account(&back, "stt_backup_4"));
+        let runtime = back.clone();
+        assert!(vault.load(&mut back).is_err());
+        assert_eq!(back, runtime);
     }
 
     #[test]

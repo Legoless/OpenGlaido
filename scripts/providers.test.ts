@@ -1,6 +1,6 @@
 // bun test scripts/providers.test.ts
 import { expect, test } from "bun:test";
-import { MODEL_FIELDS, PROVIDERS, apiKeyCheckStatus, applyConfigPatch, baseFromUrl, editedModelKeys, endpointUrl, modelKeyScope, providerModelIds, providerPreset, providerSelection, scopedConfigPatch } from "../src/providers";
+import { BACKUP_ROLES, MODEL_FIELDS, PROVIDERS, apiKeyCheckStatus, applyConfigPatch, baseFromUrl, editedModelKeys, endpointUrl, hasLivePrimary, isCloudLiveModel, modelKeyScope, providerModelIds, providerPreset, providerSelection, scopedConfigPatch } from "../src/providers";
 import type { TranscriptionConfig } from "../src/types";
 
 test("API key checks never carry over to a changed key, provider, endpoint or role", () => {
@@ -159,4 +159,75 @@ test("password draft identity changes with provider or endpoint even when both s
   expect(modelKeyScope({ ...config, endpoint_url: "https://another.example/v1" }, "stt")).not.toBe(scope);
   expect(modelKeyScope({ ...config, api_key: "new-secret" }, "stt")).toBe(scope);
   expect(modelKeyScope({ ...config, model_name: "another-model" }, "stt")).toBe(scope);
+});
+
+test("backup provider switches choose live models and isolate every slot's key and deployment", () => {
+  const config = {
+    stt_provider: "openai", endpoint_url: endpointUrl("https://api.openai.com/v1", "stt"), api_key: "primary-key", model_name: "gpt-live-transcribe",
+    stt_backup_1_enabled: true, stt_backup_1_provider: "elevenlabs", stt_backup_1_endpoint_url: endpointUrl("https://api.elevenlabs.io/v1", "stt"),
+    stt_backup_1_model_name: "scribe_v2_realtime", stt_backup_1_api_key: "second-key", stt_backup_1_deployment: "",
+    stt_backup_2_enabled: true, stt_backup_2_provider: "openai", stt_backup_2_endpoint_url: endpointUrl("https://api.openai.com/v1", "stt"),
+    stt_backup_2_model_name: "gpt-live-transcribe", stt_backup_2_api_key: "third-key", stt_backup_2_deployment: "",
+    stt_backup_3_enabled: true, stt_backup_3_provider: "elevenlabs", stt_backup_3_endpoint_url: endpointUrl("https://api.elevenlabs.io/v1", "stt"),
+    stt_backup_3_model_name: "scribe_v2_realtime", stt_backup_3_api_key: "fourth-key", stt_backup_3_deployment: "",
+    stt_backup_4_enabled: true, stt_backup_4_provider: "openai", stt_backup_4_endpoint_url: endpointUrl("https://api.openai.com/v1", "stt"),
+    stt_backup_4_model_name: "gpt-live-transcribe", stt_backup_4_api_key: "fifth-key", stt_backup_4_deployment: "",
+  } as TranscriptionConfig;
+  for (const role of BACKUP_ROLES) {
+    const f = MODEL_FIELDS[role];
+    for (const provider of ["openai", "elevenlabs", "microsoft"]) {
+      const before = { ...config, [f.provider]: "custom" };
+      const patch = providerSelection(before, role, provider)!;
+      const after = { ...before, ...patch };
+      expect(isCloudLiveModel(after[f.model])).toBe(true);
+      expect(after[f.key]).toBe("");
+      expect(after.api_key).toBe("primary-key");
+      for (const otherRole of BACKUP_ROLES.filter((other) => other !== role)) {
+        const other = MODEL_FIELDS[otherRole];
+        expect(after[other.key]).toBe(before[other.key]);
+      }
+      expect(editedModelKeys(patch)).toEqual([]);
+      if (provider === "microsoft") {
+        expect(patch[f.deployment]).toBe("");
+        expect(patch[f.url]).toBe("");
+      }
+    }
+    expect(providerSelection(config, role, config[f.provider])).toBeNull();
+  }
+});
+
+test("backup key drafts and queued key edits remain attached to their provider and slot", () => {
+  const config = {
+    stt_provider: "openai", endpoint_url: "https://api.openai.com/v1/audio/transcriptions",
+    stt_backup_1_provider: "openai", stt_backup_1_endpoint_url: "https://api.openai.com/v1/audio/transcriptions", stt_backup_1_api_key: "second-key",
+    stt_backup_2_provider: "openai", stt_backup_2_endpoint_url: "https://api.openai.com/v1/audio/transcriptions", stt_backup_2_api_key: "third-key",
+    stt_backup_3_provider: "openai", stt_backup_3_endpoint_url: "https://api.openai.com/v1/audio/transcriptions", stt_backup_3_api_key: "fourth-key",
+    stt_backup_4_provider: "openai", stt_backup_4_endpoint_url: "https://api.openai.com/v1/audio/transcriptions", stt_backup_4_api_key: "fifth-key",
+  } as TranscriptionConfig;
+  const scopes = (["stt", ...BACKUP_ROLES] as const).map((role) => modelKeyScope(config, role));
+  expect(new Set(scopes).size).toBe(5);
+  for (const role of BACKUP_ROLES) {
+    const f = MODEL_FIELDS[role];
+    for (const key of ["new-secret", ""]) {
+      const patch = { [f.key]: key };
+      expect(editedModelKeys(patch)).toEqual([f.key]);
+      expect(applyConfigPatch(config, scopedConfigPatch(config, patch))?.[f.key]).toBe(key);
+      expect(applyConfigPatch({ ...config, [f.url]: "https://other.example/v1/audio/transcriptions" }, scopedConfigPatch(config, patch))).toBeNull();
+      expect(applyConfigPatch({ ...config, [f.provider]: "custom" }, scopedConfigPatch(config, patch))).toBeNull();
+    }
+    expect(editedModelKeys({ [f.url]: "https://other.example/v1", [f.key]: "" })).toEqual([]);
+    expect(editedModelKeys({ [f.enabled]: false })).toEqual([]);
+    expect(modelKeyScope({ ...config, [f.model]: "gpt-live-transcribe-2026-06-01", [f.deployment]: "new-deployment" }, role)).toBe(modelKeyScope(config, role));
+  }
+});
+
+test("backup availability follows live primary models across cloud and local transcription", () => {
+  for (const model_name of ["gpt-live-transcribe", "gpt-live-transcribe-2026-06-01", "scribe_v2_realtime", "mai-transcribe-2-streaming"]) {
+    expect(hasLivePrimary({ stt_source: "cloud", model_name } as TranscriptionConfig)).toBe(true);
+  }
+  for (const model_name of ["gpt-transcribe", "scribe_v2", "mai-transcribe-2", "gpt-live-transcribe-invalid", "whisper-1"]) {
+    expect(hasLivePrimary({ stt_source: "cloud", model_name } as TranscriptionConfig)).toBe(false);
+  }
+  expect(hasLivePrimary({ stt_source: "local", local_stt_model: "vibevoice-asr-streaming-7b" } as TranscriptionConfig)).toBe(true);
+  expect(hasLivePrimary({ stt_source: "local", local_stt_model: "whisper-tiny", model_name: "gpt-live-transcribe" } as TranscriptionConfig)).toBe(false);
 });

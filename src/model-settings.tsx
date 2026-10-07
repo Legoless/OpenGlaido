@@ -2,9 +2,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { AudioLines, Box, Check, Cloud, Download, FolderOpen, Globe, KeyRound, LoaderCircle, RotateCw, Sparkles, Trash2, TriangleAlert, X } from "lucide-react";
+import { AudioLines, Box, Check, ChevronDown, Cloud, Download, FolderOpen, Globe, KeyRound, LoaderCircle, Plus, RotateCw, Sparkles, Trash2, TriangleAlert, X } from "lucide-react";
 import { locale, t } from "./i18n";
-import { MODEL_FIELDS as FIELDS, PROVIDERS, apiKeyCheckStatus, baseFromUrl, endpointUrl, modelKeyScope, providerModelIds, providerPreset, providerSelection, type ApiKeyCheck } from "./providers";
+import { BACKUP_ROLES, MAX_TRANSCRIPTION_PROVIDERS, MODEL_FIELDS as FIELDS, PROVIDERS, apiKeyCheckStatus, baseFromUrl, endpointUrl, hasLivePrimary, isBackupRole, isCloudLiveModel, modelKind, modelKeyScope, providerModelIds, providerPreset, providerSelection, type ApiKeyCheck, type ModelRole } from "./providers";
 import type { DownloadProgress, LocalModel, SaveConfig, TranscriptionConfig } from "./types";
 import { Dropdown, IS_MAC, IconButton, NoteText, OutlineButton, SettingsRow, SettingsSection, TextInput } from "./ui";
 
@@ -242,6 +242,8 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
         <CloudSettings kind="stt" config={config} save={save} errorNote={errorNote} />
       )}
 
+      <BackupTranscriptionSettings config={config} save={save} errorNote={errorNote} />
+
       <SettingsSection label={t("Language model")} />
       <SettingsRow
         icon={Sparkles}
@@ -273,6 +275,77 @@ export function ModelSettings({ config, save, errorNote }: { config: Transcripti
       ) : (
         supported && config.llm_source === "local" && modelList("llm")
       )}
+    </>
+  );
+}
+
+/** Backup settings stay configured while disabled or while the primary uses a completed recording. */
+export function BackupTranscriptionSettings({ config, save, errorNote }: { config: TranscriptionConfig; save: SaveConfig; errorNote: ErrorNote }) {
+  const active = BACKUP_ROLES.filter((role) => config[FIELDS[role].enabled]);
+  const next = BACKUP_ROLES.find((role) => !config[FIELDS[role].enabled]);
+  // A detached click handler must not queue the same provider slot repeatedly.
+  let adding = false;
+  const addProvider = async () => {
+    if (!next || adding) return;
+    adding = true;
+    if (await save({ [FIELDS[next].enabled]: true })) {
+      adding = false;
+      return;
+    }
+    // Native accordion insertion can close a reused middle slot; open it after React renders.
+    if (typeof document !== "undefined" && typeof requestAnimationFrame === "function") requestAnimationFrame(() => {
+      const card = document.getElementById(`live-transcription-${next}`);
+      if (card?.tagName === "DETAILS") (card as HTMLDetailsElement).open = true;
+    });
+  };
+  return (
+    <>
+      <SettingsSection label={t("Live transcription backups")} />
+      <div className="px-3 pb-2">
+        <NoteText tone="hint">{t("All enabled providers receive your audio simultaneously and may each charge. The first successful provider in order is used after earlier providers fail.")}</NoteText>
+        {!hasLivePrimary(config) && <NoteText tone="warning">{t("Choose a real-time primary transcription model to use backups.")}</NoteText>}
+      </div>
+      {active.map((role, index) => {
+        const f = FIELDS[role];
+        const number = index + 2;
+        const preset = providerPreset(config, role);
+        const note = errorNote(f.enabled);
+        return (
+          <div key={role} className="relative mx-3 mb-3 rounded-[8px] border border-border-default">
+            <details id={`live-transcription-${role}`} name="live-transcription-providers" open className="group">
+              <summary className="flex cursor-pointer list-none items-center gap-3 rounded-[8px] py-3 pl-3 pr-12 hover:bg-transparent-secondary [&::-webkit-details-marker]:hidden">
+                <Cloud className="size-4 shrink-0 text-text-subdued" />
+                <div className="flex min-w-0 flex-1 flex-col gap-0.5">
+                  <span className="gs-text-body-md-medium text-text-default">{t("Provider {number}", { number })}</span>
+                  <span className="gs-text-body-sm-regular truncate text-text-subdued">{preset?.name ?? t("Custom")} · {config[f.model]}</span>
+                </div>
+                <ChevronDown className="size-4 shrink-0 text-text-subdued transition-transform group-open:rotate-180" />
+              </summary>
+              <div className="border-t border-border-default py-1">
+                <CloudSettings kind={role} config={config} save={save} errorNote={errorNote} />
+              </div>
+            </details>
+            <div className="absolute right-2 top-2">
+              <IconButton onClick={() => save({ [f.enabled]: false })} title={t("Remove provider {number}", { number })}>
+                <X className="size-4" />
+              </IconButton>
+            </div>
+            {note && <div className="px-3 pb-3">{note}</div>}
+          </div>
+        );
+      })}
+      <div className="flex items-center justify-between gap-3 px-3 pb-2">
+        <OutlineButton onClick={addProvider} disabled={!next}>
+          <Plus className="size-4" />
+          {t("Add provider")}
+        </OutlineButton>
+        <span className="gs-text-body-sm-regular text-text-subdued tabular-nums" aria-label={t("{count} of {max} providers", { count: active.length + 1, max: MAX_TRANSCRIPTION_PROVIDERS })}>
+          {active.length + 1} / {MAX_TRANSCRIPTION_PROVIDERS}
+        </span>
+      </div>
+      {BACKUP_ROLES.filter((role) => !config[FIELDS[role].enabled]).map((role) => (
+        <div key={role} className="px-3">{errorNote(FIELDS[role].enabled)}</div>
+      ))}
     </>
   );
 }
@@ -337,17 +410,19 @@ export function LocalModelLanguageSettings({ model, languages, save, error }: {
 }
 
 /** Provider preset (or Custom URL), API key and model for one cloud section. */
-export function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; config: TranscriptionConfig; save: SaveConfig; errorNote: ErrorNote }) {
-  const f = FIELDS[kind];
+export function CloudSettings({ kind: role, config, save, errorNote }: { kind: ModelRole; config: TranscriptionConfig; save: SaveConfig; errorNote: ErrorNote }) {
+  const kind = modelKind(role);
+  const backup = isBackupRole(role);
+  const f = FIELDS[role];
   const url = config[f.url] ?? "";
-  const preset = providerPreset(config, kind);
+  const preset = providerPreset(config, role);
   const microsoftStt = kind === "stt" && preset?.id === "microsoft";
   const apiKey = config[f.key];
-  const keyScope = modelKeyScope(config, kind);
+  const keyScope = modelKeyScope(config, role);
   const model = config[f.model] ?? "";
   const base = microsoftStt ? url.trim().replace(/\/+$/, "") : preset?.baseUrl ?? baseFromUrl(url);
   // Azure and Scribe use presets rather than OpenAI-compatible model discovery.
-  const canList = !!base && !microsoftStt && base !== "https://api.elevenlabs.io/v1" && !(preset?.keyUrl && !apiKey);
+  const canList = !backup && !!base && !microsoftStt && base !== "https://api.elevenlabs.io/v1" && !(preset?.keyUrl && !apiKey);
   const [listed, setListed] = useState<{ ids: string[]; error: string | null } | null>(null);
   const [other, setOther] = useState(false);
   const [keyCheck, setKeyCheck] = useState<ApiKeyCheck | null>(null);
@@ -382,7 +457,7 @@ export function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; c
 
   const openaiStt = kind === "stt" && preset?.id === "openai";
   const elevenlabsStt = kind === "stt" && preset?.id === "elevenlabs";
-  const ids = providerModelIds(preset, kind, listed?.ids, model);
+  const ids = providerModelIds(preset, kind, listed?.ids, model).filter((id) => !backup || isCloudLiveModel(id));
   const modelOptions = [
     ...(model ? [] : [{ value: "", label: t("Choose a model") }]),
     ...ids.map((id) => ({
@@ -405,7 +480,7 @@ export function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; c
   ];
 
   const pickProvider = (id: string) => {
-    const patch = providerSelection(config, kind, id);
+    const patch = providerSelection(config, role, id);
     if (patch) {
       setOther(false);
       save(patch);
@@ -426,7 +501,7 @@ export function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; c
         <Dropdown
           value={preset?.id ?? "custom"}
           options={[
-            ...PROVIDERS.filter((p) => (kind === "stt" ? p.stt : p.chat)).map((p) => ({ value: p.id, label: p.name })),
+            ...PROVIDERS.filter((p) => backup ? p.sttModels.some(isCloudLiveModel) : kind === "stt" ? p.stt : p.chat).map((p) => ({ value: p.id, label: p.name })),
             { value: "custom", label: t("Custom") },
           ]}
           onChange={(v) => v && pickProvider(v)}
@@ -442,7 +517,7 @@ export function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; c
         >
           <CommitInput
             value={url}
-            onCommit={(v) => v !== url && save({ [f.url]: v, [f.key]: "", ...(microsoftStt ? { stt_deployment: "" } : {}) })}
+            onCommit={(v) => v !== url && save({ [f.url]: v, [f.key]: "", ...(microsoftStt && f.deployment ? { [f.deployment]: "" } : {}) })}
             placeholder={microsoftStt ? "https://your-resource.services.ai.azure.com" : endpointUrl("https://example.com/v1", kind)}
           />
         </SettingsRow>
@@ -524,17 +599,17 @@ export function CloudSettings({ kind, config, save, errorNote }: { kind: Kind; c
           )}
         </div>
       </SettingsRow>
-      {microsoftStt && model === "mai-transcribe-2-streaming" && (
+      {microsoftStt && model === "mai-transcribe-2-streaming" && f.deployment && (
         <SettingsRow
           icon={Box}
           title={t("Deployment name")}
           description={t("Your Azure realtime deployment; leave blank for the default.")}
-          note={errorNote("stt_deployment")}
+          note={errorNote(f.deployment)}
         >
           <CommitInput
             key={keyScope}
-            value={config.stt_deployment ?? ""}
-            onCommit={(value) => value !== config.stt_deployment && save({ stt_deployment: value })}
+            value={config[f.deployment] ?? ""}
+            onCommit={(value) => value !== config[f.deployment!] && save({ [f.deployment!]: value })}
             placeholder="MAI-Transcribe-2-Streaming"
           />
         </SettingsRow>

@@ -6,9 +6,31 @@ import type { LocalModel, TranscriptionConfig } from "./types";
 
 // The original top-level config fields are the cloud transcription ones.
 export const MODEL_FIELDS = {
-  stt: { provider: "stt_provider", url: "endpoint_url", model: "model_name", key: "api_key", local: "local_stt_model" },
-  llm: { provider: "llm_provider", url: "llm_endpoint_url", model: "llm_model_name", key: "llm_api_key", local: "local_llm_model" },
+  stt: { provider: "stt_provider", url: "endpoint_url", model: "model_name", key: "api_key", local: "local_stt_model", deployment: "stt_deployment" },
+  llm: { provider: "llm_provider", url: "llm_endpoint_url", model: "llm_model_name", key: "llm_api_key", local: "local_llm_model", deployment: null },
+  stt_backup_1: { provider: "stt_backup_1_provider", url: "stt_backup_1_endpoint_url", model: "stt_backup_1_model_name", key: "stt_backup_1_api_key", deployment: "stt_backup_1_deployment", enabled: "stt_backup_1_enabled" },
+  stt_backup_2: { provider: "stt_backup_2_provider", url: "stt_backup_2_endpoint_url", model: "stt_backup_2_model_name", key: "stt_backup_2_api_key", deployment: "stt_backup_2_deployment", enabled: "stt_backup_2_enabled" },
+  stt_backup_3: { provider: "stt_backup_3_provider", url: "stt_backup_3_endpoint_url", model: "stt_backup_3_model_name", key: "stt_backup_3_api_key", deployment: "stt_backup_3_deployment", enabled: "stt_backup_3_enabled" },
+  stt_backup_4: { provider: "stt_backup_4_provider", url: "stt_backup_4_endpoint_url", model: "stt_backup_4_model_name", key: "stt_backup_4_api_key", deployment: "stt_backup_4_deployment", enabled: "stt_backup_4_enabled" },
 } as const;
+
+export type ModelRole = keyof typeof MODEL_FIELDS;
+export type BackupRole = "stt_backup_1" | "stt_backup_2" | "stt_backup_3" | "stt_backup_4";
+export const BACKUP_ROLES: BackupRole[] = ["stt_backup_1", "stt_backup_2", "stt_backup_3", "stt_backup_4"];
+export const MAX_TRANSCRIPTION_PROVIDERS = 1 + BACKUP_ROLES.length;
+export const modelKind = (role: ModelRole): LocalModel["kind"] => role === "llm" ? "llm" : "stt";
+export const isBackupRole = (role: ModelRole): role is BackupRole => BACKUP_ROLES.includes(role as BackupRole);
+
+/** Matches the backend's cloud live adapters, including pinned OpenAI model versions. */
+export function isCloudLiveModel(model: string): boolean {
+  return model === "gpt-live-transcribe" || /^gpt-live-transcribe-\d{4}-\d{2}-\d{2}$/.test(model)
+    || model === "scribe_v2_realtime" || model === "mai-transcribe-2-streaming";
+}
+
+export function hasLivePrimary(config: TranscriptionConfig): boolean {
+  return config.stt_source === "cloud" ? isCloudLiveModel(config.model_name)
+    : config.stt_source === "local" && config.local_stt_model === "vibevoice-asr-streaming-7b";
+}
 
 export interface Provider {
   id: string;
@@ -158,25 +180,28 @@ export function endpointUrl(baseUrl: string, kind: "stt" | "llm", providerId?: s
 }
 
 /** Azure resource endpoints vary per account and stay editable without becoming Custom. */
-export function providerPreset(config: TranscriptionConfig, kind: LocalModel["kind"]): Provider | undefined {
-  const f = MODEL_FIELDS[kind];
+export function providerPreset(config: TranscriptionConfig, role: ModelRole): Provider | undefined {
+  const f = MODEL_FIELDS[role];
+  const kind = modelKind(role);
   return PROVIDERS.find((p) => p.id === config[f.provider] && (kind === "stt" ? p.stt : p.chat)
     && (p.id === "microsoft" || endpointUrl(p.baseUrl, kind) === config[f.url]?.trim()));
 }
 
 /** Clear the visible old key immediately; save_config restores this provider's remembered key. */
-export function providerSelection(config: TranscriptionConfig, kind: LocalModel["kind"], id: string): Partial<TranscriptionConfig> | null {
-  const f = MODEL_FIELDS[kind];
-  const current = providerPreset(config, kind);
+export function providerSelection(config: TranscriptionConfig, role: ModelRole, id: string): Partial<TranscriptionConfig> | null {
+  const f = MODEL_FIELDS[role];
+  const kind = modelKind(role);
+  const current = providerPreset(config, role);
   if (id === (current?.id ?? "custom")) return null;
   const provider = PROVIDERS.find((p) => p.id === id);
   return provider
     ? {
         [f.provider]: id,
         [f.url]: endpointUrl(provider.baseUrl, kind, provider.id),
-        [f.model]: kind === "stt" ? provider.defaultStt : provider.defaultChat,
+        [f.model]: isBackupRole(role) ? provider.sttModels.find(isCloudLiveModel) ?? "gpt-live-transcribe"
+          : kind === "stt" ? provider.defaultStt : provider.defaultChat,
         [f.key]: "",
-        ...(kind === "stt" && id === "microsoft" ? { stt_deployment: "" } : {}),
+        ...(f.deployment && id === "microsoft" ? { [f.deployment]: "" } : {}),
       }
     : { [f.provider]: "custom", [f.key]: "" };
 }
@@ -184,17 +209,17 @@ export function providerSelection(config: TranscriptionConfig, kind: LocalModel[
 /** Distinguish an explicit key edit (including deletion) from a temporary blank while switching. */
 export function editedModelKeys(patch: Partial<TranscriptionConfig>): string[] {
   return Object.keys(patch).filter((key) => {
-    const kind = key === "api_key" ? "stt" : key === "llm_api_key" ? "llm" : null;
-    if (!kind) return false;
-    const f = MODEL_FIELDS[kind];
-    return typeof patch[f.key] === "string" && !(f.provider in patch) && !(f.url in patch) && !(`${kind}_source` in patch);
+    const role = (Object.keys(MODEL_FIELDS) as ModelRole[]).find((role) => MODEL_FIELDS[role].key === key);
+    if (!role) return false;
+    const f = MODEL_FIELDS[role];
+    return typeof patch[f.key] === "string" && !(f.provider in patch) && !(f.url in patch) && !(`${role}_source` in patch);
   });
 }
 
 /** Also used to discard an uncommitted password draft when its destination changes. */
-export function modelKeyScope(config: TranscriptionConfig, kind: LocalModel["kind"]): string {
-  const f = MODEL_FIELDS[kind];
-  return JSON.stringify([kind, config[f.provider], config[f.url] ?? ""]);
+export function modelKeyScope(config: TranscriptionConfig, role: ModelRole): string {
+  const f = MODEL_FIELDS[role];
+  return JSON.stringify([role, config[f.provider], config[f.url] ?? ""]);
 }
 
 export type ApiKeyCheck = { scope: string; key: string; status: "checking" | "verified" | "warning" };
@@ -206,8 +231,8 @@ export function apiKeyCheckStatus(check: ApiKeyCheck | null, scope: string, key:
 
 export function scopedConfigPatch(config: TranscriptionConfig, patch: Partial<TranscriptionConfig>) {
   const keyScopes = editedModelKeys(patch).map((key) => {
-    const kind = key === "api_key" ? "stt" : "llm";
-    return [kind, modelKeyScope(config, kind)] as const;
+    const role = (Object.keys(MODEL_FIELDS) as ModelRole[]).find((role) => MODEL_FIELDS[role].key === key)!;
+    return [role, modelKeyScope(config, role)] as const;
   });
   return { patch, keyScopes };
 }
