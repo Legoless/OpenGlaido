@@ -1180,8 +1180,7 @@ mod tests {
 
     #[test]
     fn enabled_backups_require_live_models_and_validate_azure_resources() {
-        let mut cfg = TranscriptionConfig::default();
-        cfg.stt_backup_1_model_name = "scribe_v2".into();
+        let mut cfg = TranscriptionConfig { stt_backup_1_model_name: "scribe_v2".into(), ..Default::default() };
         assert!(cfg.validate_models().is_ok()); // Disabled choices do not affect saves.
         cfg.stt_backup_1_enabled = true;
         assert!(cfg.validate_models().unwrap_err().contains("real-time model"));
