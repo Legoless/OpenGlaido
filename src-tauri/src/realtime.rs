@@ -9,13 +9,19 @@ use std::sync::{atomic::{AtomicBool, Ordering}, Arc};
 use std::time::Duration;
 use tokio::net::TcpStream;
 use tokio::sync::{mpsc, oneshot};
-use tokio::time::timeout;
+use tokio::time::{timeout, timeout_at, Instant};
 use tokio_tungstenite::{connect_async, tungstenite::{client::IntoClientRequest, Message}, MaybeTlsStream, WebSocketStream};
 
 const RATE: u32 = 24_000;
 const PACKET_BYTES: usize = 960 * 2; // 40 ms of PCM16.
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+const SETUP_ATTEMPTS: u32 = 3;
 const FINAL_TIMEOUT: Duration = Duration::from_secs(45);
+const CONNECT_TIMEOUT_ERROR: &str = "Transcription failed: timed out connecting to the live speech-to-text endpoint";
+const SESSION_TIMEOUT_ERROR: &str = "Transcription failed: timed out waiting for the live session to start";
+const SEND_TIMEOUT_ERROR: &str = "Transcription failed: timed out sending to the live speech-to-text endpoint";
+const FINAL_TIMEOUT_ERROR: &str = "Transcription failed: timed out waiting for the final live transcript";
+const PROCESSING_TIMEOUT_ERROR: &str = "Transcription failed: timed out waiting for live processing";
 type Socket = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
 pub fn is_live_model(model: &str) -> bool {
@@ -36,10 +42,13 @@ pub struct LiveTranscription {
 impl LiveTranscription {
     /// Starts connecting in the background; the bounded queue preserves speech during setup.
     pub fn start(config: &TranscriptionConfig, vocabulary: Vec<String>) -> Result<(Self, StreamInput), String> {
+        Self::start_with_setup_timeout(config, vocabulary, IO_TIMEOUT)
+    }
+
+    fn start_with_setup_timeout(config: &TranscriptionConfig, vocabulary: Vec<String>, setup_timeout: Duration) -> Result<(Self, StreamInput), String> {
         let elevenlabs = config.model_name == "scribe_v2_realtime";
         let microsoft = config.model_name == crate::microsoft::LIVE_MODEL;
         let final_timeout = if microsoft { Duration::from_secs(240) } else { FINAL_TIMEOUT };
-        let setup_timeout = if microsoft { Duration::from_secs(30) } else { IO_TIMEOUT };
         let request = connection_request(config, &vocabulary)?;
         let session = (!elevenlabs).then(|| if microsoft { crate::microsoft::live_session(config, RATE) } else { session_update(config, &vocabulary) });
         let api_key = config.api_key.trim().to_string();
@@ -49,28 +58,7 @@ impl LiveTranscription {
         let overflow_check = overflowed.clone();
         let (finish_tx, finish_rx) = oneshot::channel();
         let task = tauri::async_runtime::spawn(async move {
-            let (mut socket, _) = timeout(setup_timeout, connect_async(request)).await
-                .map_err(|_| "Transcription failed: live transcription timed out".to_string())?
-                .map_err(|error| match error {
-                    tokio_tungstenite::tungstenite::Error::Http(response) => match response.status().as_u16() {
-                        401 | 403 => "Transcription failed: check the API key in Settings › Model".into(),
-                        code => format!("Transcription failed: the server returned HTTP {code}"),
-                    },
-                    _ => "Transcription failed: couldn't reach the speech-to-text endpoint".into(),
-                })?;
-            if microsoft {
-                timeout(setup_timeout, async {
-                    while receive(&mut socket, &api_key).await?["type"] != "session.created" {}
-                    Ok::<_, String>(())
-                }).await.map_err(|_| "Transcription failed: live transcription timed out".to_string())??;
-            }
-            if let Some(session) = session { send(&mut socket, session).await?; }
-            timeout(setup_timeout, async {
-                loop {
-                    let event = receive(&mut socket, &api_key).await?;
-                    if (!elevenlabs && event["type"] == "session.updated") || (elevenlabs && event["message_type"] == "session_started") { return Ok::<_, String>(()); }
-                }
-            }).await.map_err(|_| "Transcription failed: live transcription timed out".to_string())??;
+            let mut socket = connect_session(request, session, &api_key, elevenlabs, microsoft, setup_timeout).await?;
             if elevenlabs { stream_elevenlabs(&mut socket, rx, finish_rx, &overflow_check, &api_key).await }
             else { stream(&mut socket, rx, finish_rx, &overflow_check, &api_key, microsoft).await }
         });
@@ -89,7 +77,7 @@ impl LiveTranscription {
     pub async fn finish(mut self) -> Result<String, String> {
         self.finish_input();
         timeout(self.final_timeout, &mut self.task).await
-            .map_err(|_| "Transcription failed: live transcription timed out".to_string())?
+            .map_err(|_| PROCESSING_TIMEOUT_ERROR.to_string())?
             .map_err(|_| "Transcription failed: unexpected response from the speech-to-text endpoint".to_string())?
     }
 }
@@ -104,6 +92,57 @@ impl Drop for LiveTranscription {
 /// Performs the same local validation as starting a session, without opening a socket.
 pub fn validate_live_config(config: &TranscriptionConfig) -> Result<(), String> {
     connection_request(config, &[]).map(|_| ())
+}
+
+async fn connect_session(request: tokio_tungstenite::tungstenite::http::Request<()>, session: Option<Value>, api_key: &str, elevenlabs: bool, microsoft: bool, attempt_timeout: Duration) -> Result<Socket, String> {
+    // Each cloud provider gets three complete pre-audio setup attempts, at most
+    // 10 seconds each / 30 seconds total. Keep the audio queue outside this loop.
+    let setup_deadline = Instant::now() + attempt_timeout * SETUP_ATTEMPTS;
+    let mut last_error = CONNECT_TIMEOUT_ERROR.to_string();
+    for _ in 0..SETUP_ATTEMPTS {
+        let deadline = (Instant::now() + attempt_timeout).min(setup_deadline);
+        match connect_session_once(&request, session.as_ref(), api_key, elevenlabs, microsoft, deadline).await {
+            Ok(socket) => return Ok(socket),
+            Err(error) => {
+                // Only retry setup timeouts, before any audio is sent. Preserve
+                // explicit authentication, HTTP and provider errors immediately.
+                if !matches!(error.as_str(), CONNECT_TIMEOUT_ERROR | SESSION_TIMEOUT_ERROR | SEND_TIMEOUT_ERROR) { return Err(error); }
+                last_error = error;
+            }
+        }
+    }
+    Err(last_error)
+}
+
+async fn connect_session_once(request: &tokio_tungstenite::tungstenite::http::Request<()>, session: Option<&Value>, api_key: &str, elevenlabs: bool, microsoft: bool, deadline: Instant) -> Result<Socket, String> {
+    let (mut socket, _) = timeout_at(deadline, connect_async(request.clone())).await
+        .map_err(|_| CONNECT_TIMEOUT_ERROR.to_string())?
+        .map_err(|error| -> String {
+            match error {
+                tokio_tungstenite::tungstenite::Error::Http(response) => match response.status().as_u16() {
+                    401 | 403 => "Transcription failed: check the API key in Settings › Model".into(),
+                    code => format!("Transcription failed: the server returned HTTP {code}"),
+                },
+                _ => "Transcription failed: couldn't reach the speech-to-text endpoint".into(),
+            }
+        })?;
+    if microsoft {
+        timeout_at(deadline, async {
+            while receive(&mut socket, api_key).await?["type"] != "session.created" {}
+            Ok::<_, String>(())
+        }).await.map_err(|_| SESSION_TIMEOUT_ERROR.to_string())??;
+    }
+    if let Some(session) = session {
+        timeout_at(deadline, send(&mut socket, session.clone())).await
+            .map_err(|_| SEND_TIMEOUT_ERROR.to_string())??;
+    }
+    timeout_at(deadline, async {
+        loop {
+            let event = receive(&mut socket, api_key).await?;
+            if (!elevenlabs && event["type"] == "session.updated") || (elevenlabs && event["message_type"] == "session_started") { return Ok::<_, String>(()); }
+        }
+    }).await.map_err(|_| SESSION_TIMEOUT_ERROR.to_string())??;
+    Ok(socket)
 }
 
 fn connection_request(config: &TranscriptionConfig, vocabulary: &[String]) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, String> {
@@ -129,7 +168,7 @@ fn connection_request(config: &TranscriptionConfig, vocabulary: &[String]) -> Re
 /// All configured live providers receive the recording from the start. Results are
 /// preferred in settings order, while each provider's finalization runs concurrently.
 pub struct LiveTranscriptionGroup {
-    attempts: Vec<Result<LiveTranscription, String>>,
+    attempts: Vec<(String, Result<LiveTranscription, String>)>,
 }
 
 impl LiveTranscriptionGroup {
@@ -140,31 +179,38 @@ impl LiveTranscriptionGroup {
     ) -> Result<(Self, Vec<StreamInput>), String> {
         let mut attempts = Vec::new();
         let mut inputs = Vec::new();
-        for attempt in std::iter::once(primary).chain(config.live_backup_configs().into_iter().map(|backup| LiveTranscription::start(&backup, vocabulary.clone()))) {
+        for (model, attempt) in std::iter::once((model_label(config), primary)).chain(config.live_backup_configs().into_iter().map(|backup| {
+            (model_label(&backup), LiveTranscription::start(&backup, vocabulary.clone()))
+        })) {
             match attempt {
                 Ok((live, input)) => {
-                    attempts.push(Ok(live));
+                    attempts.push((model, Ok(live)));
                     inputs.push(input);
                 }
-                Err(error) => attempts.push(Err(error)),
+                Err(error) => attempts.push((model, Err(error))),
             }
         }
         if inputs.is_empty() {
-            return Err(attempts.into_iter().find_map(Result::err).unwrap_or_else(|| "Transcription failed: check the endpoint URL in Settings › Model".into()));
+            let multiple = attempts.len() > 1;
+            return Err(combined_errors(attempts.into_iter().filter_map(|(model, attempt)| attempt.err().map(|error| label_error(error, &model, multiple))).collect()));
         }
         Ok((Self { attempts }, inputs))
     }
 
     pub fn finish_input(&mut self) {
-        for live in self.attempts.iter_mut().flatten() { live.finish_input(); }
+        for (_, attempt) in &mut self.attempts {
+            if let Ok(live) = attempt { live.finish_input(); }
+        }
     }
 
     pub async fn finish(mut self) -> Result<String, String> {
         self.finish_input();
         let mut pending = FuturesOrdered::new();
-        for attempt in self.attempts {
+        let multiple = self.attempts.len() > 1;
+        for (model, attempt) in self.attempts {
             pending.push_back(async move {
-                match attempt { Ok(live) => live.finish().await, Err(error) => Err(error) }
+                let result = match attempt { Ok(live) => live.finish().await, Err(error) => Err(error) };
+                result.map_err(|error| label_error(error, &model, multiple))
             });
         }
         preferred_result(pending).await
@@ -172,15 +218,28 @@ impl LiveTranscriptionGroup {
 }
 
 async fn preferred_result<F: std::future::Future<Output = Result<String, String>>>(mut pending: FuturesOrdered<F>) -> Result<String, String> {
-    let mut first_error = None;
+    let mut errors = Vec::new();
     while let Some(result) = pending.next().await {
         match result {
             // An empty successful transcript retains the usual quiet no-speech behavior.
             Ok(text) => return Ok(text),
-            Err(error) => { first_error.get_or_insert(error); }
+            Err(error) => errors.push(error),
         }
     }
-    Err(first_error.unwrap_or_else(|| "Transcription failed: check the endpoint URL in Settings › Model".into()))
+    Err(combined_errors(errors))
+}
+
+fn model_label(config: &TranscriptionConfig) -> String {
+    if config.stt_source == "local" { config.local_stt_model.clone() } else { config.model_name.clone() }
+}
+
+fn label_error(error: String, model: &str, multiple: bool) -> String {
+    if multiple { format!("Transcription failed: {model}: {}", error.strip_prefix("Transcription failed: ").unwrap_or(&error)) } else { error }
+}
+
+fn combined_errors(errors: Vec<String>) -> String {
+    if errors.is_empty() { "Transcription failed: check the endpoint URL in Settings › Model".into() }
+    else { errors.join("; ") }
 }
 
 fn websocket_url(endpoint: &str) -> Result<reqwest::Url, String> {
@@ -264,7 +323,7 @@ fn session_update(config: &TranscriptionConfig, vocabulary: &[String]) -> Value 
 
 async fn send(socket: &mut Socket, event: Value) -> Result<(), String> {
     timeout(IO_TIMEOUT, socket.send(Message::Text(event.to_string().into()))).await
-        .map_err(|_| "Transcription failed: live transcription timed out".to_string())?
+        .map_err(|_| SEND_TIMEOUT_ERROR.to_string())?
         .map_err(|_| "Transcription failed: live transcription connection was interrupted".to_string())
 }
 
@@ -329,8 +388,11 @@ async fn stream(socket: &mut Socket, mut rx: mpsc::Receiver<AudioChunk>, mut fin
         send(socket, json!({ "type": "input_audio_buffer.append", "audio": STANDARD.encode(&pending) })).await?;
     }
     send(socket, json!({ "type": "input_audio_buffer.commit" })).await?;
-    timeout(if microsoft { Duration::from_secs(240) } else { FINAL_TIMEOUT }, final_transcript(socket, api_key, microsoft)).await
-        .map_err(|_| "Transcription failed: live transcription timed out".to_string())?
+    wait_for_final(if microsoft { Duration::from_secs(240) } else { FINAL_TIMEOUT }, final_transcript(socket, api_key, microsoft)).await
+}
+
+async fn wait_for_final<F: std::future::Future<Output = Result<String, String>>>(duration: Duration, transcript: F) -> Result<String, String> {
+    timeout(duration, transcript).await.map_err(|_| FINAL_TIMEOUT_ERROR.to_string())?
 }
 
 async fn final_transcript(socket: &mut Socket, api_key: &str, microsoft: bool) -> Result<String, String> {
@@ -425,13 +487,13 @@ async fn stream_elevenlabs(socket: &mut Socket, mut rx: mpsc::Receiver<AudioChun
         send(socket, elevenlabs_audio(&[], true)).await?;
         outstanding += 1;
     }
-    timeout(FINAL_TIMEOUT, async {
+    wait_for_final(FINAL_TIMEOUT, async {
         while outstanding > 0 {
             let event = receive(socket, api_key).await?;
             collect_elevenlabs(&event, &mut segments, &mut outstanding)?;
         }
         Ok::<_, String>(segments.join(" "))
-    }).await.map_err(|_| "Transcription failed: live transcription timed out".to_string())?
+    }).await
 }
 
 /// Linear interpolation, retaining the fractional position and last sample across callbacks.
@@ -493,11 +555,16 @@ pub async fn with_live_backups<F: std::future::Future<Output = Result<String, St
     vocabulary: Vec<String>,
 ) -> Result<String, String> {
     let mut pending = FuturesOrdered::new();
-    pending.push_back(Either::Left(primary));
-    for backup in config.live_backup_configs() {
+    let backups = config.live_backup_configs();
+    let multiple = !backups.is_empty();
+    let model = model_label(config);
+    pending.push_back(Either::Left(async move { primary.await.map_err(|error| label_error(error, &model, multiple)) }));
+    for backup in backups {
         let wav_bytes = wav_bytes.clone();
         let vocabulary = vocabulary.clone();
-        pending.push_back(Either::Right(async move { transcribe_wav_single(&backup, wav_bytes, vocabulary).await }));
+        pending.push_back(Either::Right(async move {
+            transcribe_wav_single(&backup, wav_bytes, vocabulary).await.map_err(|error| label_error(error, &model_label(&backup), multiple))
+        }));
     }
     preferred_result(pending).await
 }
@@ -535,6 +602,7 @@ async fn transcribe_wav_single(config: &TranscriptionConfig, wav_bytes: Vec<u8>,
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
     use tokio_tungstenite::accept_async;
 
@@ -570,6 +638,18 @@ mod tests {
         socket
     }
 
+    async fn read_opening_request(stream: &mut TcpStream) {
+        let mut request = Vec::new();
+        timeout(Duration::from_secs(3), async {
+            while !request.ends_with(b"\r\n\r\n") {
+                let mut byte = [0];
+                stream.read_exact(&mut byte).await.unwrap();
+                request.push(byte[0]);
+                assert!(request.len() < 16_384);
+            }
+        }).await.unwrap();
+    }
+
     fn set_backups(config: &mut TranscriptionConfig, first: &TranscriptionConfig, second: &TranscriptionConfig) {
         config.stt_backup_1_enabled = true;
         config.stt_backup_1_provider = "openai".into();
@@ -600,6 +680,20 @@ mod tests {
             }
             Err(message) => write(&mut socket, json!({ "type": "error", "error": { "message": message } })).await,
         }
+    }
+
+    fn test_group(attempts: Vec<Result<LiveTranscription, String>>) -> LiveTranscriptionGroup {
+        LiveTranscriptionGroup { attempts: attempts.into_iter().enumerate().map(|(index, attempt)| (format!("provider {index}"), attempt)).collect() }
+    }
+
+    fn recording_wav() -> Vec<u8> {
+        let mut wav = Cursor::new(Vec::new());
+        let mut writer = hound::WavWriter::new(&mut wav, hound::WavSpec {
+            channels: 1, sample_rate: RATE, bits_per_sample: 16, sample_format: hound::SampleFormat::Int,
+        }).unwrap();
+        for _ in 0..4800 { writer.write_sample(10000_i16).unwrap(); }
+        writer.finalize().unwrap();
+        wav.into_inner()
     }
 
     #[tokio::test]
@@ -708,7 +802,7 @@ mod tests {
         let (finish_tx, _finish_rx) = oneshot::channel();
         let task = tauri::async_runtime::spawn(async { Ok("third result".into()) });
         let third = LiveTranscription::from_local(task, finish_tx, crate::processing::Cancellation::default());
-        let group = LiveTranscriptionGroup { attempts: vec![Ok(primary), Ok(backup), Ok(third)] };
+        let group = test_group(vec![Ok(primary), Ok(backup), Ok(third)]);
         let result = tokio::spawn(group.finish());
         // The backup must time out while the primary is still waiting, rather than
         // beginning its timeout only after the primary's failure.
@@ -727,7 +821,7 @@ mod tests {
         let primary_cancelled = crate::processing::Cancellation::default();
         let task = tauri::async_runtime::spawn(async { Ok(String::new()) });
         let primary = LiveTranscription::from_local(task, finish_tx, primary_cancelled.clone());
-        let group = LiveTranscriptionGroup { attempts: vec![Ok(primary), Ok(backup), Ok(third), Ok(fourth), Ok(fifth)] };
+        let group = test_group(vec![Ok(primary), Ok(backup), Ok(third), Ok(fourth), Ok(fifth)]);
         assert_eq!(group.finish().await.unwrap(), "");
         assert!(primary_cancelled.is_cancelled() && backup_cancelled.is_cancelled() && third_cancelled.is_cancelled());
         assert!(fourth_cancelled.is_cancelled() && fifth_cancelled.is_cancelled());
@@ -737,7 +831,7 @@ mod tests {
         let (third, third_cancelled) = pending_local();
         let (fourth, fourth_cancelled) = pending_local();
         let (fifth, fifth_cancelled) = pending_local();
-        let group = LiveTranscriptionGroup { attempts: vec![Ok(primary), Ok(backup), Ok(third), Ok(fourth), Ok(fifth)] };
+        let group = test_group(vec![Ok(primary), Ok(backup), Ok(third), Ok(fourth), Ok(fifth)]);
         let cancellation = crate::processing::Cancellation::default();
         cancellation.cancel();
         assert_eq!(cancellation.run(group.finish()).await.unwrap_err(), crate::processing::CANCELLED);
@@ -747,12 +841,68 @@ mod tests {
 
     #[tokio::test]
     async fn live_group_reports_failure_only_when_all_providers_fail() {
-        let group = LiveTranscriptionGroup { attempts: vec![Err("primary failure".into()), Err("backup failure".into()), Err("third failure".into())] };
-        assert_eq!(group.finish().await.unwrap_err(), "primary failure");
+        let group = test_group(vec![Err("primary failure".into()), Err("backup failure".into()), Err("third failure".into())]);
+        assert_eq!(group.finish().await.unwrap_err(), "Transcription failed: provider 0: primary failure; Transcription failed: provider 1: backup failure; Transcription failed: provider 2: third failure");
         let mut config = config(1);
         config.api_key.clear();
         let primary = LiveTranscription::start(&config, vec![]);
-        assert!(LiveTranscriptionGroup::start_with_primary(&config, primary, vec![]).is_err());
+        assert_eq!(LiveTranscriptionGroup::start_with_primary(&config, primary, vec![]).err().unwrap(), "Transcription failed: check the API key in Settings › Model");
+    }
+
+    #[tokio::test]
+    async fn recording_and_retry_retain_setup_and_runtime_failures_for_every_model() {
+        for retry in [false, true] {
+            let (listener, mut first) = bind_server().await;
+            first.model_name = "gpt-live-transcribe-2026-09-01".into();
+            let mut second = config(1);
+            second.model_name = "invalid-live-model".into();
+            let mut config = config(1);
+            config.api_key.clear();
+            set_backups(&mut config, &first, &second);
+            let server = tokio::spawn(serve_result(listener, Err("backup unavailable")));
+            let error = if retry {
+                transcribe_wav(&config, recording_wav(), vec![]).await.unwrap_err()
+            } else {
+                let primary = LiveTranscription::start(&config, vec![]);
+                let (group, inputs) = LiveTranscriptionGroup::start_with_primary(&config, primary, vec![]).unwrap();
+                assert_eq!(inputs.len(), 1);
+                inputs[0].tx.send(AudioChunk { samples: vec![0.2; 4800], rate: RATE }).await.unwrap();
+                group.finish().await.unwrap_err()
+            };
+            assert_eq!(error, "Transcription failed: gpt-live-transcribe: check the API key in Settings › Model; Transcription failed: gpt-live-transcribe-2026-09-01: backup unavailable; Transcription failed: invalid-live-model: Backup transcription providers must use a real-time model");
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn immediate_failures_and_local_retry_use_the_configured_model_labels() {
+        let mut config = config(1);
+        config.stt_source = "local".into();
+        config.local_stt_model = "vibevoice-asr-streaming-7b".into();
+        let mut first = config.clone();
+        first.model_name = "scribe_v2_realtime".into();
+        first.api_key.clear();
+        let mut second = first.clone();
+        second.model_name = "gpt-live-transcribe".into();
+        second.endpoint_url = "invalid".into();
+        set_backups(&mut config, &first, &second);
+        let expected = "Transcription failed: vibevoice-asr-streaming-7b: local model failed; Transcription failed: scribe_v2_realtime: check the endpoint URL in Settings › Model; Transcription failed: gpt-live-transcribe: check the endpoint URL in Settings › Model";
+        let error = LiveTranscriptionGroup::start_with_primary(&config, Err("local model failed".into()), vec![]).err().unwrap();
+        assert_eq!(error, expected);
+        let error = with_live_backups(&config, async { Err("local model failed".into()) }, recording_wav(), vec![]).await.unwrap_err();
+        assert_eq!(error, expected);
+    }
+
+    #[tokio::test]
+    async fn final_transcript_and_outer_processing_deadlines_have_distinct_errors_and_cancel() {
+        let error = wait_for_final(Duration::from_millis(1), std::future::pending::<Result<String, String>>()).await.unwrap_err();
+        assert_eq!(error, FINAL_TIMEOUT_ERROR);
+        let (mut live, cancelled) = pending_local();
+        live.final_timeout = Duration::from_millis(1);
+        assert_eq!(live.finish().await.unwrap_err(), PROCESSING_TIMEOUT_ERROR);
+        assert!(cancelled.is_cancelled());
+        assert_ne!(FINAL_TIMEOUT_ERROR, SESSION_TIMEOUT_ERROR);
+        assert_ne!(FINAL_TIMEOUT_ERROR, PROCESSING_TIMEOUT_ERROR);
     }
 
     #[test]
@@ -896,17 +1046,169 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn opening_handshake_timeouts_recover_on_third_attempt_and_deliver_queued_audio_once() {
+        let (listener, config) = bind_server().await;
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stalled, _) = listener.accept().await.unwrap();
+                read_opening_request(&mut stalled).await;
+                let mut byte = [0];
+                assert_eq!(timeout(Duration::from_secs(3), stalled.read(&mut byte)).await.unwrap().unwrap(), 0);
+            }
+            // Failed connections get only the handshake. The third receives
+            // one session update, exactly one recording's PCM, and one final commit.
+            serve_result(listener, Ok("reconnected")).await;
+        });
+        let (live, input) = LiveTranscription::start_with_setup_timeout(&config, vec![], Duration::from_millis(250)).unwrap();
+        input.tx.send(AudioChunk { samples: vec![0.2; 4800], rate: RATE }).await.unwrap();
+        assert_eq!(live.finish().await.unwrap(), "reconnected");
+        assert!(input.tx.is_closed());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn three_opening_handshake_timeouts_report_connection_phase_and_stop_retrying() {
+        let (listener, config) = bind_server().await;
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stalled, _) = listener.accept().await.unwrap();
+                read_opening_request(&mut stalled).await;
+                let mut byte = [0];
+                assert_eq!(timeout(Duration::from_secs(3), stalled.read(&mut byte)).await.unwrap().unwrap(), 0);
+            }
+            assert!(timeout(Duration::from_millis(150), listener.accept()).await.is_err());
+        });
+        let (live, input) = LiveTranscription::start_with_setup_timeout(&config, vec![], Duration::from_millis(250)).unwrap();
+        assert_eq!(live.finish().await.unwrap_err(), CONNECT_TIMEOUT_ERROR);
+        assert!(input.tx.is_closed());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn opening_http_failures_and_cancellation_never_reconnect() {
+        for status in [401, 403, 500] {
+            let (listener, config) = bind_server().await;
+            let server = tokio::spawn(async move {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                read_opening_request(&mut stream).await;
+                stream.write_all(format!("HTTP/1.1 {status} Error\r\nContent-Length: 0\r\n\r\n").as_bytes()).await.unwrap();
+                assert!(timeout(Duration::from_millis(150), listener.accept()).await.is_err());
+            });
+            let (live, _input) = LiveTranscription::start_with_setup_timeout(&config, vec![], Duration::from_millis(250)).unwrap();
+            let error = live.finish().await.unwrap_err();
+            assert_eq!(error, if status == 500 { "Transcription failed: the server returned HTTP 500" } else { "Transcription failed: check the API key in Settings › Model" });
+            server.await.unwrap();
+        }
+        let (listener, config) = bind_server().await;
+        let (started_tx, started_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (mut stalled, _) = listener.accept().await.unwrap();
+            read_opening_request(&mut stalled).await;
+            started_tx.send(()).unwrap();
+            let mut byte = [0];
+            assert_eq!(timeout(Duration::from_secs(3), stalled.read(&mut byte)).await.unwrap().unwrap(), 0);
+            assert!(timeout(Duration::from_millis(300), listener.accept()).await.is_err());
+        });
+        let (live, input) = LiveTranscription::start_with_setup_timeout(&config, vec![], Duration::from_millis(250)).unwrap();
+        started_rx.await.unwrap();
+        drop(live);
+        server.await.unwrap();
+        assert!(input.tx.is_closed());
+    }
+
+    #[tokio::test]
     async fn missing_session_ack_times_out_and_closes_socket() {
         let (listener, config) = bind_server().await;
         let server = tokio::spawn(async move {
-            let (stream, _) = listener.accept().await.unwrap();
-            let mut socket = accept_async(stream).await.unwrap();
-            assert_eq!(read(&mut socket).await["type"], "session.update");
-            let closed = timeout(IO_TIMEOUT + Duration::from_secs(3), socket.next()).await.unwrap();
-            assert!(!matches!(closed, Some(Ok(Message::Text(_)))));
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut socket = accept_async(stream).await.unwrap();
+                assert_eq!(read(&mut socket).await["type"], "session.update");
+                let closed = timeout(Duration::from_secs(3), socket.next()).await.unwrap();
+                assert!(!matches!(closed, Some(Ok(Message::Text(_)))));
+            }
+            assert!(timeout(Duration::from_millis(150), listener.accept()).await.is_err());
         });
-        let (live, _input) = LiveTranscription::start(&config, vec![]).unwrap();
-        assert!(live.finish().await.unwrap_err().contains("timed out"));
+        let (live, _input) = LiveTranscription::start_with_setup_timeout(&config, vec![], Duration::from_millis(250)).unwrap();
+        assert_eq!(live.finish().await.unwrap_err(), SESSION_TIMEOUT_ERROR);
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn each_cloud_provider_retries_session_setup_before_sending_audio() {
+        for provider in ["openai", "elevenlabs", "microsoft"] {
+            let (listener, config) = bind_server().await;
+            let config = match provider {
+                "elevenlabs" => scribe_config(config),
+                "microsoft" => mai_config(config),
+                _ => config,
+            };
+            let elevenlabs = provider == "elevenlabs";
+            let microsoft = provider == "microsoft";
+            let server = tokio::spawn(async move {
+                for attempt in 0..3 {
+                    let (stream, _) = listener.accept().await.unwrap();
+                    let mut socket = accept_async(stream).await.unwrap();
+                    // MAI's first attempt stalls before session.created; subsequent
+                    // attempts exercise the shared session.updated timeout.
+                    if !(elevenlabs || microsoft && attempt == 0) {
+                        write(&mut socket, json!({ "type": "session.created" })).await;
+                        assert_eq!(read(&mut socket).await["type"], "session.update");
+                    }
+                    if attempt < 2 {
+                        let closed = timeout(Duration::from_secs(3), socket.next()).await.unwrap();
+                        assert!(!matches!(closed, Some(Ok(Message::Text(_))))); // No audio before readiness.
+                        continue;
+                    }
+                    let ready = if elevenlabs { json!({ "message_type": "session_started" }) } else { json!({ "type": "session.updated" }) };
+                    write(&mut socket, ready).await;
+                    let mut bytes = 0;
+                    loop {
+                        let chunk = read(&mut socket).await;
+                        let committed = if elevenlabs { chunk["commit"] == true } else { chunk["type"] == "input_audio_buffer.commit" };
+                        if committed { break; }
+                        bytes += STANDARD.decode(chunk[if elevenlabs { "audio_base_64" } else { "audio" }].as_str().unwrap()).unwrap().len();
+                    }
+                    assert_eq!(bytes, if elevenlabs { RATE as usize * 2 * 2 } else { 9600 });
+                    if elevenlabs {
+                        write(&mut socket, json!({ "message_type": "committed_transcript", "text": "recovered" })).await;
+                    } else {
+                        write(&mut socket, json!({ "type": "input_audio_buffer.committed", "item_id": "result" })).await;
+                        write(&mut socket, json!({ "type": "conversation.item.input_audio_transcription.completed", "item_id": "result", "transcript": "recovered" })).await;
+                    }
+                }
+            });
+            let (live, input) = LiveTranscription::start_with_setup_timeout(&config, vec![], Duration::from_millis(250)).unwrap();
+            input.tx.send(AudioChunk { samples: vec![0.2; 4800], rate: RATE }).await.unwrap();
+            assert_eq!(live.finish().await.unwrap(), "recovered");
+            assert!(input.tx.is_closed());
+            server.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_and_session_ack_share_the_same_setup_deadline() {
+        assert_eq!(IO_TIMEOUT * SETUP_ATTEMPTS, Duration::from_secs(30));
+        let (listener, config) = bind_server().await;
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (stream, _) = listener.accept().await.unwrap();
+                tokio::time::sleep(Duration::from_millis(200)).await; // Uses half of the attempt's budget.
+                let mut socket = accept_async(stream).await.unwrap();
+                assert_eq!(read(&mut socket).await["type"], "session.update");
+                let closed = timeout(Duration::from_secs(3), socket.next()).await.unwrap();
+                assert!(!matches!(closed, Some(Ok(Message::Text(_)))));
+            }
+            assert!(timeout(Duration::from_millis(150), listener.accept()).await.is_err());
+        });
+        let attempt_timeout = Duration::from_millis(400);
+        let started = Instant::now();
+        let (live, _input) = LiveTranscription::start_with_setup_timeout(&config, vec![], attempt_timeout).unwrap();
+        assert_eq!(live.finish().await.unwrap_err(), SESSION_TIMEOUT_ERROR);
+        let elapsed = started.elapsed();
+        assert!(elapsed >= attempt_timeout * SETUP_ATTEMPTS);
+        // Allow scheduling overhead, but not another full ACK budget per attempt.
+        assert!(elapsed < attempt_timeout * (SETUP_ATTEMPTS + 1), "setup took {elapsed:?}");
         server.await.unwrap();
     }
 
