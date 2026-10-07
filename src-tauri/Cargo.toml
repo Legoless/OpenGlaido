@@ -1,6 +1,6 @@
 [package]
 name = "openglaido"
-version = "0.2.0"
+version = "2.1.0"
 description = "Open source voice layer for every app"
 authors = ["legoless"]
 edition = "2021"
