@@ -1,4 +1,5 @@
 use arboard::Clipboard;
+#[cfg(not(target_os = "macos"))]
 use enigo::{Direction, Enigo, Key, Keyboard, Settings};
 use crate::processing::{Cancellation, CANCELLED};
 use std::collections::BTreeSet;
@@ -7,6 +8,11 @@ use std::thread::sleep;
 use std::time::Duration;
 use tauri::AppHandle;
 use tokio::sync::Notify;
+
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+use macos::press_paste;
 
 #[derive(Default)]
 struct DeliveryOrder {
@@ -293,14 +299,11 @@ fn send_paste_shortcut(
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 fn press_paste() -> Result<(), String> {
     let mut enigo =
         Enigo::new(&Settings::default()).map_err(|e| format!("Enigo error: {:?}", e))?;
-    let modifier = if cfg!(target_os = "macos") {
-        Key::Meta
-    } else {
-        Key::Control
-    };
+    let modifier = Key::Control;
     enigo
         .key(modifier, Direction::Press)
         .map_err(|e| format!("{:?}", e))?;
