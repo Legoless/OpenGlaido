@@ -1809,6 +1809,11 @@ pub fn run() {
         // for it has focus, Windows skips that process's low-level keyboard hook, so the hotkeys
         // (and the hotkey recorder) went deaf whenever an OpenGlaido window was in front.
         .device_event_filter(tauri::DeviceEventFilter::Always)
+        // One instance only: a duplicate launch (macOS reopens the app at login while the
+        // autostart agent also starts it) hands over its arguments and exits before any other
+        // plugin or setup runs, so this goes first. Nothing is surfaced here: macOS activates
+        // the running instance on its own (Reopen shows Home), so a duplicate stays silent.
+        .plugin(tauri_plugin_single_instance::init(|_app, _args, _cwd| {}))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
