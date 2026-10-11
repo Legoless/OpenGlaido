@@ -1,5 +1,7 @@
 {
   "unreleased": [
+    "Offer opt-in macOS textbox edit detection that suggests corrections to review in History.",
+    "Add opt-in Workflow Insights beta with local recording measurements, correction feedback, setup comparisons, and optional three-judge analysis.",
     "See release history in Settings, showing only the installed and earlier versions.",
     "Reduce dictation startup delay and preserve speech at the beginning of recordings.",
     "Improve dictation paste reliability on macOS.",

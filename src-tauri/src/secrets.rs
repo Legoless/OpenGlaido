@@ -50,6 +50,28 @@ pub fn read(account: &str) -> Result<Option<String>, String> {
     }
 }
 
+/// Read an existing provider-scoped model credential without creating or moving any key.
+/// Workflow judges share the same endpoint scope as the normal model settings.
+pub fn get_provider_model_key(provider: &str, endpoint: &str) -> Result<String, String> {
+    get_provider_model_key_with(provider, endpoint, &read)
+}
+
+fn get_provider_model_key_with(provider: &str, endpoint: &str, read: &ReadKey) -> Result<String, String> {
+    let config = TranscriptionConfig {
+        llm_provider: provider.into(), llm_endpoint_url: Some(endpoint.into()),
+        ..Default::default()
+    };
+    let primary = account(&config, "llm");
+    let updates = BTreeMap::new();
+    // An explicitly cleared LLM key is authoritative, as in normal model hydration.
+    if let Some(key) = lookup(&primary, &updates, read)? { return Ok(key); }
+    for role in ["stt", "stt_backup_1", "stt_backup_2", "stt_backup_3", "stt_backup_4"] {
+        let related = primary.replacen("_llm_", &format!("_{role}_"), 1);
+        if let Some(key) = lookup(&related, &updates, read)?.filter(|key| !key.is_empty()) { return Ok(key); }
+    }
+    Ok(String::new())
+}
+
 fn write(account: &str, value: Option<&str>) -> Result<(), String> {
     let entry = entry(account)?;
     let result = match value {
@@ -617,6 +639,37 @@ mod tests {
         assert_eq!(account(&config, "stt"), custom);
         config.endpoint_url = "https://api.openai.com/other/audio/transcriptions".into();
         assert_ne!(account(&config, "stt"), custom);
+    }
+
+    #[test]
+    fn workflow_judge_reads_only_the_requested_provider_scope_without_writes() {
+        let vault = Vault::default();
+        let mut config = TranscriptionConfig {
+            llm_provider: "openai".into(), llm_endpoint_url: Some("https://api.openai.com/v1/chat/completions".into()),
+            llm_api_key: "judge-secret".into(), ..Default::default()
+        };
+        vault.load(&mut config).unwrap();
+        let writes = vault.writes.get();
+        assert_eq!(get_provider_model_key_with("openai", "https://api.openai.com/v1/chat/completions", &vault.reader()).unwrap(), "judge-secret");
+        assert!(get_provider_model_key_with("custom", "https://api.openai.com/v1/chat/completions", &vault.reader()).unwrap().is_empty());
+        assert!(get_provider_model_key_with("openai", "https://other.example/v1/chat/completions", &vault.reader()).unwrap().is_empty());
+        assert_eq!(vault.writes.get(), writes);
+        let mut cleared = config.clone();
+        cleared.llm_api_key.clear();
+        vault.save(&config, &mut cleared, &["llm_api_key"]).unwrap().commit();
+        assert!(get_provider_model_key_with("openai", "https://api.openai.com/v1/chat/completions", &vault.reader()).unwrap().is_empty());
+        *vault.fail_read.borrow_mut() = Some(account(&config, "llm"));
+        assert!(get_provider_model_key_with("openai", "https://api.openai.com/v1/chat/completions", &vault.reader()).is_err());
+
+        let backup_vault = Vault::default();
+        let mut backup = TranscriptionConfig {
+            stt_backup_4_provider: "custom".into(), stt_backup_4_endpoint_url: "https://judge.example/v1/audio/transcriptions".into(),
+            stt_backup_4_api_key: "backup-only-key".into(), ..Default::default()
+        };
+        backup_vault.load(&mut backup).unwrap();
+        let writes = backup_vault.writes.get();
+        assert_eq!(get_provider_model_key_with("custom", "https://judge.example/v1/chat/completions", &backup_vault.reader()).unwrap(), "backup-only-key");
+        assert_eq!(backup_vault.writes.get(), writes);
     }
 
     #[test]

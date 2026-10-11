@@ -102,7 +102,22 @@ pub fn paste_text_cancellable(
     keep_in_clipboard: bool,
     cancellation: Cancellation,
 ) -> Result<(), String> {
-    paste(app, text, keep_in_clipboard, None, cancellation)
+    paste(app, text, keep_in_clipboard, None, cancellation, None)
+}
+
+pub struct EditTrackingContext {
+    pub history_id: String,
+    pub epoch: u64,
+    pub generation: u64,
+}
+
+/// Only an opted-in ordinary dictation supplies tracking context. Commands and Retry
+/// retain their existing delivery behavior and never begin field observation.
+pub fn paste_text_cancellable_tracked(
+    app: &AppHandle, text: &str, keep_in_clipboard: bool, cancellation: Cancellation,
+    tracking: Option<EditTrackingContext>,
+) -> Result<(), String> {
+    paste(app, text, keep_in_clipboard, None, cancellation, tracking)
 }
 
 /// Targeted delivery requires the specified app to still be focused.
@@ -129,6 +144,7 @@ pub fn paste_text_to_cancellable(
         keep_in_clipboard,
         Some(target_app_id.unwrap_or_default().to_owned()),
         cancellation,
+        None,
     )
 }
 
@@ -139,6 +155,7 @@ fn paste(
     keep_in_clipboard: bool,
     target_app_id: Option<String>,
     cancellation: Cancellation,
+    tracking: Option<EditTrackingContext>,
 ) -> Result<(), String> {
     // Serialize the entire clipboard transaction, including the target app's time to read it.
     static TRANSACTION: Mutex<()> = Mutex::new(());
@@ -158,7 +175,7 @@ fn paste(
     // Destination and ownership are checked on the same thread immediately before posting Cmd+V.
     // On failure, do not restore: preserve any newer clipboard content. A focus-only
     // failure leaves the transcript available for manual paste.
-    let result = send_paste_shortcut(app, target_app_id, owned_version, text.to_owned(), cancellation.clone());
+    let result = send_paste_shortcut(app, target_app_id, owned_version, text.to_owned(), cancellation.clone(), tracking);
     if result.is_err() && cancellation.is_cancelled() {
         restore_previous(&mut clipboard, previous, text, owned_version);
         return Err(CANCELLED.into());
@@ -242,6 +259,13 @@ fn wait_for_win_and_alt() {
 }
 
 fn checked_paste(target_app_id: Option<&str>, owned_version: u64, text: &str, cancellation: &Cancellation) -> Result<(), String> {
+    checked_paste_with_tracking(target_app_id, owned_version, text, cancellation, None)
+}
+
+fn checked_paste_with_tracking(
+    target_app_id: Option<&str>, owned_version: u64, text: &str, cancellation: &Cancellation,
+    tracking: Option<(&AppHandle, &EditTrackingContext)>,
+) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     wait_for_win_and_alt();
     cancellation.check()?;
@@ -256,7 +280,21 @@ fn checked_paste(target_app_id: Option<&str>, owned_version: u64, text: &str, ca
     }
     // Cancellation and the actual keyboard injection share one admission boundary. A cancel
     // that wins cannot leave a queued main-thread closure posting Cmd+V later.
-    cancellation.run_if_active(press_paste)
+    cancellation.run_if_active(|| {
+        let prepared = tracking.and_then(|(app, context)| crate::edit_tracking::prepare(app, &context.history_id, context.epoch, context.generation, text).map(|prepared| (app.clone(), prepared)));
+        // Optional AX reads can take time. Never post our paste using clipboard data
+        // copied by another app during that lookup.
+        if tracking.is_some() {
+            let current = verified_clipboard_version(text, clipboard_version, || Clipboard::new().ok()?.get_text().ok());
+            if current != Some(owned_version) { return Err(CLIPBOARD_CHANGED.into()); }
+            if !destination_matches(target_app_id, crate::frontmost::current_app_id().as_deref()) {
+                return Err("The focused app changed; the text is on the clipboard".into());
+            }
+        }
+        press_paste()?;
+        if let Some((app, prepared)) = prepared { crate::edit_tracking::start(app, prepared); }
+        Ok(())
+    })
 }
 
 /// ⌘V / Ctrl+V. On macOS enigo resolves "v" through the keyboard layout (Text Input Sources),
@@ -267,6 +305,7 @@ fn send_paste_shortcut(
     owned_version: u64,
     text: String,
     cancellation: Cancellation,
+    tracking: Option<EditTrackingContext>,
 ) -> Result<(), String> {
     #[cfg(target_os = "macos")]
     {
@@ -277,9 +316,15 @@ fn send_paste_shortcut(
         let phase = Arc::new(AtomicU8::new(0));
         let (tx, rx) = std::sync::mpsc::channel();
         let queued = phase.clone();
+        let tracking_app = app.clone();
         app.run_on_main_thread(move || {
             if queued.compare_exchange(0, 1, SeqCst, SeqCst).is_ok() {
-                let _ = tx.send(checked_paste(target_app_id.as_deref(), owned_version, &text, &cancellation));
+                let result = if let Some(tracking) = tracking.as_ref() {
+                    checked_paste_with_tracking(target_app_id.as_deref(), owned_version, &text, &cancellation, Some((&tracking_app, tracking)))
+                } else {
+                    checked_paste(target_app_id.as_deref(), owned_version, &text, &cancellation)
+                };
+                let _ = tx.send(result);
             }
         })
         .map_err(|e| format!("Couldn't paste: {e}"))?;
@@ -294,8 +339,11 @@ fn send_paste_shortcut(
     }
     #[cfg(not(target_os = "macos"))]
     {
-        let _ = app;
-        checked_paste(target_app_id.as_deref(), owned_version, &text, &cancellation)
+        if let Some(tracking) = tracking.as_ref() {
+            checked_paste_with_tracking(target_app_id.as_deref(), owned_version, &text, &cancellation, Some((app, tracking)))
+        } else {
+            checked_paste(target_app_id.as_deref(), owned_version, &text, &cancellation)
+        }
     }
 }
 

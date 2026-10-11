@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
+use std::time::Instant;
 
 enum AudioCommand {
     /// Open the microphone during shortcut confirmation; audio stays local until Start.
@@ -79,6 +80,15 @@ pub struct Recording {
     pub rate: u32,
     /// Partial audio remains available when a microphone disconnects or the stream fails.
     pub interruption: Option<String>,
+    pub capture: CaptureMetadata,
+}
+
+/// Native capture identity and callback timing; no additional audio is retained.
+#[derive(Clone, Default)]
+pub struct CaptureMetadata {
+    pub microphone: Option<String>,
+    pub fell_back: bool,
+    pub first_sample_at: Option<Instant>,
 }
 
 #[derive(Default)]
@@ -87,6 +97,7 @@ struct CaptureState {
     generation: u64,
     active: bool,
     interruption: Option<String>,
+    metadata: CaptureMetadata,
 }
 
 impl CaptureState {
@@ -95,6 +106,7 @@ impl CaptureState {
         self.active = true;
         self.samples.clear();
         self.interruption = None;
+        self.metadata = CaptureMetadata::default();
         self.generation
     }
 
@@ -110,13 +122,14 @@ impl CaptureState {
         if samples.is_empty() && self.interruption.is_none() {
             return Err("No audio samples recorded".into());
         }
-        Ok(Recording { samples, rate, interruption: self.interruption.clone() })
+        Ok(Recording { samples, rate, interruption: self.interruption.clone(), capture: self.metadata.clone() })
     }
 
     fn cancel(&mut self) {
         self.active = false;
         self.samples.clear();
         self.interruption = None;
+        self.metadata = CaptureMetadata::default();
     }
 }
 
@@ -374,6 +387,9 @@ fn record_chunk<T: Copy>(
     // Confirmation also locks capture before feed to attach providers and replay the prefix.
     let mut feed = feed.lock().unwrap();
     if !capture.active || capture.generation != feed.generation || capture.interruption.is_some() { return; }
+    if !data.is_empty() && capture.metadata.first_sample_at.is_none() {
+        capture.metadata.first_sample_at = Some(Instant::now());
+    }
     let s = &mut capture.samples;
     let start = s.len();
     s.extend(
@@ -500,6 +516,11 @@ impl AudioRecorder {
                 })
             });
             let (device, config) = input.ok_or_else(|| "No audio input device found".to_string())?;
+            {
+                let mut capture = capture.lock().unwrap();
+                capture.metadata.microphone = device.name().ok();
+                capture.metadata.fell_back = fell_back;
+            }
             let supported_config = config.map_err(|e| format!("Input config error: {e}"))?;
             let channels = supported_config.channels() as usize;
             let rate = supported_config.sample_rate().0;
@@ -606,6 +627,7 @@ impl AudioRecorder {
                 samples,
                 rate: spec.sample_rate,
                 interruption: recording.interruption,
+                capture: CaptureMetadata { microphone: Some("Test audio".into()), ..recording.capture },
             });
         }
         Ok(recording)
@@ -630,6 +652,34 @@ impl AudioRecorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_metadata_tracks_first_callback_and_resets_between_recordings() {
+        let capture = Mutex::new(CaptureState::default());
+        let generation = capture.lock().unwrap().begin();
+        {
+            let mut state = capture.lock().unwrap();
+            state.metadata.microphone = Some("Chosen microphone".into());
+            state.metadata.fell_back = true;
+        }
+        let feed = Mutex::new(StreamFeed { inputs: Vec::new(), rate: 16000, generation });
+        let level = AtomicU32::new(0);
+        let mut meter = Loudness::new(16000);
+        record_chunk::<f32>(&[], 1, |x| x, &capture, &mut meter, &level, &feed);
+        assert!(capture.lock().unwrap().metadata.first_sample_at.is_none());
+        record_chunk(&[0.25], 1, |x| x, &capture, &mut meter, &level, &feed);
+        let first = capture.lock().unwrap().metadata.first_sample_at.unwrap();
+        record_chunk(&[0.5], 1, |x| x, &capture, &mut meter, &level, &feed);
+        let recording = capture.lock().unwrap().finish(16000).unwrap();
+        assert_eq!(recording.capture.first_sample_at, Some(first));
+        assert_eq!(recording.capture.microphone.as_deref(), Some("Chosen microphone"));
+        assert!(recording.capture.fell_back);
+        capture.lock().unwrap().begin();
+        let state = capture.lock().unwrap();
+        assert!(state.metadata.first_sample_at.is_none());
+        assert!(state.metadata.microphone.is_none());
+        assert!(!state.metadata.fell_back);
+    }
 
     #[test]
     fn capture_errors_keep_partial_audio_and_ignore_stale_callbacks() {

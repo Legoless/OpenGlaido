@@ -186,6 +186,7 @@ impl Llm {
             }
         };
         let client = reqwest::Client::builder()
+            .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(15))
             .timeout(Duration::from_secs(180))
             .build()
@@ -195,13 +196,13 @@ impl Llm {
             request = request.bearer_auth(api_key.trim());
         }
         let response = request.send().await.map_err(|e| {
-            eprintln!("LLM request failed: {e}");
+            eprintln!("LLM request failed: {}", e.without_url());
             "Couldn't reach the language model endpoint (Settings › Model)".to_string()
         })?;
         if !response.status().is_success() {
             let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            eprintln!("LLM returned {status}: {text}");
+            // An error body can repeat the transcript or credentials; status is enough.
+            eprintln!("LLM returned {status}");
             return Err(match status.as_u16() {
                 401 | 403 => "The language model rejected the API key (Settings › Model)".to_string(),
                 404 => "Language model endpoint or model not found (Settings › Model)".to_string(),
@@ -264,6 +265,38 @@ pub fn assistant_tool_message(completion: &Completion) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_formatters_cannot_forward_transcripts_through_redirects() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let source = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let target = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let source_address = source.local_addr().unwrap();
+        let target_address = target.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = source.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let mut chunk = [0; 4096];
+            loop {
+                let read = socket.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                    let headers = String::from_utf8_lossy(&bytes[..header_end]).to_lowercase();
+                    let length = headers.lines().find_map(|line| line.strip_prefix("content-length: ")).unwrap().parse::<usize>().unwrap();
+                    if bytes.len() >= header_end + 4 + length { break; }
+                }
+            }
+            assert!(String::from_utf8_lossy(&bytes).contains("synthetic private transcript"));
+            socket.write_all(format!("HTTP/1.1 307 Temporary Redirect\r\nLocation: http://{target_address}/remote\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes()).await.unwrap();
+        });
+        let llm = Llm::Remote { url: format!("http://{source_address}/v1/chat/completions"), model: "test-formatter".into(), api_key: "synthetic-key".into(), temperature: 0.0 };
+        let error = tokio::time::timeout(Duration::from_secs(5), llm.stream(&[json!({"role":"user","content":"synthetic private transcript"})], &[], |_| {})).await.unwrap().unwrap_err();
+        assert!(error.contains("307"));
+        assert!(!error.contains("synthetic private transcript"));
+        assert!(tokio::time::timeout(Duration::from_millis(50), target.accept()).await.is_err());
+        server.await.unwrap();
+    }
 
     #[test]
     fn assembles_text_across_chunk_boundaries() {

@@ -87,6 +87,7 @@ Details: [local transcription models](docs/local-transcription-models.md), [Micr
 - **History:** play, copy, delete or **Retry** dictations. Search with **Cmd+K** or Ctrl+K.
 - **Changelog:** see release notes for your installed version and earlier versions in **Settings › General**.
 - **Commands (beta, off by default):** ask out loud and get an answer in a floating window. Turn on beta features in **Settings › General**, then use the Commands shortcut or start a dictation with "Glaido, …".
+- **Workflow Insights (beta, separate opt-in):** collect local recording measurements, confirm or correct transcripts in History, and compare setups without replacing the original result. On a Mac, separately enable **Detect edits after paste** to suggest corrections from supported textboxes for you to review. Optional cloud comparisons and three text judges require explicit actions. See [the beta behavior](docs/workflow-insights/PRODUCT.md).
 - **Tools:** web search and other Commands tools need a cloud language model. Web search and deep research also need a search service: Brave, Tavily or SearXNG. You can add your own tools too, as local MCP servers (a standard way to connect tools to AI).
 - **Also:** remembered microphones, 14 app languages, sounds, themes and launch at login.
 
@@ -99,7 +100,8 @@ Details: [local transcription models](docs/local-transcription-models.md), [Micr
 - **Sent to a cloud language model:** the transcript, your style and instructions. Commands also send your request, the app's name, any text you've selected (Mac) and whatever their tools look up.
 - Web searches go only to your search provider. Reading a page or YouTube video fetches it from that site. Models come from Hugging Face; update checks go to GitHub.
 - **Fully offline on a Mac:** pick a downloaded transcription model, disable live cloud backups, and set the language model to **On this Mac** or **Off**.
-- No analytics or telemetry code.
+- Workflow Insights is off by default. Local measurements stay with History; cloud analysis has a separate opt-in and runs only when you request it. Clearing Insights keeps History audio; deleting a recording also deletes its Insights evidence. There is no analytics server.
+- macOS edit detection has a separate off-by-default switch. It briefly reads the destination textbox locally, keeps surrounding text only in memory, and saves only detected changes to the pasted passage as suggestions. It stops on focus changes, a new dictation or after two minutes; confirming a suggestion creates only a desired-output reference.
 
 ## Known limitations
 

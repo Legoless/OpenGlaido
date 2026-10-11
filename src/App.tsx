@@ -433,6 +433,7 @@ function MainWindow() {
         <main className="flex min-w-0 flex-1 flex-col gap-4">
           {page === "home" && (
             <Home
+              config={config}
               history={history}
               onError={(message) => showToast({ source: "dictation", level: "error", message })}
               historyStats={historyStats}

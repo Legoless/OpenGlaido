@@ -109,6 +109,7 @@ export interface TranscriptionConfig {
   /** "system" or one of the UI locales ("en", "de", "sr-Latn", "zh-Hans", ...). */
   app_language: string;
   beta_features: boolean;
+  workflow_insights: WorkflowInsightsConfig;
   // Commands
   commands_hold: string;
   commands_toggle: string;
@@ -346,3 +347,148 @@ export type PaletteAction =
   | { type: "add_rule" }
   | { type: "toggle_theme" }
   | { type: "open_history"; id: string };
+
+// ------------------------------------------------------------------
+// Workflow Insights (opt-in Beta)
+// ------------------------------------------------------------------
+export interface WorkflowJudgeConfig {
+  provider: string;
+  endpoint_url: string;
+  model_name: string;
+}
+
+export interface WorkflowInsightsConfig {
+  enabled: boolean;
+  cloud_analysis: boolean;
+  track_edits: boolean;
+  judges: WorkflowJudgeConfig[];
+}
+
+export interface WorkflowFeedback {
+  reference_kind: "spoken" | "output";
+  reference_text: string;
+  category: string;
+  updated_at: string;
+}
+
+export interface WorkflowJudgeIssue {
+  category: string;
+  excerpt: string;
+  explanation: string;
+}
+
+export interface WorkflowJudgement {
+  id: string;
+  analysis_id: string;
+  run_id: string;
+  reference_kind: "spoken" | "output";
+  reference_updated_at: string;
+  judge: { slot: number; provider: string; model_name: string };
+  verdict: "pass" | "fail" | "uncertain";
+  issues: WorkflowJudgeIssue[];
+  explanation: string;
+  created_at: string;
+  elapsed_ms: number;
+}
+
+export interface WorkflowWordError {
+  edits: number;
+  reference_words: number;
+  hypothesis_words: number;
+  rate: number;
+}
+
+export interface WorkflowRunScore {
+  run_id: string;
+  word_error: WorkflowWordError | null;
+}
+
+export interface WorkflowAnalysisStatus {
+  running: boolean;
+  history_id: string | null;
+  kind: string | null;
+}
+
+export interface WorkflowModel {
+  source: string;
+  provider: string;
+  model_name: string;
+}
+
+export interface WorkflowSnapshot {
+  stt: WorkflowModel;
+  llm: WorkflowModel;
+  live: boolean;
+  configured_backups: WorkflowModel[];
+  winning_provider: string | null;
+  style: string;
+  raw_text: boolean;
+  rule_id: string | null;
+  system_prompt: string;
+  languages: string[];
+  dictionary_revision: string;
+  dictionary_changed: boolean;
+  app_version: string;
+  app_bundle_id: string | null;
+  app_name: string | null;
+  website_host: string | null;
+  preprocessing: string;
+  input_kind: string;
+  actual_microphone: string | null;
+  sample_rate: number | null;
+  fallback: boolean | null;
+}
+
+export interface WorkflowTimings {
+  capture_ready_ms: number | null;
+  first_sample_ms: number | null;
+  audio_duration_ms: number | null;
+  stt_ms: number | null;
+  formatting_ms: number | null;
+  delivery_requested_ms: number | null;
+  clipping_fraction: number | null;
+}
+
+export interface WorkflowRun {
+  id: string;
+  history_id: string;
+  created_at: string;
+  kind: "recording" | "comparison";
+  label: string;
+  snapshot: WorkflowSnapshot;
+  timings: WorkflowTimings;
+  raw_text: string;
+  formatted_text: string;
+  final_text: string;
+  outcome: string;
+}
+
+export interface WorkflowEntry {
+  history_id: string;
+  runs: WorkflowRun[];
+  feedback: WorkflowFeedback[];
+  judgements: WorkflowJudgement[];
+  scores: WorkflowRunScore[];
+  edit_observation?: WorkflowEditObservation | null;
+}
+
+export interface WorkflowEditObservation {
+  history_id: string;
+  original_text: string;
+  edited_text: string;
+  app_bundle_id: string | null;
+  observed_at: string;
+  status: "pending" | "confirmed" | "dismissed";
+}
+
+export interface WorkflowReport {
+  entries: WorkflowEntry[];
+  events: { category: string; count: number }[];
+}
+
+export interface WorkflowComparePreview {
+  audio_destination: string | null;
+  text_destination: string | null;
+  cloud: boolean;
+  raw_output: boolean;
+}

@@ -29,6 +29,7 @@ import {
 } from "lucide-react";
 import { CommandsHotkeySection } from "./commands-hotkeys";
 import { ChangelogSettings } from "./changelog-settings";
+import { WorkflowSettings } from "./workflow-settings";
 import { LOCALES, locale, t } from "./i18n";
 import { ModelSettings } from "./model-settings";
 import { UpdateSettings, useAppUpdates } from "./update-settings";
@@ -758,6 +759,7 @@ export function SettingsModal({
                   label={t("Enable beta features")}
                 />
               </SettingsRow>
+              <WorkflowSettings config={config} save={save} />
             </>
           )}
 

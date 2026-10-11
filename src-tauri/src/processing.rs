@@ -95,6 +95,8 @@ struct Lease {
 
 impl Job {
     pub fn start(app: &AppHandle) -> Self {
+        // Background evaluation yields to dictation, History Retry and Commands.
+        if let Some(analysis) = app.try_state::<crate::workflow_analysis::AnalysisState>() { analysis.cancel(); }
         let state = app.state::<crate::AppState>();
         let (id, cancellation) = state.responses.start();
         state.jobs.fetch_add(1, Ordering::SeqCst);

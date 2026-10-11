@@ -38,6 +38,88 @@ impl FocusTarget {
     }
 }
 
+/// Accessibility selection offsets use UTF-16 code units, rather than UTF-8 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TextSelection {
+    pub location: usize,
+    pub length: usize,
+}
+
+/// A bounded snapshot of one editable, non-secure textbox. Field text stays local.
+#[derive(Clone)]
+pub struct TextboxSnapshot {
+    pub focus: FocusTarget,
+    pub text: String,
+    pub selection: TextSelection,
+    pub app_bundle_id: String,
+}
+
+#[cfg(any(target_os = "macos", test))]
+const TEXTBOX_BUDGET: std::time::Duration = std::time::Duration::from_millis(100);
+
+#[cfg(any(target_os = "macos", test))]
+const TEXTBOX_MAX_CHARACTERS: usize = 16 * 1024;
+
+#[cfg(any(target_os = "macos", test))]
+fn textbox_timeout(deadline: std::time::Instant, now: std::time::Instant) -> Option<f32> {
+    let remaining = deadline.checked_duration_since(now)?;
+    (!remaining.is_zero()).then(|| remaining.as_secs_f32().min(0.02))
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn textbox_app_allowed(bundle_id: &str) -> bool {
+    !bundle_id.is_empty()
+        && !matches!(bundle_id, "com.openglaido.app" | "com.apple.Terminal" | "com.googlecode.iterm2"
+            | "dev.warp.Warp-Stable" | "dev.warp.Warp-Preview" | "com.mitchellh.ghostty"
+            | "net.kovidgoyal.kitty" | "org.alacritty" | "io.alacritty" | "com.github.wez.wezterm")
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn textbox_role_allowed(role: &str, subrole: Option<&str>) -> bool {
+    // Secure native fields use AXTextField with AXSecureTextField as their subrole. Do not
+    // infer that an ordinary field is safe when its subrole could not be established.
+    matches!(role, "AXTextField" | "AXTextArea" | "AXSearchField")
+        && subrole.is_none_or(|value| !value.to_ascii_lowercase().contains("secure"))
+        && (role != "AXTextField" || subrole.is_some())
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn textbox_selection(location: isize, length: isize, characters: usize) -> Option<TextSelection> {
+    if characters > TEXTBOX_MAX_CHARACTERS {
+        return None;
+    }
+    let selection = TextSelection { location: usize::try_from(location).ok()?, length: usize::try_from(length).ok()? };
+    (selection.location.checked_add(selection.length)? <= characters).then_some(selection)
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn textbox_text_matches(text: &str, selection: TextSelection, characters: usize) -> bool {
+    if characters > TEXTBOX_MAX_CHARACTERS || selection.location.checked_add(selection.length).is_none_or(|end| end > characters) {
+        return false;
+    }
+    let end = selection.location + selection.length;
+    let mut offset = 0;
+    let mut start_boundary = selection.location == 0;
+    let mut end_boundary = end == 0;
+    for character in text.chars() {
+        offset += character.len_utf16();
+        start_boundary |= selection.location == offset;
+        end_boundary |= end == offset;
+    }
+    offset == characters && start_boundary && end_boundary
+}
+
+#[cfg(any(target_os = "macos", test))]
+fn textbox_read_text(characters: usize, read_range: impl FnOnce() -> Option<String>) -> Option<String> {
+    match characters {
+        // Some providers reject zero-length AXStringForRange requests. No content read is
+        // needed for a verified empty field; a subsequent nonempty snapshot still requires it.
+        0 => Some(String::new()),
+        1..=TEXTBOX_MAX_CHARACTERS => read_range(),
+        _ => None,
+    }
+}
+
 #[cfg(any(target_os = "macos", test))]
 const CONTEXT_BUDGET: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -93,10 +175,10 @@ fn url_from_title(title: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "macos")]
-pub use mac::{app_icon, capture_context, capture_focus, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
+pub use mac::{app_icon, capture_context, capture_focus, capture_textbox, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
 
 #[cfg(not(target_os = "macos"))]
-pub use other::{app_icon, capture_context, capture_focus, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
+pub use other::{app_icon, capture_context, capture_focus, capture_textbox, current_app_id, current_context, is_installed, list_apps, resolve_context, selected_text};
 
 #[cfg(target_os = "macos")]
 mod mac {
@@ -115,8 +197,19 @@ mod mac {
 
     type AXUIElementRef = *const c_void;
 
+    #[repr(C)]
+    #[derive(Default)]
+    struct CfRange {
+        location: isize,
+        length: isize,
+    }
+
+    const AX_CF_RANGE: u32 = 4;
+    const AX_ATTRIBUTE_UNSUPPORTED: i32 = -25205;
+
     #[link(name = "ApplicationServices", kind = "framework")]
     extern "C" {
+        fn AXIsProcessTrusted() -> u8;
         fn AXUIElementCreateApplication(pid: i32) -> AXUIElementRef;
         fn AXUIElementCreateSystemWide() -> AXUIElementRef;
         fn AXUIElementCopyAttributeValue(element: AXUIElementRef, attribute: *const c_void, value: *mut *const c_void) -> i32;
@@ -124,12 +217,26 @@ mod mac {
         fn AXUIElementSetMessagingTimeout(element: AXUIElementRef, timeout: f32) -> i32;
         fn AXUIElementGetPid(element: AXUIElementRef, pid: *mut i32) -> i32;
         fn AXUIElementGetTypeID() -> usize;
+        fn AXUIElementIsAttributeSettable(element: AXUIElementRef, attribute: *const c_void, settable: *mut u8) -> i32;
+        fn AXUIElementCopyParameterizedAttributeValue(element: AXUIElementRef, attribute: *const c_void, parameter: *const c_void, value: *mut *const c_void) -> i32;
+        fn AXValueCreate(kind: u32, value: *const c_void) -> *const c_void;
+        fn AXValueGetTypeID() -> usize;
+        fn AXValueGetType(value: *const c_void) -> u32;
+        fn AXValueGetValue(value: *const c_void, kind: u32, result: *mut c_void) -> u8;
     }
 
     #[link(name = "CoreFoundation", kind = "framework")]
     extern "C" {
         fn CFEqual(first: *const c_void, second: *const c_void) -> u8;
         fn CFGetTypeID(value: *const c_void) -> usize;
+        fn CFBooleanGetTypeID() -> usize;
+        fn CFBooleanGetValue(value: *const c_void) -> u8;
+        fn CFNumberGetTypeID() -> usize;
+        fn CFNumberIsFloatType(value: *const c_void) -> u8;
+        fn CFNumberGetValue(value: *const c_void, kind: isize, result: *mut c_void) -> u8;
+        fn CFStringGetTypeID() -> usize;
+        fn CFStringGetLength(value: *const c_void) -> isize;
+        fn CFStringGetCharacters(value: *const c_void, range: CfRange, buffer: *mut u16);
     }
 
     /// An owned CF/AX object (toll-free bridged, so objc2 can release and downcast it).
@@ -192,15 +299,24 @@ mod mac {
     /// Chromium/Electron only build their accessibility tree when asked; ask once per process.
     /// (AXManualAccessibility only: AXEnhancedUserInterface breaks window animations/managers.)
     fn enable_web_accessibility(app: &Ax, pid: i32, deadline: Instant) {
+        enable_web_accessibility_bounded(app, pid, deadline, lookup_timeout);
+    }
+
+    fn enable_web_accessibility_bounded(app: &Ax, pid: i32, deadline: Instant, timeout_for: fn(Instant, Instant) -> Option<f32>) {
         static DONE: OnceLock<Mutex<HashSet<i32>>> = OnceLock::new();
         if DONE.get_or_init(Default::default).lock().unwrap().contains(&pid) {
             return;
         }
-        let Some(timeout) = lookup_timeout(deadline, Instant::now()) else { return };
+        let Some(timeout) = timeout_for(deadline, Instant::now()) else { return };
         let yes = NSNumber::new_bool(true);
         let name = NSString::from_str("AXManualAccessibility");
         let result = unsafe {
-            AXUIElementSetMessagingTimeout(Retained::as_ptr(app).cast(), timeout);
+            if AXUIElementSetMessagingTimeout(Retained::as_ptr(app).cast(), timeout) != 0 {
+                return;
+            }
+            if Instant::now() >= deadline {
+                return;
+            }
             AXUIElementSetAttributeValue(Retained::as_ptr(app).cast(), Retained::as_ptr(&name).cast(), Retained::as_ptr(&yes).cast())
         };
         if result == 0 {
@@ -284,6 +400,170 @@ mod mac {
             })?;
             // AX lookups can outlive the foreground app; discard a mixed snapshot.
             (NSWorkspace::sharedWorkspace().frontmostApplication()?.processIdentifier() == pid).then_some(focus)
+        })
+    }
+
+    /// Every textbox query uses a newly acquired local AX handle. Retained FocusElement
+    /// identities from earlier captures are only compared, never used for messaging.
+    fn prepare_textbox_call(element: &Ax, deadline: Instant) -> Option<()> {
+        let timeout = textbox_timeout(deadline, Instant::now())?;
+        let result = unsafe { AXUIElementSetMessagingTimeout(Retained::as_ptr(element).cast(), timeout) };
+        (result == 0 && Instant::now() < deadline).then_some(())
+    }
+
+    fn textbox_attr(element: &Ax, name: &str, deadline: Instant) -> Result<Ax, i32> {
+        prepare_textbox_call(element, deadline).ok_or(-25204)?;
+        let name = NSString::from_str(name);
+        let mut value = std::ptr::null();
+        let result = unsafe {
+            AXUIElementCopyAttributeValue(Retained::as_ptr(element).cast(), Retained::as_ptr(&name).cast(), &mut value)
+        };
+        let value = own(value);
+        if result == 0 && Instant::now() < deadline {
+            value.ok_or(-25212)
+        } else {
+            Err(if result == 0 { -25204 } else { result })
+        }
+    }
+
+    fn textbox_string(value: &Ax, limit: usize) -> Option<String> {
+        let ptr = Retained::as_ptr(value).cast();
+        if unsafe { CFGetTypeID(ptr) != CFStringGetTypeID() } {
+            return None;
+        }
+        let length = usize::try_from(unsafe { CFStringGetLength(ptr) }).ok()?;
+        if length > limit {
+            return None;
+        }
+        let mut characters = vec![0u16; length];
+        unsafe { CFStringGetCharacters(ptr, CfRange { location: 0, length: length as isize }, characters.as_mut_ptr()) };
+        String::from_utf16(&characters).ok()
+    }
+
+    fn textbox_element_for_process(element: Ax, pid: i32, deadline: Instant) -> Option<Ax> {
+        let ptr = Retained::as_ptr(&element).cast();
+        if unsafe { CFGetTypeID(ptr) != AXUIElementGetTypeID() } {
+            return None;
+        }
+        prepare_textbox_call(&element, deadline)?;
+        let mut actual_pid = 0;
+        let result = unsafe { AXUIElementGetPid(ptr, &mut actual_pid) };
+        (result == 0 && actual_pid == pid && Instant::now() < deadline).then_some(element)
+    }
+
+    fn textbox_focus_elements(app: &Ax, pid: i32, deadline: Instant) -> Option<(Ax, Ax)> {
+        let window = textbox_element_for_process(textbox_attr(app, "AXFocusedWindow", deadline).ok()?, pid, deadline)?;
+        let field = textbox_element_for_process(textbox_attr(app, "AXFocusedUIElement", deadline).ok()?, pid, deadline)?;
+        Some((window, field))
+    }
+
+    fn same_ax(first: &Ax, second: &Ax) -> bool {
+        unsafe { CFEqual(Retained::as_ptr(first).cast(), Retained::as_ptr(second).cast()) != 0 }
+    }
+
+    /// Reads only an eligible, bounded textbox in the still-focused app. No prompt, clipboard,
+    /// screenshot, AXValue content fallback, or content logging is used when a read is unavailable.
+    pub fn capture_textbox(expected: Option<&FocusTarget>) -> Option<TextboxSnapshot> {
+        let deadline = Instant::now() + TEXTBOX_BUDGET;
+        if unsafe { AXIsProcessTrusted() == 0 } {
+            return None;
+        }
+        autoreleasepool(|_| {
+            let current = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+            let pid = current.processIdentifier();
+            let app_bundle_id = current.bundleIdentifier()?.to_string();
+            if pid <= 0 || !textbox_app_allowed(&app_bundle_id) || expected.is_some_and(|focus| focus.pid != pid as u32) {
+                return None;
+            }
+            let app = app_element(pid)?;
+            // Use the same Chromium initialization as focus/context capture, with this read's
+            // shorter deadline and timeout. Its cache avoids repeated initialization traffic.
+            enable_web_accessibility_bounded(&app, pid, deadline, textbox_timeout);
+            let (window, field) = textbox_focus_elements(&app, pid, deadline)?;
+            if expected.is_some_and(|focus| !same_ax(&window, &focus.window.0) || !same_ax(&field, &focus.field.0)) {
+                return None;
+            }
+            let role = textbox_string(&textbox_attr(&field, "AXRole", deadline).ok()?, 128)?;
+            let subrole = match textbox_attr(&field, "AXSubrole", deadline) {
+                Ok(value) => Some(textbox_string(&value, 128)?),
+                // An unsupported optional subrole is only acceptable for roles that cannot
+                // be the native AXSecureTextField. All other failures remain inconclusive.
+                Err(AX_ATTRIBUTE_UNSUPPORTED) => None,
+                Err(_) => return None,
+            };
+            if !textbox_role_allowed(&role, subrole.as_deref()) {
+                return None;
+            }
+            let enabled = textbox_attr(&field, "AXEnabled", deadline).ok()?;
+            let enabled_ptr = Retained::as_ptr(&enabled).cast();
+            if unsafe { CFGetTypeID(enabled_ptr) != CFBooleanGetTypeID() || CFBooleanGetValue(enabled_ptr) == 0 } {
+                return None;
+            }
+            prepare_textbox_call(&field, deadline)?;
+            let value_name = NSString::from_str("AXValue");
+            let mut settable = 0;
+            let editable = unsafe {
+                AXUIElementIsAttributeSettable(Retained::as_ptr(&field).cast(), Retained::as_ptr(&value_name).cast(), &mut settable)
+            };
+            if editable != 0 || settable == 0 || Instant::now() >= deadline {
+                return None;
+            }
+            let count = textbox_attr(&field, "AXNumberOfCharacters", deadline).ok()?;
+            let count_ptr = Retained::as_ptr(&count).cast();
+            let mut count_value = 0i64;
+            let valid_count = unsafe {
+                CFGetTypeID(count_ptr) == CFNumberGetTypeID()
+                    && CFNumberIsFloatType(count_ptr) == 0
+                    && CFNumberGetValue(count_ptr, 4, (&mut count_value as *mut i64).cast()) != 0
+            };
+            if !valid_count {
+                return None;
+            }
+            let characters = usize::try_from(count_value).ok()?;
+            if characters > TEXTBOX_MAX_CHARACTERS {
+                return None;
+            }
+            let selected = textbox_attr(&field, "AXSelectedTextRange", deadline).ok()?;
+            let selected_ptr = Retained::as_ptr(&selected).cast();
+            let mut selected_range = CfRange::default();
+            let valid_range = unsafe {
+                CFGetTypeID(selected_ptr) == AXValueGetTypeID()
+                    && AXValueGetType(selected_ptr) == AX_CF_RANGE
+                    && AXValueGetValue(selected_ptr, AX_CF_RANGE, (&mut selected_range as *mut CfRange).cast()) != 0
+            };
+            if !valid_range {
+                return None;
+            }
+            let selection = textbox_selection(selected_range.location, selected_range.length, characters)?;
+            let text = textbox_read_text(characters, || {
+                let whole_range = CfRange { location: 0, length: characters as isize };
+                let parameter = own(unsafe { AXValueCreate(AX_CF_RANGE, (&whole_range as *const CfRange).cast()) })?;
+                prepare_textbox_call(&field, deadline)?;
+                let range_name = NSString::from_str("AXStringForRange");
+                let mut value = std::ptr::null();
+                let result = unsafe {
+                    AXUIElementCopyParameterizedAttributeValue(Retained::as_ptr(&field).cast(), Retained::as_ptr(&range_name).cast(),
+                        Retained::as_ptr(&parameter).cast(), &mut value)
+                };
+                let value = own(value)?;
+                if result != 0 || Instant::now() >= deadline {
+                    return None;
+                }
+                textbox_string(&value, characters)
+            })?;
+            if !textbox_text_matches(&text, selection, characters) {
+                return None;
+            }
+            let (final_window, final_field) = textbox_focus_elements(&app, pid, deadline)?;
+            if !same_ax(&window, &final_window) || !same_ax(&field, &final_field) {
+                return None;
+            }
+            let final_app = NSWorkspace::sharedWorkspace().frontmostApplication()?;
+            if final_app.processIdentifier() != pid || final_app.bundleIdentifier()?.to_string() != app_bundle_id || Instant::now() >= deadline {
+                return None;
+            }
+            Some(TextboxSnapshot { focus: FocusTarget { pid: pid as u32, window: FocusElement(window), field: FocusElement(field) },
+                text, selection, app_bundle_id })
         })
     }
 
@@ -425,6 +705,11 @@ mod other {
         current_context().map(|context| ContextSnapshot { context })
     }
 
+    /// Textbox edit tracking currently requires the macOS Accessibility text interface.
+    pub fn capture_textbox(_expected: Option<&FocusTarget>) -> Option<TextboxSnapshot> {
+        None
+    }
+
     pub fn resolve_context(target: ContextSnapshot, _selection: bool) -> (AppContext, Option<String>) {
         (target.context, None)
     }
@@ -534,6 +819,68 @@ mod tests {
         assert_eq!(lookup_timeout(deadline, deadline - std::time::Duration::from_millis(5)), Some(0.005));
         assert_eq!(lookup_timeout(deadline, deadline), None);
         assert_eq!(lookup_timeout(deadline, deadline + std::time::Duration::from_millis(1)), None);
+    }
+
+    #[test]
+    fn textbox_calls_use_short_per_call_and_overall_deadlines() {
+        let started = std::time::Instant::now();
+        let deadline = started + TEXTBOX_BUDGET;
+        assert_eq!(TEXTBOX_BUDGET, std::time::Duration::from_millis(100));
+        assert_eq!(textbox_timeout(deadline, started), Some(0.02));
+        assert_eq!(textbox_timeout(deadline, deadline - std::time::Duration::from_millis(5)), Some(0.005));
+        assert_eq!(textbox_timeout(deadline, deadline), None);
+        assert_eq!(textbox_timeout(deadline, deadline + std::time::Duration::from_millis(1)), None);
+    }
+
+    #[test]
+    fn textbox_security_and_role_checks_fail_closed() {
+        assert!(textbox_role_allowed("AXTextField", Some("")));
+        assert!(textbox_role_allowed("AXTextArea", None));
+        assert!(textbox_role_allowed("AXSearchField", Some("AXSearchField")));
+        assert!(!textbox_role_allowed("AXTextField", None));
+        assert!(!textbox_role_allowed("AXTextField", Some("AXSecureTextField")));
+        assert!(!textbox_role_allowed("AXTextArea", Some("AXSecureTextArea")));
+        for role in ["AXSecureTextField", "AXWebArea", "AXStaticText", "AXGroup", "AXUnknown", ""] {
+            assert!(!textbox_role_allowed(role, Some("")), "unexpected role {role}");
+        }
+        for bundle_id in ["", "com.openglaido.app", "com.apple.Terminal", "com.googlecode.iterm2", "dev.warp.Warp-Stable", "com.mitchellh.ghostty"] {
+            assert!(!textbox_app_allowed(bundle_id), "unexpected app {bundle_id}");
+        }
+        assert!(textbox_app_allowed("com.apple.TextEdit"));
+        assert!(textbox_app_allowed("com.google.Chrome"));
+    }
+
+    #[test]
+    fn textbox_selection_requires_bounded_nonnegative_ranges() {
+        assert_eq!(textbox_selection(0, 0, 0), Some(TextSelection { location: 0, length: 0 }));
+        assert_eq!(textbox_selection(4, 2, 6), Some(TextSelection { location: 4, length: 2 }));
+        assert_eq!(textbox_selection(6, 0, 6), Some(TextSelection { location: 6, length: 0 }));
+        for (location, length, characters) in [(-1, 0, 6), (0, -1, 6), (4, 3, 6), (7, 0, 6),
+            (isize::MAX, isize::MAX, 6), (0, 0, TEXTBOX_MAX_CHARACTERS + 1)] {
+            assert_eq!(textbox_selection(location, length, characters), None);
+        }
+    }
+
+    #[test]
+    fn textbox_text_validates_utf16_length_and_surrogate_boundaries() {
+        let text = "a😀b";
+        for (location, length) in [(0, 0), (1, 2), (3, 1), (4, 0)] {
+            assert!(textbox_text_matches(text, TextSelection { location, length }, 4));
+        }
+        for (location, length) in [(2, 0), (1, 1), (2, 1), (3, 2), (usize::MAX, 1)] {
+            assert!(!textbox_text_matches(text, TextSelection { location, length }, 4));
+        }
+        assert!(!textbox_text_matches(text, TextSelection { location: 0, length: 0 }, 3));
+        assert!(!textbox_text_matches("x", TextSelection { location: 0, length: 0 }, TEXTBOX_MAX_CHARACTERS + 1));
+        assert!(textbox_text_matches("", TextSelection { location: 0, length: 0 }, 0));
+    }
+
+    #[test]
+    fn textbox_empty_fields_need_no_range_read_but_nonempty_fields_require_one() {
+        assert_eq!(textbox_read_text(0, || panic!("empty fields must not request a parameterized range")), Some(String::new()));
+        assert_eq!(textbox_read_text(1, || None), None, "unsupported positive ranges cannot produce snapshots");
+        assert_eq!(textbox_read_text(1, || Some("x".into())), Some("x".into()));
+        assert_eq!(textbox_read_text(TEXTBOX_MAX_CHARACTERS + 1, || panic!("oversized fields must not be read")), None);
     }
 
     #[test]

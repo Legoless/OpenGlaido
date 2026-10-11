@@ -112,7 +112,7 @@ pub struct SnippetEntry {
 }
 
 pub struct Database {
-    conn: Mutex<Connection>,
+    pub(crate) conn: Mutex<Connection>,
     retries: Mutex<HashSet<String>>,
     pub app_dir: PathBuf,
 }
@@ -169,6 +169,7 @@ impl Database {
         )
         .map_err(|e| e.to_string())?;
         migrate_history(&conn).map_err(|e| e.to_string())?;
+        crate::workflow::migrate(&conn).map_err(|e| e.to_string())?;
         conn.execute("CREATE INDEX IF NOT EXISTS history_order ON history(created_at DESC, id DESC)", [])
             .map_err(|e| e.to_string())?;
 
@@ -344,6 +345,9 @@ impl Database {
             .map_err(|e| e.to_string())?;
         // Stage the row deletion, but commit only after audio removal succeeds. NotFound is already deleted.
         transaction.execute("DELETE FROM history WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+        // A legacy completion may reinsert its History row after deletion. Invalidate its
+        // evaluation writer in the same transaction, even if the history ID reappears.
+        transaction.execute("UPDATE workflow_state SET epoch = epoch + 1 WHERE id = 1", []).map_err(|e| e.to_string())?;
         if let Some(filename) = filename {
             let path = std::path::Path::new(&filename);
             if path.components().count() != 1 || !matches!(path.components().next(), Some(std::path::Component::Normal(_))) {

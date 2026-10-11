@@ -2,11 +2,12 @@ import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { Check, Copy, Flame, Mic, Pause, Play, RotateCw, ShieldCheck, Sparkles, Timer, Trash2, X } from "lucide-react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import type { HistoryItem, HistoryStats, SettingsTab } from "./types";
+import type { HistoryItem, HistoryStats, SettingsTab, TranscriptionConfig } from "./types";
 import { Bolt, EmptyState, IconButton, Modal, OutlineButton, SearchField } from "./ui";
 import { locale, t } from "./i18n";
 import { Markdown } from "./command-window";
 import { SetupCard } from "./setup";
+import { WorkflowHistory } from "./workflow-history";
 
 // ------------------------------------------------------------------
 // App icons (get_app_icon), cached for the session
@@ -128,6 +129,7 @@ function RecordPlayer({
   onRetranscribe,
   retranscribing,
   displayText,
+  config,
 }: {
   item: HistoryItem;
   onClose: () => void;
@@ -135,6 +137,7 @@ function RecordPlayer({
   onRetranscribe: (id: string) => void;
   retranscribing: boolean;
   displayText: string;
+  config?: TranscriptionConfig | null;
 }) {
   const isCommand = item.kind === "command";
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -265,6 +268,7 @@ function RecordPlayer({
             <p className={`gs-text-body-md-regular select-text ${isCommand ? "text-text-subdued" : "text-text-default"}`}>{displayText}</p>
           )}
           {isCommand && item.answer && <Markdown text={item.answer} />}
+          {!isCommand && <WorkflowHistory item={item} config={config} />}
           {item.sources.length > 0 && (
             <div className="flex flex-col gap-1">
               <span className="gs-text-tag text-text-subdued">{t("Sources")}</span>
@@ -326,6 +330,7 @@ function RecordPlayer({
 // Home page: stats + Activity (history) + record player
 // ------------------------------------------------------------------
 export function Home({
+  config,
   history,
   historyStats,
   onSearchHistory,
@@ -338,6 +343,7 @@ export function Home({
   onOpenRecord,
   onOpenSettings,
 }: {
+  config?: TranscriptionConfig | null;
   history: HistoryItem[];
   historyStats: HistoryStats;
   onSearchHistory: (query: string) => void;
@@ -567,6 +573,7 @@ export function Home({
           onRetranscribe={retranscribe}
           retranscribing={retranscribingIds.has(openRecord.id)}
           displayText={openRecord.text}
+          config={config}
         />
       )}
     </>

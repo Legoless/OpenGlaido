@@ -1,6 +1,7 @@
 pub mod audio;
 pub mod commands;
 pub mod db;
+pub mod edit_tracking;
 pub mod frontmost;
 pub mod hotkeys;
 pub mod models;
@@ -13,13 +14,15 @@ pub mod secrets;
 pub mod setup;
 pub mod sound;
 pub mod transcribe;
+pub mod workflow;
+pub mod workflow_analysis;
 mod updater;
 
 use audio::{AudioRecorder, Recording};
 use db::{Database, DictionaryEntry, HistoryEntry, SnippetEntry};
 use frontmost::{AppContext, AppInfo};
 use hotkeys::{HotkeyEngine, HotkeyEvent, HotkeyStatus};
-use transcribe::{apply_formatting, TranscriptionConfig};
+use transcribe::TranscriptionConfig;
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -112,6 +115,7 @@ pub struct AppState {
     pub session: Mutex<Option<Session>>,
     pub config: Mutex<TranscriptionConfig>,
     pub db: Arc<Database>,
+    pub edit_tracking: edit_tracking::EditTrackingState,
     /// Hotkey and tray events with the time they happened, handled in order on one worker thread.
     pub events: Sender<(HotkeyEvent, Instant)>,
     /// Transcriptions in flight; the bar stays visible until the last response finishes.
@@ -125,6 +129,7 @@ pub struct AppState {
     /// A hold whose shortcut confirmation hasn't fired yet (token of that press).
     pub pending_start: Mutex<Option<u64>>,
     pub start_token: std::sync::atomic::AtomicU64,
+    workflow_reset: Mutex<Option<Instant>>,
 }
 
 /// Command hotkeys only exist while beta features are on (the Commands screen is beta).
@@ -157,6 +162,59 @@ pub struct Session {
     delivery: Option<paste::DeliveryTicket>,
     pub processing: Option<processing::Job>,
     focus: Option<frontmost::FocusTarget>,
+    workflow: Option<WorkflowCapture>,
+}
+
+struct WorkflowCapture {
+    started: Instant,
+    stopped: Option<Instant>,
+    capture_ready_ms: u64,
+    epoch: u64,
+    dictionary_revision: String,
+    edit_generation: u64,
+}
+
+fn workflow_enabled(config: &TranscriptionConfig) -> bool {
+    config.beta_features && config.workflow_insights.enabled
+}
+
+fn workflow_capture_allowed(config: &TranscriptionConfig, started: Instant, reset: Option<Instant>) -> bool {
+    workflow_enabled(config) && reset.is_none_or(|reset| started >= reset)
+}
+
+fn workflow_audio_timings(recording: &Recording, capture: &WorkflowCapture) -> workflow::WorkflowTimings {
+    workflow::WorkflowTimings {
+        capture_ready_ms: Some(capture.capture_ready_ms),
+        first_sample_ms: recording.capture.first_sample_at.map(|at| at.saturating_duration_since(capture.started).as_millis() as u64),
+        audio_duration_ms: (recording.rate > 0).then(|| recording.samples.len() as u64 * 1000 / recording.rate as u64),
+        clipping_fraction: (!recording.samples.is_empty()).then(|| recording.samples.iter().filter(|sample| sample.abs() >= 0.999).count() as f64 / recording.samples.len() as f64),
+        ..Default::default()
+    }
+}
+
+fn save_workflow_run(app: &AppHandle, state: &AppState, capture: Option<&WorkflowCapture>, run: Option<&workflow::WorkflowRun>) {
+    let Some((capture, run)) = capture.zip(run) else { return };
+    // Config opt-out and Clear serialize with this final write. Telemetry is best effort:
+    // a storage failure must never change ordinary dictation or delivery.
+    let config = state.config.lock().unwrap();
+    let mut run = run.clone();
+    run.snapshot.dictionary_changed = state.db.dictionary_revision().ok().as_deref() != Some(&capture.dictionary_revision);
+    if workflow_enabled(&config) && state.db.workflow_append_run(&run, capture.epoch).is_ok() {
+        let _ = app.emit("workflow-updated", ());
+    }
+}
+
+fn record_workflow_event(state: &AppState, epoch: Option<u64>, category: &str) {
+    let config = state.config.lock().unwrap();
+    if workflow_enabled(&config) && epoch.is_none_or(|epoch| state.db.workflow_epoch().ok() == Some(epoch)) {
+        let _ = state.db.workflow_record_event(category);
+    }
+}
+
+fn cancel_workflow_run(app: &AppHandle, state: &AppState, capture: Option<&WorkflowCapture>, run: &mut Option<workflow::WorkflowRun>) {
+    if let Some(run) = run.as_mut() { run.outcome = "cancelled".into(); }
+    save_workflow_run(app, state, capture, run.as_ref());
+    if let Some(capture) = capture { record_workflow_event(state, Some(capture.epoch), "cancelled"); }
 }
 
 impl Session {
@@ -882,6 +940,7 @@ fn set_mode(app: &AppHandle, state: &AppState, mode: &mut Mode, next: Mode) {
 
 // Caller holds the mode lock. Idle first, so a bar message does not appear as a recording.
 fn fail_start(app: &AppHandle, state: &AppState, mode: &mut Mode, notice: &Notice) {
+    if !state.command.load(Ordering::SeqCst) { record_workflow_event(state, None, "capture_failed"); }
     // Setup or live-provider validation can fail before adopting a prepared microphone.
     state.recorder.cancel();
     state.capture_ready.store(false, Ordering::SeqCst);
@@ -895,6 +954,9 @@ fn fail_start(app: &AppHandle, state: &AppState, mode: &mut Mode, notice: &Notic
 // Err (reported once by the caller) leaves the mode Idle, also when setup keeps it from starting.
 // `next` = the mode this capture records in, so the bar's first frame already matches it.
 fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: Purpose, next: Mode) -> Result<(), Notice> {
+    state.edit_tracking.cancel();
+    let edit_generation = state.edit_tracking.generation();
+    app.state::<workflow_analysis::AnalysisState>().cancel();
     state.capture_ready.store(false, Ordering::SeqCst);
     if app.state::<updater::UpdateState>().is_installing() {
         return Err(Notice::warning("OpenGlaido is installing an update."));
@@ -902,7 +964,16 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     if let Some(issue) = setup::blocker(app, purpose) {
         return Err(Notice::from_issue(issue));
     }
-    let config = state.config.lock().unwrap().clone();
+    let (config, mut workflow_capture) = {
+        let config = state.config.lock().unwrap();
+        let capture = (purpose == Purpose::Dictation && workflow_capture_allowed(&config, started, *state.workflow_reset.lock().unwrap()))
+            .then(|| state.db.workflow_epoch().ok()).flatten().map(|epoch| WorkflowCapture {
+                started, stopped: None, capture_ready_ms: 0, epoch,
+                dictionary_revision: state.db.dictionary_revision().unwrap_or_default(),
+                edit_generation,
+            });
+        (config.clone(), capture)
+    };
     let (sound_on, mute, beta) = (config.sound_feedback, config.mute_background, config.beta_features);
     // Opening runs on the audio thread while context and live providers are prepared. A
     // modifier-only hold may already have started this same local capture during its grace.
@@ -956,6 +1027,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         }
     };
     state.capture_ready.store(true, Ordering::SeqCst);
+    if let Some(capture) = workflow_capture.as_mut() { capture.capture_ready_ms = started.elapsed().as_millis() as u64; }
     update_hud(app);
     if fell_back {
         let mut vars = BTreeMap::new();
@@ -978,6 +1050,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
         output::mute_after(&state.db.app_dir, Duration::from_millis(if sound_on { 250 } else { 0 }));
     }
     *state.session.lock().unwrap() = Some(Session {
+        workflow: workflow_capture,
         purpose, context, selection: None, chime: sound_on, config, live, context_task, delivery: None, processing: None, focus,
         recorded_at: (chrono::Utc::now() - chrono::Duration::from_std(started.elapsed()).unwrap_or_default()).to_rfc3339(),
     });
@@ -1016,8 +1089,10 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<Option<(Recording, i
         delivery: None,
         processing: None,
         focus: None,
+        workflow: None,
     });
     session.processing = Some(job);
+    if let Some(capture) = session.workflow.as_mut() { capture.stopped = Some(Instant::now()); }
     let duration_ms = state
         .recording_start
         .lock()
@@ -1051,6 +1126,9 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<Option<(Recording, i
 
 // Caller holds the mode lock.
 fn cancel_capture(app: &AppHandle, state: &AppState) {
+    state.edit_tracking.cancel();
+    let epoch = state.session.lock().unwrap().as_ref().and_then(|session| session.workflow.as_ref().map(|capture| capture.epoch));
+    if let Some(epoch) = epoch { record_workflow_event(state, Some(epoch), "cancelled"); }
     end_recording_feedback(app, state);
     state.recorder.cancel();
     *state.recording_start.lock().unwrap() = None;
@@ -1223,16 +1301,58 @@ fn is_blank(text: &str) -> bool {
 
 /// Snippet (whole dictation = trigger) or the formatting rule's cleanup + dictionary corrections.
 async fn finish_text(app: &AppHandle, db: &Database, raw: &str, config: &TranscriptionConfig, context: Option<&AppContext>) -> String {
-    if let Some(snippet_content) = db.match_snippet(raw) {
-        return expand_dynamic_tags(&snippet_content);
+    finish_text_detailed(app, db, raw, config, context).await.final_text
+}
+
+pub(crate) struct FinishedText {
+    pub formatted_text: String,
+    pub final_text: String,
+    pub formatting_ms: u64,
+    pub formatting_fallback: bool,
+    pub snippet: bool,
+}
+
+pub(crate) async fn finish_text_detailed(app: &AppHandle, db: &Database, raw: &str, config: &TranscriptionConfig, context: Option<&AppContext>) -> FinishedText {
+    finish_text_with_feedback(app, db, raw, config, context, true).await
+}
+
+fn static_comparison_text(template: &str) -> Result<String, String> {
+    if ["{clipboard}", "{date}", "{time}"].iter().any(|tag| template.contains(tag)) {
+        return Err("This comparison uses a dynamic snippet or dictionary replacement. Compare a recording without clipboard, date, or time expansions.".into());
     }
-    let mut text = apply_formatting(app, raw, config, &config.formatting_for(context)).await;
+    Ok(template.to_string())
+}
+
+pub(crate) async fn finish_text_for_comparison(app: &AppHandle, db: &Database, raw: &str, config: &TranscriptionConfig, context: Option<&AppContext>) -> Result<FinishedText, String> {
+    let started = Instant::now();
+    if let Some(snippet) = db.match_snippet(raw) {
+        let text = static_comparison_text(&snippet)?;
+        return Ok(FinishedText { formatted_text: text.clone(), final_text: text, formatting_ms: started.elapsed().as_millis() as u64, formatting_fallback: false, snippet: true });
+    }
+    let result = transcribe::apply_formatting_detailed(app, raw, config, &config.formatting_for(context), false).await;
+    let mut text = result.text.clone();
+    for entry in db.get_dictionary()? {
+        if !entry.phrase.trim().is_empty() && !entry.replacement.trim().is_empty() && text.contains(&entry.phrase) {
+            text = text.replace(&entry.phrase, &static_comparison_text(&entry.replacement)?);
+        }
+    }
+    Ok(FinishedText { formatted_text: result.text, final_text: text, formatting_ms: started.elapsed().as_millis() as u64, formatting_fallback: result.fallback, snippet: false })
+}
+
+async fn finish_text_with_feedback(app: &AppHandle, db: &Database, raw: &str, config: &TranscriptionConfig, context: Option<&AppContext>, notify_missing_model: bool) -> FinishedText {
+    let started = Instant::now();
+    if let Some(snippet_content) = db.match_snippet(raw) {
+        let text = expand_dynamic_tags(&snippet_content);
+        return FinishedText { formatted_text: text.clone(), final_text: text, formatting_ms: started.elapsed().as_millis() as u64, formatting_fallback: false, snippet: true };
+    }
+    let result = transcribe::apply_formatting_detailed(app, raw, config, &config.formatting_for(context), notify_missing_model).await;
+    let mut text = result.text.clone();
     for entry in db.get_dictionary().unwrap_or_default() {
         if !entry.phrase.trim().is_empty() && !entry.replacement.trim().is_empty() {
             text = text.replace(&entry.phrase, &expand_dynamic_tags(&entry.replacement));
         }
     }
-    text
+    FinishedText { formatted_text: result.text, final_text: text, formatting_ms: started.elapsed().as_millis() as u64, formatting_fallback: result.fallback, snippet: false }
 }
 
 fn history_website(context: Option<&AppContext>) -> Option<String> {
@@ -1290,14 +1410,21 @@ async fn transcribe_and_paste(
     let cancellation = session.processing.as_ref().map(processing::Job::cancellation).unwrap_or_default();
     let interruption = recording.interruption.clone();
     let had_samples = !recording.samples.is_empty();
+    let workflow_audio = session.workflow.as_ref().map(|capture| {
+        (recording.capture.clone(), recording.rate, workflow_audio_timings(&recording, capture))
+    });
     if interruption.is_some() {
         session.live = None;
         session.delivery = None;
     }
-    let (wav, has_speech) = finish_recording(recording).await.map_err(Notice::error)?;
+    let (wav, has_speech) = finish_recording(recording).await.map_err(|error| {
+        if let Some(capture) = session.workflow.as_ref() { record_workflow_event(&state, Some(capture.epoch), "capture_failed"); }
+        Notice::error(error)
+    })?;
     session.resolve_context().await;
     eprintln!("Dictation prepared: provider={} model={} duration_ms={} speech={} wav_bytes={}", session.config.stt_provider, session.config.model_name, duration_ms, has_speech, wav.len());
     if !has_speech && interruption.is_none() {
+        if let Some(capture) = session.workflow.as_ref() { record_workflow_event(&state, Some(capture.epoch), "no_speech"); }
         return Ok(None);
     }
     let id = uuid::Uuid::new_v4().to_string();
@@ -1325,38 +1452,58 @@ async fn transcribe_and_paste(
         website: history_website(context.as_ref()),
         ..HistoryEntry::new(id.clone())
     };
+    let mut workflow_run = session.workflow.as_ref().zip(workflow_audio).map(|(capture, (metadata, rate, timings))| {
+        let mut snapshot = workflow::WorkflowSnapshot::from_config(&config, context.as_ref(), capture.dictionary_revision.clone());
+        snapshot.actual_microphone = metadata.microphone;
+        snapshot.sample_rate = Some(rate);
+        snapshot.fallback = Some(metadata.fell_back);
+        snapshot.input_kind = if session.live.is_some() { "live_original" } else { "processed_wav" }.into();
+        snapshot.preprocessing = if session.live.is_some() { "Original mono stream; History audio uses RNNoise, 16 kHz PCM" } else { "RNNoise, speech detection, 16 kHz PCM" }.into();
+        let mut run = workflow::WorkflowRun::new(&id, workflow::WorkflowRunKind::Recording, "Original recording", snapshot);
+        run.created_at = session.recorded_at.clone();
+        run.timings = timings;
+        run
+    });
     if let Some(error) = interruption {
         const MESSAGE: &str = "Recording was interrupted. Check your microphone.";
         eprintln!("Recording interrupted: {error}");
         if let Err(error) = state.db.insert_history(&HistoryEntry {
-            status: "failed".into(), error: Some(MESSAGE.into()), ..row
+            status: "failed".into(), error: Some(MESSAGE.into()), ..row.clone()
         }) {
             report_error(app, format!("Couldn't save to history: {error}"));
         }
+        if let Some(run) = workflow_run.as_mut() { run.outcome = "interrupted".into(); }
+        save_workflow_run(app, &state, session.workflow.as_ref(), workflow_run.as_ref());
         history_updated(app);
         return Err(Notice::warning(MESSAGE));
     }
     // Saved as "running" first: quitting mid-transcription leaves a record with Retry, not a lost dictation.
     let saved_early = audio_saved && state.db.insert_history(&HistoryEntry { status: "running".into(), ..row.clone() }).is_ok();
 
+    let stt_started = Instant::now();
     let transcription = match session.live.take() {
         Some(live) => cancellation.run(live.finish()).await.and_then(|result| result),
         None => transcribe::transcribe_raw_cancellable(app, wav, &config, vocab_terms(&state.db), cancellation.clone()).await,
     };
+    if let Some(run) = workflow_run.as_mut() { run.timings.stt_ms = Some(stt_started.elapsed().as_millis() as u64); }
     let raw = match transcription {
         Ok(t) => t,
         Err(e) => {
             // Keep the audio: the record shows "Transcription failed" with Retry.
             if saved_early {
-                let _ = state.db.update_history(&HistoryEntry { status: "failed".into(), error: Some(e.clone()), ..row });
+                let _ = state.db.update_history(&HistoryEntry { status: "failed".into(), error: Some(e.clone()), ..row.clone() });
                 history_updated(app);
             }
+            if let Some(run) = workflow_run.as_mut() { run.outcome = if cancellation.is_cancelled() { "cancelled" } else { "stt_failed" }.into(); }
+            save_workflow_run(app, &state, session.workflow.as_ref(), workflow_run.as_ref());
+            if let Some(capture) = session.workflow.as_ref() { record_workflow_event(&state, Some(capture.epoch), if cancellation.is_cancelled() { "cancelled" } else { "stt_failed" }); }
             if cancellation.is_cancelled() { return Ok(None); }
             return Err(Notice::model_error(e));
         }
     };
     eprintln!("Dictation transcribed: chars={}", raw.chars().count());
     if is_blank(&raw) {
+        if let Some(capture) = session.workflow.as_ref() { record_workflow_event(&state, Some(capture.epoch), "empty_stt"); }
         if saved_early {
             let _ = state.db.delete_history_entry(&id);
         }
@@ -1366,8 +1513,10 @@ async fn transcribe_and_paste(
         return Ok(None);
     }
 
+    if let Some(run) = workflow_run.as_mut() { run.raw_text = raw.clone(); }
     if cancellation.is_cancelled() {
-        mark_cancelled(app, &row);
+        mark_cancelled(app, &HistoryEntry { raw_text: raw.clone(), ..row });
+        cancel_workflow_run(app, &state, session.workflow.as_ref(), &mut workflow_run);
         return Ok(None);
     }
 
@@ -1384,10 +1533,22 @@ async fn transcribe_and_paste(
         return Ok(None);
     }
 
-    let final_text = match cancellation.run(finish_text(app, &state.db, &raw, &config, context.as_ref())).await {
+    let finished = match cancellation.run(finish_text_detailed(app, &state.db, &raw, &config, context.as_ref())).await {
         Ok(text) => text,
-        Err(_) => { mark_cancelled(app, &HistoryEntry { raw_text: raw, ..row }); return Ok(None); }
+        Err(_) => {
+            mark_cancelled(app, &HistoryEntry { raw_text: raw, ..row });
+            cancel_workflow_run(app, &state, session.workflow.as_ref(), &mut workflow_run);
+            return Ok(None);
+        }
     };
+    if let Some(run) = workflow_run.as_mut() {
+        run.raw_text = raw.clone();
+        run.formatted_text = finished.formatted_text.clone();
+        run.final_text = finished.final_text.clone();
+        run.timings.formatting_ms = Some(finished.formatting_ms);
+        run.outcome = if finished.snippet { "snippet" } else if finished.formatting_fallback { "formatting_fallback" } else { "completed" }.into();
+    }
+    let final_text = finished.final_text;
 
     // Make a completed transcript recoverable before waiting for another delivery or touching the clipboard.
     let entry = HistoryEntry { text: final_text.clone(), raw_text: raw, ..row };
@@ -1404,30 +1565,48 @@ async fn transcribe_and_paste(
     let keep_in_clipboard = config.copy_to_clipboard || !can_paste;
     let text = final_text.clone();
     let paste_app = app.clone();
+    let edit_context = session.workflow.as_ref().filter(|_| config.workflow_insights.track_edits)
+        .map(|capture| paste::EditTrackingContext { history_id: id.clone(), epoch: capture.epoch, generation: capture.edit_generation });
     let delivery = session.delivery.take();
     if let Some(ticket) = delivery.as_ref() {
         if cancellation.run(ticket.wait()).await.is_err() {
             mark_cancelled(app, &entry);
+            cancel_workflow_run(app, &state, session.workflow.as_ref(), &mut workflow_run);
             return Ok(None);
         }
     }
     let activity = app.state::<updater::UpdateState>().activity().map_err(Notice::error)?;
+    if let Some(run) = workflow_run.as_mut() {
+        run.timings.delivery_requested_ms = session.workflow.as_ref().and_then(|capture| capture.stopped.map(|stopped| stopped.elapsed().as_millis() as u64));
+    }
     eprintln!("Dictation paste: current focus accessibility={} chars={}", can_paste, final_text.chars().count());
     match tauri::async_runtime::spawn_blocking(move || {
         // The native operation owns its turn even if the awaiting task is cancelled.
         let _delivery = delivery;
         let _activity = activity;
-        paste::paste_text_cancellable(&paste_app, &text, keep_in_clipboard, cancellation)
+        paste::paste_text_cancellable_tracked(&paste_app, &text, keep_in_clipboard, cancellation, edit_context)
     }).await {
-        Ok(Ok(())) if !can_paste => report_error(
-            app,
-            "Copied to clipboard: allow OpenGlaido in Privacy & Security › Accessibility to paste automatically",
-        ),
+        Ok(Ok(())) if !can_paste => {
+            if let Some(run) = workflow_run.as_mut() { run.outcome = "clipboard_only".into(); }
+            report_error(app, "Copied to clipboard: allow OpenGlaido in Privacy & Security › Accessibility to paste automatically");
+        },
         Ok(Ok(())) => eprintln!("Dictation paste shortcut posted"),
-        Ok(Err(e)) if e == processing::CANCELLED => { mark_cancelled(app, &entry); return Ok(None); }
-        Ok(Err(e)) => report_error(app, format!("Couldn't paste: {}", e)),
-        Err(e) => report_error(app, format!("Couldn't paste: {}", e)),
+        Ok(Err(e)) if e == processing::CANCELLED => {
+            mark_cancelled(app, &entry);
+            cancel_workflow_run(app, &state, session.workflow.as_ref(), &mut workflow_run);
+            return Ok(None);
+        }
+        Ok(Err(e)) => {
+            if let Some(run) = workflow_run.as_mut() { run.outcome = "paste_failed".into(); }
+            report_error(app, format!("Couldn't paste: {}", e));
+        },
+        Err(e) => {
+            if let Some(run) = workflow_run.as_mut() { run.outcome = "paste_failed".into(); }
+            report_error(app, format!("Couldn't paste: {}", e));
+        },
     }
+
+    save_workflow_run(app, &state, session.workflow.as_ref(), workflow_run.as_ref());
 
     Ok(Some(final_text))
 }
@@ -1507,6 +1686,7 @@ async fn save_config(
     }
     new_config.validate_formatting()?;
     new_config.validate_models()?;
+    new_config.workflow_insights.validate()?;
     // MCP prefs only change through the mcp_* commands; never let a stale UI copy overwrite them.
     let _serialized = state.config_write.lock().unwrap();
     let mut new_config = new_config;
@@ -1579,9 +1759,23 @@ async fn save_config(
     apply_ui_settings(&app, &new_config, Some(&old));
 
     let mode = state.mode.lock().unwrap();
-    *state.config.lock().unwrap() = new_config.clone();
+    let collection_changed = workflow_enabled(&new_config) != workflow_enabled(&old);
+    {
+        let mut config = state.config.lock().unwrap();
+        *config = new_config.clone();
+        if collection_changed {
+            *state.workflow_reset.lock().unwrap() = Some(Instant::now());
+            let _ = state.db.workflow_invalidate_writers();
+        }
+    }
     engine.set_submit_enabled(submit_enabled(*mode, &new_config));
     drop(mode);
+    if collection_changed || (!new_config.workflow_insights.cloud_analysis && old.workflow_insights.cloud_analysis) {
+        app.state::<workflow_analysis::AnalysisState>().cancel();
+    }
+    if collection_changed || new_config.workflow_insights.track_edits != old.workflow_insights.track_edits {
+        state.edit_tracking.cancel();
+    }
     load_local_models(&app, &new_config, Some(&old));
     update_hud(&app);
     // The dictation bar and command window follow language changes.
@@ -1592,6 +1786,67 @@ async fn save_config(
 #[tauri::command]
 fn get_hotkey_status(engine: State<'_, HotkeyEngine>) -> HotkeyStatus {
     engine.status()
+}
+
+#[derive(serde::Serialize)]
+struct WorkflowReport {
+    entries: Vec<workflow::WorkflowEntry>,
+    events: Vec<workflow::WorkflowEventCount>,
+}
+
+#[tauri::command]
+async fn workflow_get_entry(history_id: String, state: State<'_, AppState>) -> Result<workflow::WorkflowEntry, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || db.workflow_entry(&history_id)).await.map_err(|_| "Workflow evidence is unavailable".to_string())?
+}
+
+#[tauri::command]
+async fn workflow_report(state: State<'_, AppState>) -> Result<WorkflowReport, String> {
+    let db = state.db.clone();
+    tauri::async_runtime::spawn_blocking(move || Ok(WorkflowReport { entries: db.workflow_list(200)?, events: db.workflow_events()? }))
+        .await.map_err(|_| "Workflow evidence is unavailable".to_string())?
+}
+
+#[tauri::command]
+async fn workflow_save_feedback(app: AppHandle, history_id: String, feedback: workflow::WorkflowFeedback, state: State<'_, AppState>) -> Result<workflow::WorkflowEntry, String> {
+    let analysis = app.state::<workflow_analysis::AnalysisState>();
+    if analysis.status().history_id.as_deref() == Some(&history_id) { analysis.cancel(); }
+    let config = state.config.lock().map_err(|_| "Settings are unavailable")?;
+    if !workflow_enabled(&config) { return Err("Enable Workflow Insights in Beta features first".into()); }
+    let entry = state.db.workflow_set_feedback(&history_id, &feedback)?;
+    let _ = app.emit("workflow-updated", ());
+    Ok(entry)
+}
+
+#[tauri::command]
+async fn workflow_confirm_edit(app: AppHandle, history_id: String, expected_observed_at: String, state: State<'_, AppState>) -> Result<workflow::WorkflowEntry, String> {
+    state.edit_tracking.cancel();
+    app.state::<workflow_analysis::AnalysisState>().cancel();
+    let config = state.config.lock().map_err(|_| "Settings are unavailable")?;
+    if !workflow_enabled(&config) { return Err("Enable Workflow Insights in Beta features first".into()); }
+    let entry = state.db.workflow_confirm_edit(&history_id, &expected_observed_at)?;
+    let _ = app.emit("workflow-updated", ());
+    Ok(entry)
+}
+
+#[tauri::command]
+async fn workflow_dismiss_edit(app: AppHandle, history_id: String, expected_observed_at: String, state: State<'_, AppState>) -> Result<workflow::WorkflowEntry, String> {
+    state.edit_tracking.cancel();
+    let _config = state.config.lock().map_err(|_| "Settings are unavailable")?;
+    let entry = state.db.workflow_dismiss_edit(&history_id, &expected_observed_at)?;
+    let _ = app.emit("workflow-updated", ());
+    Ok(entry)
+}
+
+#[tauri::command]
+async fn workflow_clear(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+    state.edit_tracking.cancel();
+    app.state::<workflow_analysis::AnalysisState>().cancel();
+    let _config = state.config.lock().map_err(|_| "Settings are unavailable")?;
+    *state.workflow_reset.lock().unwrap() = Some(Instant::now());
+    state.db.workflow_clear()?;
+    let _ = app.emit("workflow-updated", ());
+    Ok(())
 }
 
 /// Err = invalid on this platform; Ok(Some) = conflict warning.
@@ -1654,11 +1909,16 @@ async fn get_search_provider_key(provider: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn delete_history_entry(id: String, state: State<'_, AppState>) -> Result<(), String> {
+async fn delete_history_entry(app: AppHandle, id: String, state: State<'_, AppState>) -> Result<(), String> {
     if state.db.get_history_entry(&id)?.status == "running" {
         return Err("This recording is already being processed".into());
     }
-    state.db.delete_history_entry(&id)
+    state.edit_tracking.cancel();
+    let analysis = app.state::<workflow_analysis::AnalysisState>();
+    if analysis.status().history_id.as_deref() == Some(&id) { analysis.cancel(); }
+    state.db.delete_history_entry(&id)?;
+    let _ = app.emit("workflow-updated", ());
+    Ok(())
 }
 
 #[tauri::command]
@@ -1894,6 +2154,7 @@ pub fn run() {
                 session: Mutex::new(None),
                 config: Mutex::new(config.clone()),
                 db: Arc::new(db),
+                edit_tracking: edit_tracking::EditTrackingState::default(),
                 events,
                 jobs: AtomicUsize::new(0),
                 responses: processing::Responses::default(),
@@ -1902,7 +2163,9 @@ pub fn run() {
                 config_write: Mutex::new(()),
                 pending_start: Mutex::new(None),
                 start_token: std::sync::atomic::AtomicU64::new(0),
+                workflow_reset: Mutex::new(None),
             });
+            app.manage(workflow_analysis::AnalysisState::default());
 
             // Menu bar icon; its menu is built by refresh_tray (English until the frontend sends translations).
             app.manage(TrayLabels(Mutex::new(["Microphone", "System Default", "Show OpenGlaido", "Quit"].map(String::from))));
@@ -2034,6 +2297,17 @@ pub fn run() {
             cancel_recording,
             get_config,
             save_config,
+            workflow_get_entry,
+            workflow_report,
+            workflow_save_feedback,
+            workflow_confirm_edit,
+            workflow_dismiss_edit,
+            workflow_clear,
+            workflow_analysis::workflow_compare,
+            workflow_analysis::workflow_compare_preview,
+            workflow_analysis::workflow_judge,
+            workflow_analysis::workflow_cancel,
+            workflow_analysis::workflow_analysis_status,
             get_hotkey_status,
             check_hotkey,
             start_hotkey_capture,
@@ -2120,6 +2394,7 @@ fn create_windows(app: &tauri::App) -> tauri::Result<()> {
 }
 
 fn prepare_exit(app: &AppHandle) {
+    if let Some(state) = app.try_state::<AppState>() { state.edit_tracking.cancel(); }
     commands::shutdown(app);
     // ponytail: waits for a running local transcription; whisper's abort callback if that grows.
     models::stt::unload_now();
@@ -2130,6 +2405,61 @@ fn prepare_exit(app: &AppHandle) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workflow_measurements_require_both_beta_and_explicit_opt_in() {
+        let mut config = TranscriptionConfig::default();
+        assert!(!workflow_enabled(&config));
+        config.beta_features = true;
+        assert!(!workflow_enabled(&config));
+        config.workflow_insights.enabled = true;
+        assert!(workflow_enabled(&config));
+        assert!(!config.workflow_insights.cloud_analysis);
+        config.beta_features = false;
+        assert!(!workflow_enabled(&config));
+    }
+
+    #[test]
+    fn clearing_or_changing_consent_excludes_an_older_pending_capture() {
+        let mut config = TranscriptionConfig { beta_features: true, workflow_insights: workflow::WorkflowSettings { enabled: true, ..Default::default() }, ..Default::default() };
+        let press = Instant::now();
+        let reset = press + Duration::from_millis(50);
+        assert!(workflow_capture_allowed(&config, press, None));
+        assert!(!workflow_capture_allowed(&config, press, Some(reset)));
+        assert!(workflow_capture_allowed(&config, reset + Duration::from_millis(1), Some(reset)));
+        config.workflow_insights.enabled = false;
+        assert!(!workflow_capture_allowed(&config, reset + Duration::from_millis(1), Some(reset)));
+    }
+
+    #[test]
+    fn comparisons_refuse_dynamic_context_instead_of_reading_current_clipboard() {
+        for template in ["{clipboard}", "prefix {clipboard} suffix", "{date}", "at {time}"] {
+            assert!(static_comparison_text(template).is_err());
+        }
+        assert_eq!(static_comparison_text("fixed replacement").unwrap(), "fixed replacement");
+        assert_eq!(static_comparison_text("{literal braces}").unwrap(), "{literal braces}");
+    }
+
+    #[test]
+    fn workflow_audio_evidence_separates_startup_from_captured_duration() {
+        let started = Instant::now();
+        let capture = WorkflowCapture { started, stopped: None, capture_ready_ms: 320, epoch: 0, dictionary_revision: String::new(), edit_generation: 0 };
+        let recording = Recording {
+            samples: vec![0.0, 1.0, -1.0, 0.5], rate: 1000, interruption: None,
+            capture: audio::CaptureMetadata { first_sample_at: Some(started + Duration::from_millis(350)), ..Default::default() },
+        };
+        let timings = workflow_audio_timings(&recording, &capture);
+        assert_eq!(timings.capture_ready_ms, Some(320));
+        assert_eq!(timings.first_sample_ms, Some(350));
+        assert_eq!(timings.audio_duration_ms, Some(4));
+        assert_eq!(timings.clipping_fraction, Some(0.5));
+        assert!(timings.delivery_requested_ms.is_none());
+        let empty = Recording { samples: Vec::new(), rate: 0, interruption: None, capture: Default::default() };
+        let timings = workflow_audio_timings(&empty, &capture);
+        assert!(timings.audio_duration_ms.is_none());
+        assert!(timings.first_sample_ms.is_none());
+        assert!(timings.clipping_fraction.is_none());
+    }
 
     #[test]
     fn windows_wait_for_setup() {
@@ -2519,6 +2849,7 @@ mod tests {
             purpose: Purpose::Dictation, context: Some(original.clone()), selection: None,
             chime: false, config: TranscriptionConfig::default(), live: None, context_task: None, delivery: None, processing: None, focus: None,
             recorded_at: chrono::Utc::now().to_rfc3339(),
+            workflow: None,
         };
         let (tx, rx) = tokio::sync::oneshot::channel();
         session.context_task = Some(rx);

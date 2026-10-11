@@ -1,0 +1,166 @@
+<!doctype html>
+<!-- Run bun run dev, open /scripts/workflow-check.html, then await runWorkflowChecks(). -->
+<html lang="en"><head><meta charset="UTF-8"><title>Workflow Insights regression check</title></head><body>
+<div id="root"></div>
+<script type="module">
+import React, { useState } from "react";
+import { createRoot } from "react-dom/client";
+import { Modal } from "/src/ui.tsx";
+import { WorkflowSettings } from "/src/workflow-settings.tsx";
+import { WorkflowEntryModal } from "/src/workflow-history.tsx";
+import "/src/index.css";
+const e = React.createElement;
+const item = { id: "history", text: "Changed History retry text", raw_text: "Changed History retry raw", duration_ms: 4000, audio_filename: "history.wav", created_at: "2026-10-11", kind: "dictation", status: "ok", sources: [] };
+const original = { id: "original", history_id: item.id, created_at: "2026-10-11", kind: "recording", label: "Original", outcome: "completed", raw_text: "Call MXL at four", formatted_text: "Call MXL at 4.", final_text: "Call MXL at 4.",
+  snapshot: { stt: { source: "cloud", provider: "openai", model_name: "gpt-transcribe" }, llm: { source: "off", provider: "off", model_name: "" }, live: false, configured_backups: [], winning_provider: null, style: "standard", raw_text: false, rule_id: null, system_prompt: "Format text", languages: ["en"], dictionary_revision: "dictionary-one", dictionary_changed: false, app_version: "2.1.0", app_bundle_id: "com.editor", app_name: "Editor", website_host: null, preprocessing: "16kHz", input_kind: "microphone", actual_microphone: "MXL", sample_rate: 48000, fallback: false },
+  timings: { capture_ready_ms: 10, first_sample_ms: 20, audio_duration_ms: 4000, stt_ms: 500, formatting_ms: 100, delivery_requested_ms: 800, clipping_fraction: 0.01 } };
+let entry = { history_id: item.id, runs: [original], feedback: [], judgements: [], scores: [{ run_id: "original", word_error: null }], edit_observation: null };
+let status = { running: false, history_id: null, kind: null };
+let listeners = new Map();
+let nextListener = 1;
+window.workflowCalls = [];
+window.workflowFailSave = false;
+const notify = () => { for (const [id, listener] of listeners) if (listener.event === "workflow-updated") listener.callback({ event: listener.event, id, payload: null }); };
+window.workflowSuggestEdit = (version = "edit-one") => {
+  entry.edit_observation = { history_id: item.id, original_text: original.final_text, edited_text: "Call MXL at six. <script>safe text<\/script>", app_bundle_id: "com.editor", observed_at: version, status: "pending" };
+  notify();
+};
+window.__TAURI_EVENT_PLUGIN_INTERNALS__ = { unregisterListener: (_event, id) => listeners.delete(id) };
+const callbacks = new Map();
+let nextCallback = 1;
+window.__TAURI_INTERNALS__ = {
+  transformCallback(callback) { const id = nextCallback++; callbacks.set(id, callback); return id; },
+  async invoke(command, args = {}) {
+    window.workflowCalls.push({ command, args });
+    if (command === "plugin:event|listen") { const id = nextListener++; listeners.set(id, { event: args.event, callback: callbacks.get(args.handler) }); return id; }
+    if (command === "plugin:event|unlisten") return;
+    if (command === "workflow_get_entry") return structuredClone(entry);
+    if (command === "workflow_report") return { entries: structuredClone([entry]), events: [] };
+    if (command === "workflow_analysis_status") return { ...status };
+    if (command === "workflow_compare_preview") return args.candidate === "raw_output" ? { audio_destination: null, text_destination: null, cloud: false, raw_output: true } : { audio_destination: "https://api.provider.example/v1/audio/transcriptions", text_destination: null, cloud: true, raw_output: false };
+    if (command === "workflow_save_feedback") {
+      const feedback = { ...args.feedback, updated_at: new Date().toISOString() };
+      entry.feedback = [...entry.feedback.filter(value => value.reference_kind !== feedback.reference_kind), feedback];
+      entry.judgements = entry.judgements.filter(value => value.reference_kind !== feedback.reference_kind);
+      notify(); return structuredClone(entry);
+    }
+    if (command === "workflow_confirm_edit" || command === "workflow_dismiss_edit") {
+      const edit = entry.edit_observation;
+      if (!edit || edit.status !== "pending" || edit.observed_at !== args.expectedObservedAt) throw Error("The suggested edit changed");
+      if (command === "workflow_confirm_edit") {
+        const feedback = { reference_kind: "output", reference_text: edit.edited_text, category: "other", updated_at: new Date().toISOString() };
+        entry.feedback = [...entry.feedback.filter(value => value.reference_kind !== "output"), feedback];
+        entry.judgements = entry.judgements.filter(value => value.reference_kind !== "output");
+      }
+      edit.status = command === "workflow_confirm_edit" ? "confirmed" : "dismissed";
+      notify(); return structuredClone(entry);
+    }
+    if (command === "workflow_compare") {
+      entry.runs.push({ ...structuredClone(original), id: `comparison-${entry.runs.length}`, kind: "comparison", label: args.candidate, raw_text: "Call MXL at four", formatted_text: "Call MXL at four", final_text: "Call MXL at four" });
+      notify(); return structuredClone(entry);
+    }
+    if (command === "workflow_judge") {
+      const reference = entry.feedback.find(value => value.reference_kind === args.referenceKind);
+      entry.judgements = ["pass", "fail", "uncertain"].map((verdict, index) => ({ id: String(index), analysis_id: "analysis", run_id: "original", reference_kind: args.referenceKind, reference_updated_at: reference.updated_at, judge: { slot: 1, provider: "custom", model_name: `judge-${index}` }, verdict, issues: [{ category: "names", excerpt: "MXL", explanation: "Please review this name." }], explanation: "Evidence only", created_at: new Date().toISOString(), elapsed_ms: 10 }));
+      notify(); return structuredClone(entry);
+    }
+    if (command === "workflow_clear") { entry = { history_id: item.id, runs: [], feedback: [], judgements: [], scores: [], edit_observation: null }; notify(); return; }
+    if (command === "workflow_cancel") { status = { running: false, history_id: null, kind: null }; return; }
+    throw Error(`Unexpected command: ${command}`);
+  },
+};
+function Fixture() {
+  const [config, setConfig] = useState({ beta_features: false, workflow_insights: { enabled: false, cloud_analysis: false, track_edits: false, judges: [] }, stt_source: "cloud", endpoint_url: "https://api.provider.example/v1/audio/transcriptions", local_stt_model: "whisper", llm_source: "off" });
+  const [settings, setSettings] = useState(false);
+  const [history, setHistory] = useState(false);
+  window.workflowSetConfig = setConfig;
+  return e(React.Fragment, null,
+    e("button", { id: "settings", onClick: () => setSettings(true) }, "Open settings"),
+    e("button", { id: "history", onClick: () => setHistory(true) }, "Open recording"),
+    settings && e(Modal, { onClose: () => setSettings(false), width: "w-[760px] max-w-[94vw] p-6" }, e("h2", null, "General"), e(WorkflowSettings, { config, save: async patch => { if (window.workflowFailSave) return "Mock save failed"; setConfig(previous => ({ ...previous, ...patch })); return null; } })),
+    history && e(WorkflowEntryModal, { item, config, initialEntry: entry, onEntry: () => {}, onClose: () => setHistory(false) }));
+}
+createRoot(document.getElementById("root")).render(e(React.StrictMode, null, e(Fixture)));
+const tick = () => new Promise(resolve => setTimeout(resolve, 50));
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const current = () => [...document.querySelectorAll("dialog[open]")].at(-1);
+const button = text => [...current().querySelectorAll("button")].find(node => node.textContent === text);
+const click = async node => { assert(node, "Expected control must exist"); node.focus(); node.click(); await tick(); };
+const escape = async () => { window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true })); await tick(); };
+const select = async (label, option) => { await click([...current().querySelectorAll("button")].find(node => node.textContent === label)); await click([...current().querySelectorAll("button")].find(node => node.textContent === option)); };
+const input = async (node, value) => { const prototype = node instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(prototype, "value").set.call(node, value); node.dispatchEvent(new Event("input", { bubbles: true })); await tick(); };
+const checkLayout = dialog => { const bounds = dialog.firstElementChild.getBoundingClientRect(); assert(bounds.left >= -1 && bounds.right <= innerWidth + 1 && bounds.top >= -1 && bounds.bottom <= innerHeight + 1, "Insights must fit viewport"); const region = dialog.querySelector('[role="region"]'); assert(region.scrollWidth <= region.clientWidth + 1, "Insights must wrap without horizontal scroll"); assert(getComputedStyle(region).overflowY === "auto", "Insights content must scroll"); };
+window.runWorkflowChecks = async () => {
+  await click(document.getElementById("settings"));
+  assert(!current().querySelector('[role="switch"]'), "Beta-off settings must retain access without collection switch");
+  await click(button("View insights"));
+  assert(current().textContent.includes("Enable beta features first"), "Collection must require beta opt-in");
+  const editToggleOff = current().querySelector('[role="switch"][aria-label="Detect edits after paste"]');
+  if (editToggleOff) assert(editToggleOff.matches(":disabled") && editToggleOff.getAttribute("aria-checked") === "false", "Textbox tracking must start off and require local collection");
+  assert(current().textContent.includes("Unknown: 1"), "Unreviewed evidence must remain unknown");
+  assert(!window.workflowCalls.some(call => call.command === "workflow_compare" || call.command === "workflow_judge"), "Opening Insights must not trigger analysis");
+  checkLayout(current());
+  await escape(); await escape();
+  window.workflowSetConfig(previous => ({ ...previous, beta_features: true })); await tick();
+  await click(document.getElementById("settings")); await click(button("View insights"));
+  await click(current().querySelector('[role="switch"][aria-label="Collect local insights"]'));
+  const editToggle = current().querySelector('[role="switch"][aria-label="Detect edits after paste"]');
+  if (editToggle) {
+    assert(!editToggle.matches(":disabled") && editToggle.getAttribute("aria-checked") === "false", "Local opt-in must not automatically enable textbox reads");
+    await click(editToggle);
+    assert(current().textContent.includes("surrounding text is not saved") && current().textContent.includes("after 2 minutes"), "Textbox opt-in must disclose bounded destination-field reads");
+  }
+  const details = current().querySelector("details"); details.open = true; await tick();
+  assert(current().querySelector('[role="switch"][aria-label="Allow cloud analysis"]').getAttribute("aria-checked") === "false", "Cloud consent must remain separate");
+  const fields = [...current().querySelectorAll("fieldset")].filter(node => node.querySelector('input[placeholder="Model name"]'));
+  for (let i = 0; i < fields.length; i++) { await input(fields[i].querySelector('input[placeholder="Model name"]'), `judge-${i}`); await input(fields[i].querySelector('input[placeholder="Endpoint URL"]'), "http://localhost:1234/v1/chat/completions"); }
+  assert(!button("Save judges").disabled, "Three distinct local models must be saveable");
+  await click(button("Save judges")); checkLayout(current());
+  await escape(); await escape();
+  await click(document.getElementById("history"));
+  assert(current().querySelector("textarea").value === original.raw_text, "Spoken reference must be seeded from immutable original, not History retry");
+  assert(button("Compare").disabled && button("Run 3 judges").disabled, "Cloud compare and unconfirmed jury must be disabled");
+  await click(button("Mark original correct"));
+  const feedbackCalls = window.workflowCalls.filter(call => call.command === "workflow_save_feedback");
+  assert(feedbackCalls.length === 1 && feedbackCalls[0].args.feedback.reference_kind === "spoken", "Correct must explicitly confirm only the selected reference kind");
+  await select("What I said", "What I wanted pasted");
+  assert(current().querySelector("textarea").value === original.final_text, "Output reference must use immutable final text");
+  await input(current().querySelector("textarea"), "Call MXL at five."); await click(button("Save confirmed reference"));
+  assert(item.text === "Changed History retry text", "Feedback must not overwrite History");
+  await select("Current setup", "Original raw text (no requests)");
+  assert(!button("Compare").disabled, "Raw baseline must work without cloud consent");
+  await click(button("Compare"));
+  assert(entry.runs.length === 2, "Comparison must add evidence without replacing original");
+  assert(!button("Run 3 judges").disabled, "Local jury must run with a saved selected reference without cloud consent");
+  await click(button("Run 3 judges"));
+  assert(current().textContent.includes("Judges disagree") && current().textContent.includes("Uncertain"), "Jury disagreement and uncertainty must remain visible");
+  assert(current().textContent.includes("insertion into another app is not verified"), "Delivery must not claim a proven insertion");
+  const referenceCount = entry.feedback.length;
+  const oldSpoken = entry.feedback.find(value => value.reference_kind === "spoken");
+  window.workflowSuggestEdit(); await tick();
+  assert(entry.feedback.length === referenceCount && entry.feedback.find(value => value.reference_kind === "output").reference_text === "Call MXL at five.", "Detected edits must not replace confirmed references automatically");
+  assert(current().textContent.includes("This replaces your saved desired-output reference."), "Confirmation must disclose replacement");
+  assert(!current().querySelector("script"), "Suggestion must render safe plain text");
+  assert(!button("Use as desired output").disabled, "Opted-in review may explicitly confirm desired output");
+  await click(button("Use as desired output"));
+  assert(entry.edit_observation.status === "confirmed" && entry.feedback.find(value => value.reference_kind === "output").category === "other", "Textbox confirmation must update only desired output without inferring a cause");
+  assert(JSON.stringify(entry.feedback.find(value => value.reference_kind === "spoken")) === JSON.stringify(oldSpoken), "Textbox edits must not alter verified spoken text");
+  assert(entry.judgements.every(value => value.reference_kind !== "output"), "Confirmation must invalidate prior desired-output jury votes");
+  assert(!button("Use as desired output") && current().textContent.includes("Saved as desired output"), "Confirmed suggestion must not remain actionable");
+  checkLayout(current());
+  window.workflowSuggestEdit("dismiss-only"); await tick();
+  window.workflowSetConfig(previous => ({ ...previous, workflow_insights: { ...previous.workflow_insights, enabled: false } })); await tick();
+  assert(!button("Run 3 judges") && !button("Save confirmed reference"), "Opt-out must remove mutation actions while retaining evidence");
+  assert(button("Use as desired output").disabled && !button("Dismiss").disabled, "Opt-out may dismiss but cannot confirm suggestions");
+  await click(button("Dismiss"));
+  assert(entry.edit_observation.status === "dismissed" && current().textContent.includes("Dismissed"), "Dismissal must retire suggestion without creating feedback");
+  assert(current().textContent.includes("Call MXL at six."), "Opt-out must retain saved feedback");
+  await escape();
+  await click(document.getElementById("settings")); await click(button("View insights"));
+  await click(button("Clear insights data")); await click(button("Confirm clear insights"));
+  assert(entry.runs.length === 0 && entry.feedback.length === 0 && !entry.edit_observation, "Clear must erase Insights data and suggestions");
+  assert(item.audio_filename === "history.wav" && item.text === "Changed History retry text", "Clear must retain History/audio");
+  await escape(); await escape();
+  return "Passed: separate opt-ins, no passive analysis, cloud consent, judge configuration, immutable references, raw baseline, jury disagreement, textbox suggestions/explicit output confirmation/dismissal, opt-out, clear, nested modal and viewport.";
+};
+</script></body></html>

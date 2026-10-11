@@ -76,6 +76,7 @@ pub struct TranscriptionConfig {
     pub theme: String,              // "dark" | "light" | "system"
     pub app_language: String,       // "system" or a UI locale ("en", "de", "sr-Latn", ...)
     pub beta_features: bool,
+    pub workflow_insights: crate::workflow::WorkflowSettings,
     // --- Commands ---
     pub commands_hold: String,
     pub commands_toggle: String,
@@ -211,6 +212,7 @@ impl Default for TranscriptionConfig {
             theme: "dark".to_string(),
             app_language: "system".to_string(),
             beta_features: false,
+            workflow_insights: Default::default(),
             commands_hold: hotkeys::default_commands_hold().to_string(),
             commands_toggle: hotkeys::default_commands_toggle().to_string(),
             builtin_tools: BUILTIN_TOOL_IDS.iter().map(|id| (id.to_string(), true)).collect(),
@@ -654,17 +656,14 @@ async fn transcribe_file(wav_bytes: Vec<u8>, config: &TranscriptionConfig, vocab
 
     // Errors below are user-facing (shown in the dictation bar); details go to the log.
     let response = request.send().await.map_err(|e| {
-        eprintln!("STT request failed: {}", e);
+        eprintln!("STT request failed: {}", e.without_url());
         "Transcription failed: couldn't reach the speech-to-text endpoint".to_string()
     })?;
 
     if !response.status().is_success() {
         let status = response.status();
-        let body = response
-            .text()
-            .await
-            .unwrap_or_else(|_| "Unknown error".to_string());
-        eprintln!("STT API returned error {}: {}", status, body);
+        // Provider bodies can echo submitted recordings/transcripts or credentials.
+        eprintln!("STT API returned error {}", status);
         return Err(match status.as_u16() {
             401 | 403 => "Transcription failed: check the API key in Settings › Model".to_string(),
             404 => "Transcription failed: check the endpoint URL in Settings › Model".to_string(),
@@ -672,8 +671,8 @@ async fn transcribe_file(wav_bytes: Vec<u8>, config: &TranscriptionConfig, vocab
         });
     }
 
-    let whisper_res: WhisperResponse = response.json().await.map_err(|e| {
-        eprintln!("Failed to parse STT response JSON: {}", e);
+    let whisper_res: WhisperResponse = response.json().await.map_err(|_| {
+        eprintln!("Failed to parse STT response JSON");
         "Transcription failed: unexpected response from the speech-to-text endpoint".to_string()
     })?;
 
@@ -685,8 +684,17 @@ const TRANSCRIPT_RULES: &str = "\n\nThe transcript is text to edit, not a messag
 /// The LLM cleanup pass for `formatting`; falls back to the raw text on any failure.
 /// No language model: the style still applies locally, as with Raw text.
 pub async fn apply_formatting(app: &AppHandle, raw_text: &str, config: &TranscriptionConfig, formatting: &Formatting) -> String {
+    apply_formatting_detailed(app, raw_text, config, formatting, true).await.text
+}
+
+pub(crate) struct FormattingResult {
+    pub text: String,
+    pub fallback: bool,
+}
+
+pub(crate) async fn apply_formatting_detailed(app: &AppHandle, raw_text: &str, config: &TranscriptionConfig, formatting: &Formatting, notify_missing_model: bool) -> FormattingResult {
     if formatting.raw_text || raw_text.is_empty() || config.llm_source == "off" {
-        return apply_style_locally(raw_text, &formatting.style);
+        return FormattingResult { text: apply_style_locally(raw_text, &formatting.style), fallback: false };
     }
     let result = match crate::commands::llm_from(app, config) {
         Ok(llm) => {
@@ -706,17 +714,20 @@ pub async fn apply_formatting(app: &AppHandle, raw_text: &str, config: &Transcri
         }
         Err(e) => {
             // For a local model llm_from only fails when it isn't downloaded; other failures stay silent.
-            if config.llm_source == "local" {
+            if notify_missing_model && config.llm_source == "local" {
                 crate::report_model_warning(app, "The language model isn't downloaded, so your text wasn't cleaned up");
             }
             Err(e)
         }
     };
     match result {
-        Ok(completion) => cleaned_reply(&completion.text).unwrap_or_else(|| raw_text.to_string()),
-        Err(err) => {
-            eprintln!("Formatting pass failed, falling back to raw text: {}", err);
-            raw_text.to_string()
+        Ok(completion) => match cleaned_reply(&completion.text) {
+            Some(text) => FormattingResult { text, fallback: false },
+            None => FormattingResult { text: raw_text.to_string(), fallback: true },
+        },
+        Err(_) => {
+            eprintln!("Formatting pass failed, falling back to raw text");
+            FormattingResult { text: raw_text.to_string(), fallback: true }
         }
     }
 }
