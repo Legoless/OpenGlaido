@@ -93,6 +93,7 @@ Details: [local transcription models](docs/local-transcription-models.md), [Micr
 
 - **Cost:** you pay cloud providers directly. Each enabled live backup may charge for the recording, even when its transcript is unused. Models on your Mac have no per-request fees. Dictionary hints add 20% to ElevenLabs costs.
 - **On your computer:** settings, history (until you delete it), dictionary, snippets and recordings. API keys go in the system keychain.
+- **Microphone:** opens when you press your dictation shortcut. While a modifier shortcut is being confirmed, audio stays on your computer and is discarded if the shortcut is canceled.
 - **Sent to cloud transcription:** your recording and dictionary hints. **Real time** models send your raw audio while you're still speaking.
 - **Sent to a cloud language model:** the transcript, your style and instructions. Commands also send your request, the app's name, any text you've selected (Mac) and whatever their tools look up.
 - Web searches go only to your search provider. Reading a page or YouTube video fetches it from that site. Models come from Hugging Face; update checks go to GitHub.

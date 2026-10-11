@@ -66,7 +66,7 @@ enum Effect {
     Cancel,
 }
 
-/// Recording state machine. `held` = time since the press; `pending` = mic start still delayed.
+/// Recording state machine. `held` = time since the press; `pending` = shortcut not yet confirmed.
 fn transition(mode: Mode, event: HotkeyEvent, held: Duration, pending: bool) -> (Mode, Effect) {
     use HotkeyEvent::*;
     use Mode::*;
@@ -101,6 +101,8 @@ pub struct AppState {
     pub mode: Mutex<Mode>,
     /// Mirror of `mode != Idle` that can be read without the mode lock (dictation bar).
     pub recording: AtomicBool,
+    /// Startup succeeded; the bar must not present a pending shortcut as ready to record.
+    capture_ready: AtomicBool,
     /// The current or most recent capture is a Commands recording (bar icon).
     pub command: AtomicBool,
     /// `mode` is hands-free, readable without the mode lock (the bar's cancel button).
@@ -120,7 +122,7 @@ pub struct AppState {
     pub hud: Mutex<HudVisibility>,
     /// Serializes settings changes (save_config vs backend update_config).
     pub config_write: Mutex<()>,
-    /// A hold whose delayed start hasn't fired yet (token of that press).
+    /// A hold whose shortcut confirmation hasn't fired yet (token of that press).
     pub pending_start: Mutex<Option<u64>>,
     pub start_token: std::sync::atomic::AtomicU64,
 }
@@ -145,7 +147,7 @@ pub struct Session {
     pub purpose: Purpose,
     pub context: Option<AppContext>,
     pub selection: Option<String>,
-    /// The start chime played (its first ~150 ms are cut from the audio).
+    /// Interaction sounds are enabled for this recording.
     pub chime: bool,
     /// Model and formatting choices for this recording, even if settings change meanwhile.
     pub config: TranscriptionConfig,
@@ -222,8 +224,6 @@ fn choose_mic(saved: &mut Vec<String>, choice: Option<String>, devices: &[String
     saved.retain(|name| *name != choice);
     saved.insert(at, choice);
 }
-
-const CHIME_TRIM_MS: u32 = 150;
 
 /// A bar/toast message. `message` stays an English translation key; `vars` fills `{placeholders}`.
 struct Notice {
@@ -415,7 +415,7 @@ pub fn update_hud(app: &AppHandle) {
     let mut bar = state.hud.lock().unwrap();
     let showing_error = state.error_until.lock().unwrap().is_some_and(|t| Instant::now() < t);
     let changed = bar.update(
-        state.recording.load(Ordering::SeqCst),
+        state.recording.load(Ordering::SeqCst) && state.capture_ready.load(Ordering::SeqCst),
         state.responses.active(),
         showing_error,
         state.command.load(Ordering::SeqCst),
@@ -882,6 +882,11 @@ fn set_mode(app: &AppHandle, state: &AppState, mode: &mut Mode, next: Mode) {
 
 // Caller holds the mode lock. Idle first, so a bar message does not appear as a recording.
 fn fail_start(app: &AppHandle, state: &AppState, mode: &mut Mode, notice: &Notice) {
+    // Setup or live-provider validation can fail before adopting a prepared microphone.
+    state.recorder.cancel();
+    state.capture_ready.store(false, Ordering::SeqCst);
+    *state.recording_start.lock().unwrap() = None;
+    *state.session.lock().unwrap() = None;
     set_mode(app, state, mode, Mode::Idle);
     report_notice(app, notice);
 }
@@ -890,6 +895,7 @@ fn fail_start(app: &AppHandle, state: &AppState, mode: &mut Mode, notice: &Notic
 // Err (reported once by the caller) leaves the mode Idle, also when setup keeps it from starting.
 // `next` = the mode this capture records in, so the bar's first frame already matches it.
 fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: Purpose, next: Mode) -> Result<(), Notice> {
+    state.capture_ready.store(false, Ordering::SeqCst);
     if app.state::<updater::UpdateState>().is_installing() {
         return Err(Notice::warning("OpenGlaido is installing an update."));
     }
@@ -898,6 +904,10 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     }
     let config = state.config.lock().unwrap().clone();
     let (sound_on, mute, beta) = (config.sound_feedback, config.mute_background, config.beta_features);
+    // Opening runs on the audio thread while context and live providers are prepared. A
+    // modifier-only hold may already have started this same local capture during its grace.
+    state.recorder.prepare_recording(&config.input_devices)
+        .map_err(|e| Notice::error(format!("Couldn't start recording: {}", e)))?;
     let focus = if purpose == Purpose::Dictation && config.cancel_on_focus_change {
         frontmost::capture_focus()
     } else {
@@ -925,8 +935,8 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     } else {
         (None, Vec::new())
     };
-    // Acknowledge the press while the device opens. Bars stay at rest until real mic levels
-    // arrive; the start chime still means the microphone is ready.
+    // Confirm the shortcut and attach live providers to the already captured prefix. Keep
+    // the recording bar hidden until microphone startup succeeds.
     *state.recording_start.lock().unwrap() = Some(started);
     state.recording.store(true, Ordering::SeqCst);
     state.command.store(purpose == Purpose::Command, Ordering::SeqCst);
@@ -937,10 +947,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
     if let Some(original) = focus.as_ref() {
         watch_recording_focus(app, started, original.clone());
     }
-    update_hud(app);
-    let fell_back = match state.recorder.start_recording_streamed(
-        &config.input_devices, inputs, if sound_on { CHIME_TRIM_MS } else { 0 },
-    ) {
+    let fell_back = match state.recorder.start_recording_streamed(&config.input_devices, inputs) {
         Ok(fell_back) => fell_back,
         Err(e) => {
             *state.recording_start.lock().unwrap() = None;
@@ -948,6 +955,8 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
             return Err(Notice::error(format!("Couldn't start recording: {}", e)));
         }
     };
+    state.capture_ready.store(true, Ordering::SeqCst);
+    update_hud(app);
     if fell_back {
         let mut vars = BTreeMap::new();
         vars.insert("name".into(), config.input_devices.first().cloned().unwrap_or_default());
@@ -978,6 +987,7 @@ fn begin_capture(app: &AppHandle, state: &AppState, started: Instant, purpose: P
 
 // Switch to processing before microphone teardown or output restoration can block the worker.
 fn end_recording_feedback(app: &AppHandle, state: &AppState) {
+    state.capture_ready.store(false, Ordering::SeqCst);
     state.recording.store(false, Ordering::SeqCst);
     app.state::<HotkeyEngine>().set_dictation_active(false);
     update_hud(app);
@@ -1015,7 +1025,7 @@ fn end_capture(app: &AppHandle, state: &AppState) -> Result<Option<(Recording, i
         .take()
         .map(|s| s.elapsed().as_millis() as i64)
         .unwrap_or(0);
-    let recording = state.recorder.stop_recording(if session.chime { CHIME_TRIM_MS } else { 0 });
+    let recording = state.recorder.stop_recording();
     // Microphone callbacks have stopped. Drain their queued audio and commit the live turn
     // immediately, in parallel with local denoising/history work.
     if recording.as_ref().is_ok_and(|recording| recording.interruption.is_none()) {
@@ -1110,6 +1120,17 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
                 let c = state.config.lock().unwrap();
                 hold_start_delay(if purpose == Purpose::Command { &c.commands_hold } else { &c.hotkey_hold })
             };
+            // Open the microphone while the modifier shortcut is being confirmed. These
+            // samples stay local until begin_capture attaches the transcription providers.
+            // A blocked setup must not open the microphone or request a permission here.
+            if setup::mic_permission(false) == setup::Mic::Granted && setup::blocker(app, purpose).is_none() {
+                let devices = state.config.lock().unwrap().input_devices.clone();
+                if let Err(e) = state.recorder.prepare_recording(&devices) {
+                    *state.pending_start.lock().unwrap() = None;
+                    fail_start(app, &state, &mut mode, &Notice::error(format!("Couldn't start recording: {}", e)));
+                    return;
+                }
+            }
             let app = app.clone();
             std::thread::spawn(move || {
                 std::thread::sleep(delay.saturating_sub(at.elapsed()));
@@ -1132,8 +1153,9 @@ fn handle_event(app: &AppHandle, event: HotkeyEvent, at: Instant) {
                 return;
             }
         }
-        // Released/aborted/cancelled before the mic ever started: nothing to stop.
+        // An ordinary shortcut or short tap discards its unconfirmed local capture.
         Effect::Stop | Effect::Cancel if not_started => {
+            state.recorder.cancel();
             *state.recording_start.lock().unwrap() = None;
             end_recording_feedback(app, &state);
         }
@@ -1865,6 +1887,7 @@ pub fn run() {
                 recorder: AudioRecorder::new(),
                 mode: Mutex::new(Mode::Idle),
                 recording: AtomicBool::new(false),
+                capture_ready: AtomicBool::new(false),
                 command: AtomicBool::new(false),
                 hands_free: AtomicBool::new(false),
                 recording_start: Mutex::new(None),
@@ -2247,7 +2270,7 @@ mod tests {
     #[test]
     fn fn_hold_responds_promptly_without_speeding_up_editing_modifiers() {
         assert_eq!(hold_start_delay("Fn"), Duration::from_millis(60));
-        for binding in ["AltRight", "ControlLeft", "ShiftLeft", "MetaRight", "Fn+AltRight"] {
+        for binding in ["AltRight", "ControlLeft", "ShiftLeft", "MetaRight", "Fn+AltRight", "ControlLeft+AltLeft"] {
             assert_eq!(hold_start_delay(binding), Duration::from_millis(150));
         }
         // Releasing or completing another shortcut during the grace period still cancels.
@@ -2315,11 +2338,15 @@ mod tests {
         // Fn then Space confirms intent before the modifier-only guard expires.
         assert_eq!(transition(Mode::Hold, TogglePressed, SHORT, true), (Mode::HandsFree, Effect::Start));
         assert_eq!(transition(Mode::Hold, TogglePressed, SHORT, false), (Mode::HandsFree, Effect::None));
-        // A short tap, another shortcut, or Esc must cancel even before capture starts.
+        // A short tap, another shortcut, or Esc must discard the unconfirmed local capture.
         for event in [HoldReleased, HoldAborted, Cancel] {
             assert_eq!(transition(Mode::Hold, event, SHORT, true), (Mode::Idle, Effect::Cancel));
         }
         assert_eq!(transition(Mode::Hold, HoldPressed, SHORT, true), (Mode::Hold, Effect::None));
+        // Ctrl+Alt+Shift aborts the pending hold before its modifier-toggle release.
+        let (mode, effect) = transition(Mode::Hold, HoldAborted, SHORT, true);
+        assert_eq!((mode, effect), (Mode::Idle, Effect::Cancel));
+        assert_eq!(transition(mode, TogglePressed, SHORT, false), (Mode::HandsFree, Effect::Start));
     }
 
     #[test]

@@ -7,11 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 
 enum AudioCommand {
+    /// Open the microphone during shortcut confirmation; audio stays local until Start.
+    Prepare(Vec<String>),
     /// Device names, first connected one wins ([] = system default); replies Ok(true) when
     /// none was connected and the default was used instead.
-    Start(Vec<String>, Vec<StreamInput>, u32, Sender<Result<bool, String>>),
-    /// Skip this many ms at the start (the start chime) and hand the samples back.
-    Stop(u32, Sender<Result<Recording, String>>),
+    Start(Vec<String>, Vec<StreamInput>, Sender<Result<bool, String>>),
+    Stop(Sender<Result<Recording, String>>),
     Cancel,
 }
 
@@ -31,15 +32,11 @@ pub struct StreamInput {
 struct StreamFeed {
     inputs: Vec<StreamInput>,
     rate: u32,
-    skip: usize,
     generation: u64,
 }
 
 impl StreamFeed {
     fn push(&mut self, samples: &[f32]) {
-        let skip = self.skip.min(samples.len());
-        self.skip -= skip;
-        let samples = &samples[skip..];
         if samples.is_empty() { return; }
         // Each provider has its own queue. A slow or disconnected consumer must never
         // block the audio callback or stop another provider from receiving speech.
@@ -55,6 +52,25 @@ impl StreamFeed {
             }
         });
     }
+
+    /// Called with capture locked, so no callback can overtake this prefix.
+    fn attach(&mut self, inputs: Vec<StreamInput>, prefix: &[f32]) {
+        self.inputs = inputs;
+        self.push(prefix);
+    }
+}
+
+struct ActiveStream {
+    stream: cpal::Stream,
+    feed: Arc<Mutex<StreamFeed>>,
+    rate: u32,
+    fell_back: bool,
+}
+
+struct PreparedCapture {
+    device_names: Vec<String>,
+    /// Preserve setup failures for the confirmed shortcut instead of hiding them or retrying.
+    result: Result<bool, String>,
 }
 
 /// Raw mono samples from a finished recording; `process` turns them into the upload.
@@ -88,15 +104,12 @@ impl CaptureState {
         true
     }
 
-    fn finish(&mut self, rate: u32, skip_ms: u32) -> Result<Recording, String> {
+    fn finish(&mut self, rate: u32) -> Result<Recording, String> {
         self.active = false;
-        let mut samples = std::mem::take(&mut self.samples);
+        let samples = std::mem::take(&mut self.samples);
         if samples.is_empty() && self.interruption.is_none() {
             return Err("No audio samples recorded".into());
         }
-        // A short healthy hold trimmed to nothing remains a successful no-speech recording.
-        let skip = (rate as usize * skip_ms as usize / 1000).min(samples.len());
-        samples.drain(..skip);
         Ok(Recording { samples, rate, interruption: self.interruption.clone() })
     }
 
@@ -355,9 +368,11 @@ fn record_chunk<T: Copy>(
     capture: &Mutex<CaptureState>,
     meter: &mut Loudness,
     level: &AtomicU32,
-    feed: &mut StreamFeed,
+    feed: &Mutex<StreamFeed>,
 ) {
     let mut capture = capture.lock().unwrap();
+    // Confirmation also locks capture before feed to attach providers and replay the prefix.
+    let mut feed = feed.lock().unwrap();
     if !capture.active || capture.generation != feed.generation || capture.interruption.is_some() { return; }
     let s = &mut capture.samples;
     let start = s.len();
@@ -386,185 +401,194 @@ impl AudioRecorder {
     }
 
     fn event_loop(rx: Receiver<AudioCommand>, level: Arc<AtomicU32>, capture: Arc<Mutex<CaptureState>>) {
-        let mut current_stream: Option<cpal::Stream> = None;
+        let mut current_stream: Option<ActiveStream> = None;
+        let mut prepared: Option<PreparedCapture> = None;
         let mut sample_rate = 16000;
 
-        loop {
-            let cmd = rx.recv();
-            // Deactivate before pause/drop: teardown callbacks are not recording failures.
-            capture.lock().unwrap().active = false;
-            // ponytail: CPAL 0.15's CoreAudio listener retains named streams; upgrade CPAL
-            // to reclaim them. Pause before drop so stop/cancel/replacement/shutdown end capture.
-            if let Some(stream) = current_stream.take() {
-                if let Err(e) = stream.pause() {
-                    eprintln!("Failed to stop audio stream: {e}");
-                }
-            }
-            level.store(0, Ordering::Relaxed);
-            let Ok(cmd) = cmd else { break };
+        while let Ok(cmd) = rx.recv() {
             match cmd {
-                AudioCommand::Start(device_names, stream_input, skip_ms, reply) => {
-                    let generation = capture.lock().unwrap().begin();
-                    let host = cpal::default_host();
-                    let named = device_names.iter().find_map(|name| {
-                        // input_devices() opens audio units for every device on macOS. Only
-                        // query matching names, and reuse the config needed to build the stream.
-                        host.devices()
-                            .ok()?
-                            .filter(|d| d.name().is_ok_and(|n| n == *name))
-                            .find_map(|device| {
-                                let config = device.default_input_config();
-                                is_input_config(&config).then_some((device, config))
+                AudioCommand::Prepare(device_names) => {
+                    // Repeated preparation during the same confirmation keeps its prefix and
+                    // setup result, including errors. A committed capture is never reused.
+                    if prepared.as_ref().is_some_and(|p| p.device_names == device_names) { continue; }
+                    Self::close_stream(&mut current_stream, &capture, &level);
+                    let result = Self::open_stream(&device_names, Vec::new(), &capture, &level).map(|stream| {
+                        sample_rate = stream.rate;
+                        let fell_back = stream.fell_back;
+                        current_stream = Some(stream);
+                        fell_back
+                    });
+                    prepared = Some(PreparedCapture { device_names, result });
+                }
+                AudioCommand::Start(device_names, inputs, reply) => {
+                    let result = match prepared.take() {
+                        Some(pending) if pending.device_names == device_names => {
+                            pending.result.inspect(|_| {
+                                let recording = capture.lock().unwrap();
+                                let stream = current_stream.as_ref().expect("prepared capture has a stream");
+                                // Atomic with callbacks: all pre-confirmation audio is delivered
+                                // once, before any subsequent chunk, and remains in saved audio.
+                                stream.feed.lock().unwrap().attach(inputs, &recording.samples);
                             })
-                    });
-                    let fell_back = !device_names.is_empty() && named.is_none();
-                    let input = named.or_else(|| {
-                        host.default_input_device().map(|device| {
-                            let config = device.default_input_config();
-                            (device, config)
-                        })
-                    });
-                    let (device, config) = match input {
-                        Some(input) => input,
-                        None => {
-                            capture.lock().unwrap().active = false;
-                            let _ = reply.send(Err("No audio input device found".to_string()));
-                            continue;
-                        }
-                    };
-
-                    let supported_config = match config {
-                        Ok(c) => c,
-                        Err(e) => {
-                            capture.lock().unwrap().active = false;
-                            let _ = reply.send(Err(format!("Input config error: {}", e)));
-                            continue;
-                        }
-                    };
-
-                    let channels = supported_config.channels() as usize;
-                    sample_rate = supported_config.sample_rate().0;
-
-                    let error_capture = Arc::clone(&capture);
-                    let err_fn = move |err| {
-                        let message = format!("Microphone recording was interrupted: {err}");
-                        if error_capture.lock().unwrap().interrupt(generation, message.clone()) {
-                            eprintln!("{message}");
-                        }
-                    };
-                    let samples_clone = Arc::clone(&capture);
-                    let level_clone = Arc::clone(&level);
-                    let mut feed = StreamFeed {
-                        inputs: stream_input,
-                        rate: sample_rate,
-                        skip: sample_rate as usize * skip_ms as usize / 1000,
-                        generation,
-                    };
-
-                    let stream_res = match supported_config.sample_format() {
-                        cpal::SampleFormat::F32 => {
-                            let samples_clone = Arc::clone(&samples_clone);
-                            let level_clone = Arc::clone(&level_clone);
-                            let mut meter = Loudness::new(sample_rate);
-                            device.build_input_stream(
-                                &supported_config.clone().into(),
-                                move |data: &[f32], _| {
-                                    record_chunk(
-                                        data,
-                                        channels,
-                                        |x| x,
-                                        &samples_clone,
-                                        &mut meter,
-                                        &level_clone,
-                                        &mut feed,
-                                    )
-                                },
-                                err_fn,
-                                None,
-                            )
-                        }
-                        cpal::SampleFormat::I16 => {
-                            let mut meter = Loudness::new(sample_rate);
-                            device.build_input_stream(
-                                &supported_config.into(),
-                                move |data: &[i16], _| {
-                                    record_chunk(
-                                        data,
-                                        channels,
-                                        |x| x as f32 / 32768.0,
-                                        &samples_clone,
-                                        &mut meter,
-                                        &level_clone,
-                                        &mut feed,
-                                    )
-                                },
-                                err_fn,
-                                None,
-                            )
                         }
                         _ => {
-                            capture.lock().unwrap().active = false;
-                            let _ = reply.send(Err("Unsupported sample format".to_string()));
-                            continue;
+                            Self::close_stream(&mut current_stream, &capture, &level);
+                            Self::open_stream(&device_names, inputs, &capture, &level).map(|stream| {
+                                sample_rate = stream.rate;
+                                let fell_back = stream.fell_back;
+                                current_stream = Some(stream);
+                                fell_back
+                            })
                         }
                     };
-
-                    match stream_res {
-                        Ok(stream) => {
-                            if let Err(e) = stream.play() {
-                                capture.lock().unwrap().active = false;
-                                let _ = stream.pause();
-                                let _ = reply.send(Err(format!("Failed to start stream: {}", e)));
-                            } else {
-                                current_stream = Some(stream);
-                                let _ = reply.send(Ok(fell_back));
-                            }
-                        }
-                        Err(e) => {
-                            capture.lock().unwrap().active = false;
-                            let _ = reply.send(Err(format!("Stream build error: {}", e)));
-                        }
-                    }
+                    let _ = reply.send(result);
                 }
-                AudioCommand::Stop(skip_ms, reply) => {
-                    let _ = reply.send(capture.lock().unwrap().finish(sample_rate, skip_ms));
+                AudioCommand::Stop(reply) => {
+                    prepared = None;
+                    Self::close_stream(&mut current_stream, &capture, &level);
+                    let _ = reply.send(capture.lock().unwrap().finish(sample_rate));
                 }
-                AudioCommand::Cancel => capture.lock().unwrap().cancel(),
+                AudioCommand::Cancel => {
+                    prepared = None;
+                    Self::close_stream(&mut current_stream, &capture, &level);
+                    capture.lock().unwrap().cancel();
+                }
             }
         }
+        Self::close_stream(&mut current_stream, &capture, &level);
+    }
+
+    fn close_stream(stream: &mut Option<ActiveStream>, capture: &Mutex<CaptureState>, level: &AtomicU32) {
+        // Deactivate before pause/drop: teardown callbacks are not recording failures.
+        capture.lock().unwrap().active = false;
+        // ponytail: CPAL 0.15's CoreAudio listener retains named streams; upgrade CPAL
+        // to reclaim them. Pause before drop so stop/cancel/replacement/shutdown end capture.
+        if let Some(stream) = stream.take() {
+            stream.feed.lock().unwrap().inputs.clear();
+            if let Err(e) = stream.stream.pause() {
+                eprintln!("Failed to stop audio stream: {e}");
+            }
+        }
+        level.store(0, Ordering::Relaxed);
+    }
+
+    fn open_stream(
+        device_names: &[String],
+        inputs: Vec<StreamInput>,
+        capture: &Arc<Mutex<CaptureState>>,
+        level: &Arc<AtomicU32>,
+    ) -> Result<ActiveStream, String> {
+        let generation = capture.lock().unwrap().begin();
+        let result = (|| {
+            let host = cpal::default_host();
+            let named = device_names.iter().find_map(|name| {
+                // input_devices() opens audio units for every device on macOS. Only
+                // query matching names, and reuse the config needed to build the stream.
+                host.devices()
+                    .ok()?
+                    .filter(|d| d.name().is_ok_and(|n| n == *name))
+                    .find_map(|device| {
+                        let config = device.default_input_config();
+                        is_input_config(&config).then_some((device, config))
+                    })
+            });
+            let fell_back = !device_names.is_empty() && named.is_none();
+            let input = named.or_else(|| {
+                host.default_input_device().map(|device| {
+                    let config = device.default_input_config();
+                    (device, config)
+                })
+            });
+            let (device, config) = input.ok_or_else(|| "No audio input device found".to_string())?;
+            let supported_config = config.map_err(|e| format!("Input config error: {e}"))?;
+            let channels = supported_config.channels() as usize;
+            let rate = supported_config.sample_rate().0;
+            let feed = Arc::new(Mutex::new(StreamFeed { inputs, rate, generation }));
+
+            let error_capture = Arc::clone(capture);
+            let err_fn = move |err| {
+                let message = format!("Microphone recording was interrupted: {err}");
+                if error_capture.lock().unwrap().interrupt(generation, message.clone()) {
+                    eprintln!("{message}");
+                }
+            };
+            let samples_clone = Arc::clone(capture);
+            let level_clone = Arc::clone(level);
+            let callback_feed = Arc::clone(&feed);
+
+            let stream_res = match supported_config.sample_format() {
+                cpal::SampleFormat::F32 => {
+                    let mut meter = Loudness::new(rate);
+                    device.build_input_stream(
+                        &supported_config.into(),
+                        move |data: &[f32], _| {
+                            record_chunk(data, channels, |x| x, &samples_clone, &mut meter, &level_clone, &callback_feed)
+                        },
+                        err_fn,
+                        None,
+                    )
+                }
+                cpal::SampleFormat::I16 => {
+                    let mut meter = Loudness::new(rate);
+                    device.build_input_stream(
+                        &supported_config.into(),
+                        move |data: &[i16], _| {
+                            record_chunk(data, channels, |x| x as f32 / 32768.0, &samples_clone, &mut meter, &level_clone, &callback_feed)
+                        },
+                        err_fn,
+                        None,
+                    )
+                }
+                _ => return Err("Unsupported sample format".to_string()),
+            };
+            let stream = stream_res.map_err(|e| format!("Stream build error: {e}"))?;
+            if let Err(e) = stream.play() {
+                capture.lock().unwrap().active = false;
+                let _ = stream.pause();
+                return Err(format!("Failed to start stream: {e}"));
+            }
+            Ok(ActiveStream { stream, feed, rate, fell_back })
+        })();
+        if result.is_err() { capture.lock().unwrap().active = false; }
+        result
+    }
+
+    /// Queues microphone startup without waiting for it. Until the matching Start arrives,
+    /// samples stay local and no live transcriber receives them. Repeating the same preparation
+    /// preserves its audio and setup result; changing device preferences opens a fresh capture.
+    pub fn prepare_recording(&self, device_names: &[String]) -> Result<(), String> {
+        self.tx.send(AudioCommand::Prepare(device_names.to_vec())).map_err(|e| e.to_string())
     }
 
     /// Starts capturing from the first connected of `device_names` ([] = system default). Returns
     /// Ok(true) when none is connected and the system default is recording instead.
     pub fn start_recording(&self, device_names: &[String]) -> Result<bool, String> {
-        self.start_recording_streamed(device_names, Vec::new(), 0)
+        self.start_recording_streamed(device_names, Vec::new())
     }
 
-    /// Also forwards new mono samples after the first `skip_ms` to live transcribers.
-    /// Use the same trim in `stop_recording` so saved audio and live audio agree.
+    /// Adopts a matching prepared capture and forwards its prefix, then every new mono chunk.
+    /// Without preparation, opens a fresh capture. A prepared setup error is returned unchanged.
     pub fn start_recording_streamed(
         &self,
         device_names: &[String],
         streams: Vec<StreamInput>,
-        skip_ms: u32,
     ) -> Result<bool, String> {
         let (reply_tx, reply_rx) = channel();
         self.tx
             .send(AudioCommand::Start(
                 device_names.to_vec(),
                 streams,
-                skip_ms,
                 reply_tx,
             ))
             .map_err(|e| e.to_string())?;
         reply_rx.recv().map_err(|e| e.to_string())?
     }
 
-    /// Stops and drops the first `skip_ms` (start chime); see `Recording::process`.
-    pub fn stop_recording(&self, skip_ms: u32) -> Result<Recording, String> {
+    /// Stops capture and keeps every captured sample; see `Recording::process`.
+    pub fn stop_recording(&self) -> Result<Recording, String> {
         let (reply_tx, reply_rx) = channel();
         self.tx
-            .send(AudioCommand::Stop(skip_ms, reply_tx))
+            .send(AudioCommand::Stop(reply_tx))
             .map_err(|e| e.to_string())?;
         let recording = reply_rx.recv().map_err(|e| e.to_string())??;
         // Debug builds only: end-to-end tests feed a WAV instead of the room (no speakers needed).
@@ -611,17 +635,17 @@ mod tests {
     fn capture_errors_keep_partial_audio_and_ignore_stale_callbacks() {
         let capture = Mutex::new(CaptureState::default());
         let generation = capture.lock().unwrap().begin();
-        let mut feed = StreamFeed { inputs: Vec::new(), rate: 16000, skip: 0, generation };
+        let feed = Mutex::new(StreamFeed { inputs: Vec::new(), rate: 16000, generation });
         let level = AtomicU32::new(0);
         let mut meter = Loudness::new(16000);
-        record_chunk(&[0.25, 0.5], 1, |x| x, &capture, &mut meter, &level, &mut feed);
+        record_chunk(&[0.25, 0.5], 1, |x| x, &capture, &mut meter, &level, &feed);
         assert!(capture.lock().unwrap().interrupt(generation, "device disconnected".into()));
         assert!(!capture.lock().unwrap().interrupt(generation, "later error".into()));
-        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &mut feed);
+        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &feed);
         // Stop deactivates before pausing CPAL, whose expected teardown errors are ignored.
         capture.lock().unwrap().active = false;
         assert!(!capture.lock().unwrap().interrupt(generation, "teardown".into()));
-        let recording = capture.lock().unwrap().finish(16000, 0).unwrap();
+        let recording = capture.lock().unwrap().finish(16000).unwrap();
         assert_eq!(recording.samples, [0.25, 0.5]);
         assert_eq!(recording.interruption.as_deref(), Some("device disconnected"));
         assert_eq!(capture.lock().unwrap().interruption, recording.interruption);
@@ -631,18 +655,18 @@ mod tests {
         assert_ne!(generation, next);
         assert!(capture.lock().unwrap().interruption.is_none());
         assert!(!capture.lock().unwrap().interrupt(generation, "old stream".into()));
-        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &mut feed);
+        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &feed);
         assert!(capture.lock().unwrap().samples.is_empty());
-        feed.generation = next;
+        feed.lock().unwrap().generation = next;
         let mut meter = Loudness::new(16000);
-        record_chunk(&[0.125], 1, |x| x, &capture, &mut meter, &level, &mut feed);
+        record_chunk(&[0.125], 1, |x| x, &capture, &mut meter, &level, &feed);
         assert_eq!(capture.lock().unwrap().samples, [0.125]);
         assert!(capture.lock().unwrap().interrupt(next, "new failure".into()));
         capture.lock().unwrap().cancel();
         assert!(capture.lock().unwrap().samples.is_empty());
         assert!(capture.lock().unwrap().interruption.is_none());
         assert!(!capture.lock().unwrap().interrupt(next, "cancel teardown".into()));
-        record_chunk(&[0.5], 1, |x| x, &capture, &mut meter, &level, &mut feed);
+        record_chunk(&[0.5], 1, |x| x, &capture, &mut meter, &level, &feed);
         assert!(capture.lock().unwrap().samples.is_empty());
     }
 
@@ -650,30 +674,29 @@ mod tests {
     fn empty_interrupted_capture_is_retained_but_healthy_empty_capture_is_an_error() {
         let mut capture = CaptureState::default();
         capture.begin();
-        assert!(capture.finish(16000, 0).is_err());
+        assert!(capture.finish(16000).is_err());
         let generation = capture.begin();
         assert!(capture.interrupt(generation, "device lost before samples".into()));
-        let recording = capture.finish(16000, 60).unwrap();
+        let recording = capture.finish(16000).unwrap();
         assert!(recording.samples.is_empty());
         assert!(recording.interruption.is_some());
         assert_eq!(&recording.process().unwrap().0[..4], b"RIFF");
         capture.begin();
         capture.samples.push(0.5);
-        let trimmed = capture.finish(16000, 60).unwrap();
-        assert!(trimmed.samples.is_empty());
-        assert!(trimmed.interruption.is_none());
+        let short = capture.finish(16000).unwrap();
+        assert_eq!(short.samples, [0.5]);
+        assert!(short.interruption.is_none());
     }
 
     #[test]
-    fn live_audio_trims_once_across_callbacks_and_sends_only_new_mono_samples() {
+    fn live_audio_keeps_the_first_sample_and_sends_only_new_mono_samples() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(4);
         let overflowed = Arc::new(AtomicBool::new(false));
-        let mut feed = StreamFeed {
+        let feed = Mutex::new(StreamFeed {
             inputs: vec![StreamInput { tx, overflowed: overflowed.clone() }],
             rate: 1000,
-            skip: 3,
             generation: 1,
-        };
+        });
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
         let mut meter = Loudness::new(1000);
         let level = AtomicU32::new(0);
@@ -683,7 +706,7 @@ mod tests {
             [0.1, 0.3, 0.5, 0.7],
             [0.2, 0.2, 0.4, 0.4],
         ] {
-            record_chunk(&data, 2, |x| x, &samples, &mut meter, &level, &mut feed);
+            record_chunk(&data, 2, |x| x, &samples, &mut meter, &level, &feed);
             while let Ok(chunk) = rx.try_recv() {
                 assert_eq!(chunk.rate, 1000);
                 streamed.extend(chunk.samples);
@@ -691,31 +714,132 @@ mod tests {
         }
         let recorded = samples.lock().unwrap();
         assert_eq!(recorded.samples.len(), 6);
-        assert_eq!(streamed, recorded.samples[3..]);
-        assert_eq!(streamed.len(), 3);
+        assert_eq!(streamed, recorded.samples);
+        assert_eq!(streamed.len(), 6);
         assert!(!overflowed.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn prepared_audio_stays_local_then_replays_once_to_all_live_inputs() {
+        let capture = Mutex::new(CaptureState::default());
+        let generation = capture.lock().unwrap().begin();
+        let feed = Mutex::new(StreamFeed { inputs: Vec::new(), rate: 48_000, generation });
+        let level = AtomicU32::new(0);
+        let mut meter = Loudness::new(48_000);
+        let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel(4);
+        let (backup_tx, mut backup_rx) = tokio::sync::mpsc::channel(4);
+        let primary_overflow = Arc::new(AtomicBool::new(false));
+        let backup_overflow = Arc::new(AtomicBool::new(false));
+
+        // Speech begins in the very first microphone sample, before shortcut confirmation.
+        record_chunk(&[0.5, 0.25], 1, |x| x, &capture, &mut meter, &level, &feed);
+        record_chunk(&[0.125], 1, |x| x, &capture, &mut meter, &level, &feed);
+        assert!(primary_rx.try_recv().is_err());
+        assert!(backup_rx.try_recv().is_err());
+        {
+            let capture = capture.lock().unwrap();
+            feed.lock().unwrap().attach(vec![
+                StreamInput { tx: primary_tx, overflowed: primary_overflow.clone() },
+                StreamInput { tx: backup_tx, overflowed: backup_overflow.clone() },
+            ], &capture.samples);
+        }
+        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &feed);
+        record_chunk(&[1.0], 1, |x| x, &capture, &mut meter, &level, &feed);
+        let recording = capture.lock().unwrap().finish(48_000).unwrap();
+        assert_eq!(recording.samples, [0.5, 0.25, 0.125, 0.75, 1.0]);
+        for receiver in [&mut primary_rx, &mut backup_rx] {
+            let mut delivered = Vec::new();
+            while let Ok(chunk) = receiver.try_recv() {
+                assert_eq!(chunk.rate, recording.rate);
+                delivered.extend(chunk.samples);
+            }
+            assert_eq!(delivered, recording.samples);
+        }
+        assert!(!primary_overflow.load(Ordering::Acquire));
+        assert!(!backup_overflow.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn canceled_preparation_and_replacement_exclude_old_audio_and_callbacks() {
+        let capture = Mutex::new(CaptureState::default());
+        let old_generation = capture.lock().unwrap().begin();
+        let old_feed = Mutex::new(StreamFeed { inputs: Vec::new(), rate: 48_000, generation: old_generation });
+        let level = AtomicU32::new(0);
+        let mut old_meter = Loudness::new(48_000);
+        record_chunk(&[0.5], 1, |x| x, &capture, &mut old_meter, &level, &old_feed);
+        capture.lock().unwrap().cancel();
+        record_chunk(&[0.75], 1, |x| x, &capture, &mut old_meter, &level, &old_feed);
+        assert!(capture.lock().unwrap().samples.is_empty());
+
+        let next_generation = capture.lock().unwrap().begin();
+        let next_feed = Mutex::new(StreamFeed { inputs: Vec::new(), rate: 16_000, generation: next_generation });
+        let mut next_meter = Loudness::new(16_000);
+        assert!(!capture.lock().unwrap().interrupt(old_generation, "old microphone disconnected".into()));
+        record_chunk(&[1.0], 1, |x| x, &capture, &mut old_meter, &level, &old_feed);
+        record_chunk(&[0.125], 1, |x| x, &capture, &mut next_meter, &level, &next_feed);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+        {
+            let capture = capture.lock().unwrap();
+            next_feed.lock().unwrap().attach(vec![
+                StreamInput { tx, overflowed: Arc::new(AtomicBool::new(false)) },
+            ], &capture.samples);
+        }
+        record_chunk(&[1.0], 1, |x| x, &capture, &mut old_meter, &level, &old_feed);
+        record_chunk(&[0.25], 1, |x| x, &capture, &mut next_meter, &level, &next_feed);
+        let recording = capture.lock().unwrap().finish(16_000).unwrap();
+        assert_eq!(recording.samples, [0.125, 0.25]);
+        let mut delivered = Vec::new();
+        while let Ok(chunk) = rx.try_recv() {
+            assert_eq!(chunk.rate, 16_000);
+            delivered.extend(chunk.samples);
+        }
+        assert_eq!(delivered, recording.samples);
+        assert!(recording.interruption.is_none());
+    }
+
+    #[test]
+    fn prepared_interruption_preserves_prefix_and_failure_on_confirmation() {
+        let capture = Mutex::new(CaptureState::default());
+        let generation = capture.lock().unwrap().begin();
+        let feed = Mutex::new(StreamFeed { inputs: Vec::new(), rate: 16_000, generation });
+        let level = AtomicU32::new(0);
+        let mut meter = Loudness::new(16_000);
+        record_chunk(&[0.5], 1, |x| x, &capture, &mut meter, &level, &feed);
+        assert!(capture.lock().unwrap().interrupt(generation, "device disconnected".into()));
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        {
+            let capture = capture.lock().unwrap();
+            feed.lock().unwrap().attach(vec![
+                StreamInput { tx, overflowed: Arc::new(AtomicBool::new(false)) },
+            ], &capture.samples);
+        }
+        record_chunk(&[0.75], 1, |x| x, &capture, &mut meter, &level, &feed);
+        let recording = capture.lock().unwrap().finish(16_000).unwrap();
+        assert_eq!(rx.try_recv().unwrap().samples, recording.samples);
+        assert!(rx.try_recv().is_err());
+        assert_eq!(recording.samples, [0.5]);
+        assert_eq!(recording.interruption.as_deref(), Some("device disconnected"));
     }
 
     #[test]
     fn live_audio_overflow_stops_sending_but_preserves_the_recording() {
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
         let overflowed = Arc::new(AtomicBool::new(false));
-        let mut feed = StreamFeed {
+        let feed = Mutex::new(StreamFeed {
             inputs: vec![StreamInput { tx, overflowed: overflowed.clone() }],
             rate: 16000,
-            skip: 0,
             generation: 1,
-        };
+        });
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
         let mut meter = Loudness::new(16000);
         let level = AtomicU32::new(0);
         for sample in [16384i16, 8192] {
-            record_chunk(&[sample], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &mut feed);
+            record_chunk(&[sample], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &feed);
         }
         assert!(overflowed.load(Ordering::Acquire));
-        assert!(feed.inputs.is_empty());
+        assert!(feed.lock().unwrap().inputs.is_empty());
         assert_eq!(rx.try_recv().unwrap().samples, vec![0.5]);
-        record_chunk(&[0i16], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &mut feed);
+        record_chunk(&[0i16], 1, |x| x as f32 / 32768.0, &samples, &mut meter, &level, &feed);
         assert!(rx.try_recv().is_err());
         assert_eq!(samples.lock().unwrap().samples, vec![0.5, 0.25, 0.0]);
     }
@@ -724,50 +848,49 @@ mod tests {
     fn canceled_live_consumer_stops_sending_without_overflow() {
         let (tx, rx) = tokio::sync::mpsc::channel(1);
         let overflowed = Arc::new(AtomicBool::new(false));
-        let mut feed = StreamFeed {
+        let feed = Mutex::new(StreamFeed {
             inputs: vec![StreamInput { tx, overflowed: overflowed.clone() }],
             rate: 16000,
-            skip: 0,
             generation: 1,
-        };
+        });
         drop(rx);
-        feed.push(&[0.5]);
-        assert!(feed.inputs.is_empty());
+        feed.lock().unwrap().push(&[0.5]);
+        assert!(feed.lock().unwrap().inputs.is_empty());
         assert!(!overflowed.load(Ordering::Acquire));
     }
 
     #[test]
-    fn live_backups_receive_identical_trimmed_audio_and_isolate_failed_queues() {
+    fn live_backups_receive_identical_audio_and_isolate_failed_queues() {
         let (primary_tx, mut primary_rx) = tokio::sync::mpsc::channel(1);
         let (backup_tx, mut backup_rx) = tokio::sync::mpsc::channel(4);
         let (third_tx, third_rx) = tokio::sync::mpsc::channel(4);
         let primary_overflow = Arc::new(AtomicBool::new(false));
         let backup_overflow = Arc::new(AtomicBool::new(false));
         let third_overflow = Arc::new(AtomicBool::new(false));
-        let mut feed = StreamFeed {
+        let feed = Mutex::new(StreamFeed {
             inputs: vec![
                 StreamInput { tx: primary_tx, overflowed: primary_overflow.clone() },
                 StreamInput { tx: backup_tx, overflowed: backup_overflow.clone() },
                 StreamInput { tx: third_tx, overflowed: third_overflow.clone() },
             ],
-            rate: 16000, skip: 2, generation: 1,
-        };
+            rate: 16000, generation: 1,
+        });
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
         let level = AtomicU32::new(0);
         let mut meter = Loudness::new(16000);
-        record_chunk(&[0.1, 0.2, 0.3], 1, |x| x, &samples, &mut meter, &level, &mut feed);
-        assert_eq!(primary_rx.try_recv().unwrap().samples, [0.3]);
-        assert_eq!(backup_rx.try_recv().unwrap().samples, [0.3]);
+        record_chunk(&[0.1, 0.2, 0.3], 1, |x| x, &samples, &mut meter, &level, &feed);
+        assert_eq!(primary_rx.try_recv().unwrap().samples, [0.1, 0.2, 0.3]);
+        assert_eq!(backup_rx.try_recv().unwrap().samples, [0.1, 0.2, 0.3]);
         let mut third_rx = third_rx;
-        assert_eq!(third_rx.try_recv().unwrap().samples, [0.3]);
+        assert_eq!(third_rx.try_recv().unwrap().samples, [0.1, 0.2, 0.3]);
         drop(third_rx);
-        record_chunk(&[0.4], 1, |x| x, &samples, &mut meter, &level, &mut feed);
-        record_chunk(&[0.5], 1, |x| x, &samples, &mut meter, &level, &mut feed);
-        record_chunk(&[0.6], 1, |x| x, &samples, &mut meter, &level, &mut feed);
+        record_chunk(&[0.4], 1, |x| x, &samples, &mut meter, &level, &feed);
+        record_chunk(&[0.5], 1, |x| x, &samples, &mut meter, &level, &feed);
+        record_chunk(&[0.6], 1, |x| x, &samples, &mut meter, &level, &feed);
         assert!(primary_overflow.load(Ordering::Acquire));
         assert!(!backup_overflow.load(Ordering::Acquire));
         assert!(!third_overflow.load(Ordering::Acquire));
-        assert_eq!(feed.inputs.len(), 1);
+        assert_eq!(feed.lock().unwrap().inputs.len(), 1);
         assert_eq!(primary_rx.try_recv().unwrap().samples, [0.4]);
         let remaining: Vec<_> = std::iter::from_fn(|| backup_rx.try_recv().ok()).flat_map(|chunk| chunk.samples).collect();
         assert_eq!(remaining, [0.4, 0.5, 0.6]);
@@ -909,15 +1032,14 @@ mod tests {
     fn display_level_does_not_change_recorded_or_streamed_samples() {
         let samples = Mutex::new(CaptureState { active: true, generation: 1, ..Default::default() });
         let (tx, mut rx) = tokio::sync::mpsc::channel(1);
-        let mut feed = StreamFeed {
+        let feed = Mutex::new(StreamFeed {
             inputs: vec![StreamInput { tx, overflowed: Arc::new(AtomicBool::new(false)) }],
             rate: 48_000,
-            skip: 0,
             generation: 1,
-        };
+        });
         let quiet = speech(-45.0, 18_000, 48_000); // 375 ms: ends on a syllable peak, not a pause
         let level = AtomicU32::new(0);
-        record_chunk(&quiet, 1, |sample| sample, &samples, &mut Loudness::new(48_000), &level, &mut feed);
+        record_chunk(&quiet, 1, |sample| sample, &samples, &mut Loudness::new(48_000), &level, &feed);
         assert_eq!(samples.lock().unwrap().samples, quiet);
         assert_eq!(rx.try_recv().unwrap().samples, quiet);
         assert!(f32::from_bits(level.load(Ordering::Relaxed)) > 0.0);

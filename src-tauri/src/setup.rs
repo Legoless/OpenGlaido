@@ -290,7 +290,7 @@ pub async fn request_microphone_access() -> bool {
 // passes fresh=true and always re-queries. Revoking access while running then shows on Home
 // immediately, and on the next recording only after a restart once the cache says granted.
 #[cfg(target_os = "macos")]
-fn mic_permission(fresh: bool) -> Mic {
+pub(crate) fn mic_permission(fresh: bool) -> Mic {
     use std::sync::atomic::{AtomicBool, Ordering};
     static GRANTED: AtomicBool = AtomicBool::new(false);
     if !fresh && GRANTED.load(Ordering::Relaxed) {
@@ -307,7 +307,7 @@ fn mic_permission(fresh: bool) -> Mic {
 }
 
 #[cfg(not(target_os = "macos"))]
-fn mic_permission(_fresh: bool) -> Mic {
+pub(crate) fn mic_permission(_fresh: bool) -> Mic {
     Mic::Granted
 }
 
