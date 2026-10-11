@@ -507,5 +507,9 @@
  "Provider {number}": "Fournisseur {number}",
  "Add provider": "Ajouter un fournisseur",
  "Remove provider {number}": "Retirer le fournisseur {number}",
- "{count} of {max} providers": "{count} fournisseurs sur {max}"
+ "{count} of {max} providers": "{count} fournisseurs sur {max}",
+ "Changelog": "Journal des modifications",
+ "See what’s new in OpenGlaido": "Découvrez les nouveautés d’OpenGlaido",
+ "View changelog": "Voir les modifications",
+ "Current version": "Version actuelle"
 }

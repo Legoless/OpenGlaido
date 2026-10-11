@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc && vite build",
+    "build": "bun run check:changelog && tsc && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "release:build": "bun --env-file=.release.env.local scripts/release-build.ts",
@@ -13,6 +13,7 @@
     "release:verify": "bun scripts/release.ts verify",
     "release:upload": "bun scripts/release.ts upload",
     "check:locales": "bun scripts/check-locales.ts",
+    "check:changelog": "bun scripts/check-changelog.ts",
     "prepare:microsoft": "bun scripts/prepare-microsoft-runtime.ts"
   },
   "dependencies": {

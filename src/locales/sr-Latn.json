@@ -507,5 +507,9 @@
  "Provider {number}": "Provajder {number}",
  "Add provider": "Dodaj provajdera",
  "Remove provider {number}": "Ukloni provajdera {number}",
- "{count} of {max} providers": "{count} od {max} provajdera"
+ "{count} of {max} providers": "{count} od {max} provajdera",
+ "Changelog": "Dnevnik izmena",
+ "See what’s new in OpenGlaido": "Pogledaj šta je novo u OpenGlaido",
+ "View changelog": "Prikaži dnevnik izmena",
+ "Current version": "Trenutna verzija"
 }

@@ -35,6 +35,15 @@ OpenGlaido is an open-source, cross-platform (macOS, Windows 11, and Linux x64) 
 7. **History:** Audio kept in `audio/<id>.wav`, target app icon + name per row, playback, retry that replaces the transcript, failed transcriptions kept with Retry, command answers with sources, ⌘K palette search.
 8. **App:** Dark / Light / System theme, 14 UI languages (`src/i18n.ts`, `src/locales/*.json`, checked by `bun run check:locales`), launch at login, menu bar / Dock toggles, mute background while recording, noise reduction and silence detection before upload.
 9. **Updates:** Tauri-signed updates from GitHub Releases, checked in the background or in Settings › General. Installation waits for recording, transcription, commands, paste, settings saves, and model downloads to finish and for app windows to close. Development builds cannot install updates. Releases are built, signed, and notarized locally, then uploaded as GitHub drafts; see `docs/releases.md`. No release builds or signing credentials belong in GitHub Actions.
+10. **Changelog:** Settings › General shows bundled release history for the installed version and earlier versions, with localized labels and dates. Draft changes and entries newer than the installed version are never shown, including in local and development builds. The root `changelog.json` also supplies updater and GitHub release notes.
+
+## Changelog
+
+- Add a concise, user-facing bullet to `changelog.json` under `unreleased` for each feature or behavior fix. Internal refactoring and test-only changes need no entry.
+- Keep published entries intact except for factual corrections. Changes after a published version belong under Unreleased, even when a local app build still uses that version number.
+- Keep `unreleased` for internal release authoring only. Never render drafts or notes for versions newer than the installed app in the changelog viewer, including in local and development builds.
+- Before a release, move all draft changes into a dated entry matching the new package, Cargo, and Tauri version, then clear `unreleased`.
+- Run `bun run check:changelog`; official release check/build/upload also require a cleared draft. Frontend builds validate the changelog automatically. See `docs/changelog.md` for the shared data and authoring rules.
 
 ## Getting Started
 

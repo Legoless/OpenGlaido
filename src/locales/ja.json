@@ -507,5 +507,9 @@
  "Provider {number}": "プロバイダー {number}",
  "Add provider": "プロバイダーを追加",
  "Remove provider {number}": "プロバイダー {number} を削除",
- "{count} of {max} providers": "プロバイダー {count} / {max}"
+ "{count} of {max} providers": "プロバイダー {count} / {max}",
+ "Changelog": "変更履歴",
+ "See what’s new in OpenGlaido": "OpenGlaidoの新機能を確認",
+ "View changelog": "変更履歴を表示",
+ "Current version": "現在のバージョン"
 }

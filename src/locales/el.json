@@ -507,5 +507,9 @@
  "Provider {number}": "Πάροχος {number}",
  "Add provider": "Προσθήκη παρόχου",
  "Remove provider {number}": "Αφαίρεση παρόχου {number}",
- "{count} of {max} providers": "{count} από {max} παρόχους"
+ "{count} of {max} providers": "{count} από {max} παρόχους",
+ "Changelog": "Ιστορικό αλλαγών",
+ "See what’s new in OpenGlaido": "Δείτε τι νέο υπάρχει στο OpenGlaido",
+ "View changelog": "Προβολή ιστορικού αλλαγών",
+ "Current version": "Τρέχουσα έκδοση"
 }

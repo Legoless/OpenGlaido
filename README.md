@@ -85,6 +85,7 @@ Details: [local transcription models](docs/local-transcription-models.md), [Micr
 - **Dictionary:** add names and terms to help transcription get them right, if your model accepts hints. **Replace with** swaps in your own spelling after transcription, with any model.
 - **Snippets:** say a trigger like "my email" on its own to paste saved text.
 - **History:** play, copy, delete or **Retry** dictations. Search with **Cmd+K** or Ctrl+K.
+- **Changelog:** see release notes for your installed version and earlier versions in **Settings › General**.
 - **Commands (beta, off by default):** ask out loud and get an answer in a floating window. Turn on beta features in **Settings › General**, then use the Commands shortcut or start a dictation with "Glaido, …".
 - **Tools:** web search and other Commands tools need a cloud language model. Web search and deep research also need a search service: Brave, Tavily or SearXNG. You can add your own tools too, as local MCP servers (a standard way to connect tools to AI).
 - **Also:** remembered microphones, 14 app languages, sounds, themes and launch at login.

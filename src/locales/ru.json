@@ -507,5 +507,9 @@
  "Provider {number}": "Провайдер {number}",
  "Add provider": "Добавить провайдера",
  "Remove provider {number}": "Удалить провайдера {number}",
- "{count} of {max} providers": "{count} из {max} провайдеров"
+ "{count} of {max} providers": "{count} из {max} провайдеров",
+ "Changelog": "История изменений",
+ "See what’s new in OpenGlaido": "Узнайте, что нового в OpenGlaido",
+ "View changelog": "Посмотреть историю изменений",
+ "Current version": "Текущая версия"
 }

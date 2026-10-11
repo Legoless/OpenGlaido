@@ -3,8 +3,10 @@ import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { assertDraft, assertNewRelease, assertSource, readBuilds, releaseManifest, releaseVersion, repositoryApiPath, type BuildReceipt } from "./release";
+import { assertDraft, assertNewRelease, assertSource, readBuilds, releaseDraftNotes, releaseManifest, releaseVersion, repositoryApiPath, type BuildReceipt } from "./release";
 import { buildPlan } from "./release-build";
+import { checkChangelog } from "./check-changelog";
+import { formatReleaseNotes, type ChangelogRelease } from "../src/changelog";
 
 test("GitHub repository lookup has no trailing slash while resource paths stay intact", () => {
   expect(repositoryApiPath("")).toBe("repos/Legoless/OpenGlaido");
@@ -12,6 +14,7 @@ test("GitHub repository lookup has no trailing slash while resource paths stay i
 });
 
 const version = "0.1.1";
+const entry: ChangelogRelease = { version, date: "2026-04-12", changes: ["Keep the start of speech when recording immediately after pressing the shortcut."] };
 const repository = "Legoless/OpenGlaido";
 const commit = "a".repeat(40);
 const macAssets = ["OpenGlaido.app.tar.gz", "OpenGlaido.app.tar.gz.sig", `OpenGlaido_${version}_aarch64.dmg`];
@@ -62,16 +65,16 @@ test("manifest accepts complete single-platform or combined releases and preserv
   withDirectory((directory) => {
     const mac = writeAssets(directory, macAssets);
     const windows = writeAssets(directory, windowsAssets);
-    const macManifest = releaseManifest(mac, repository, version);
+    const macManifest = releaseManifest(mac, repository, version, entry);
     expect(Object.keys(macManifest.platforms)).toEqual(["darwin-aarch64", "darwin-aarch64-app"]);
-    const windowsManifest = releaseManifest(windows, repository, version);
+    const windowsManifest = releaseManifest(windows, repository, version, entry);
     expect(Object.keys(windowsManifest.platforms)).toEqual(["windows-x86_64", "windows-x86_64-nsis", "windows-x86_64-msi"]);
     const linux = writeAssets(directory, linuxAssets);
-    const linuxManifest = releaseManifest(linux, repository, version);
+    const linuxManifest = releaseManifest(linux, repository, version, entry);
     expect(Object.keys(linuxManifest.platforms)).toEqual(["linux-x86_64", "linux-x86_64-appimage", "linux-x86_64-deb"]);
     expect(linuxManifest.platforms["linux-x86_64"].url).toEndWith(".AppImage");
     expect(linuxManifest.platforms["linux-x86_64-deb"].url).toEndWith(".deb");
-    const manifest = releaseManifest([...mac, ...windows, ...linux], repository, version);
+    const manifest = releaseManifest([...mac, ...windows, ...linux], repository, version, entry);
     expect(Object.keys(manifest.platforms)).toEqual(["darwin-aarch64", "darwin-aarch64-app", "windows-x86_64", "windows-x86_64-nsis", "windows-x86_64-msi", "linux-x86_64", "linux-x86_64-appimage", "linux-x86_64-deb"]);
     expect(manifest.version).toBe(version);
     expect(manifest.platforms["darwin-aarch64"].signature).toBe("test-signature");
@@ -80,23 +83,51 @@ test("manifest accepts complete single-platform or combined releases and preserv
   });
 });
 
+test("updater and GitHub draft notes share the selected changelog entry", () => {
+  withDirectory((directory) => {
+    const manifest = releaseManifest(writeAssets(directory, macAssets), repository, version, entry);
+    const draft = releaseDraftNotes(entry, commit, ["darwin-aarch64"]);
+    expect(manifest.notes).toBe(formatReleaseNotes(entry));
+    expect(manifest.notes).toContain(entry.version);
+    expect(manifest.notes).toContain(entry.date);
+    expect(manifest.notes).toContain(entry.changes[0]);
+    expect(draft).toStartWith(`${manifest.notes}\n\n---\n\n`);
+    expect(draft).toContain(`Locally built from ${commit}.`);
+    expect(draft).toContain("Included platforms: darwin-aarch64.");
+    expect(manifest.notes).not.toContain("Locally built");
+    expect(() => releaseManifest(writeAssets(directory, macAssets), repository, version, { ...entry, version: "0.1.0" })).toThrow("notes must match");
+  });
+});
+
+test("release changelog checks require matching app versions, current notes and cleared drafts", () => {
+  const data = { unreleased: [], releases: [entry] };
+  expect(checkChangelog(data, version, version, version, true)).toEqual(entry);
+  const draft = { ...data, unreleased: ["Add a changelog viewer in Settings."] };
+  expect(checkChangelog(draft, version, version, version)).toEqual(entry);
+  expect(() => checkChangelog(draft, version, version, version, true)).toThrow();
+  expect(() => checkChangelog(data, "0.1.2", "0.1.2", "0.1.2")).toThrow();
+  expect(() => checkChangelog(data, version, "0.1.0", version)).toThrow("versions must match");
+  expect(() => checkChangelog(data, version, version, "0.1.0")).toThrow("versions must match");
+  expect(() => checkChangelog({ ...data, releases: [{ ...entry, changes: [] }] }, version, version, version)).toThrow();
+});
+
 test("manifest rejects missing packages, duplicate names, unsupported assets and empty signatures", () => {
   withDirectory((directory) => {
     const files = writeAssets(directory, [...macAssets, ...windowsAssets, ...linuxAssets]);
     for (let missing = 0; missing < files.length; missing++) {
-      expect(() => releaseManifest(files.filter((_, index) => index !== missing), repository, version)).toThrow();
+      expect(() => releaseManifest(files.filter((_, index) => index !== missing), repository, version, entry)).toThrow();
     }
-    expect(() => releaseManifest([], repository, version)).toThrow();
-    expect(() => releaseManifest([...files, files[0]], repository, version)).toThrow();
-    expect(() => releaseManifest([...files, join(directory, "other", macAssets[0])], repository, version)).toThrow();
-    expect(() => releaseManifest(files, repository, "0.1.2")).toThrow();
-    expect(() => releaseManifest(files, "invalid/repo/path", version)).toThrow();
+    expect(() => releaseManifest([], repository, version, entry)).toThrow();
+    expect(() => releaseManifest([...files, files[0]], repository, version, entry)).toThrow();
+    expect(() => releaseManifest([...files, join(directory, "other", macAssets[0])], repository, version, entry)).toThrow();
+    expect(() => releaseManifest(files, repository, "0.1.2", { ...entry, version: "0.1.2" })).toThrow();
+    expect(() => releaseManifest(files, "invalid/repo/path", version, entry)).toThrow();
     for (const unexpected of ["OpenGlaido_0.1.1_x64.dmg", "OpenGlaido_0.1.1_arm64-setup.exe", "extra.txt"]) {
-      expect(() => releaseManifest([...files, join(directory, unexpected)], repository, version)).toThrow();
+      expect(() => releaseManifest([...files, join(directory, unexpected)], repository, version, entry)).toThrow();
     }
     for (const signature of files.filter((file) => file.endsWith(".sig"))) {
       writeFileSync(signature, " \n");
-      expect(() => releaseManifest(files, repository, version)).toThrow();
+      expect(() => releaseManifest(files, repository, version, entry)).toThrow();
       writeFileSync(signature, "test-signature\n");
     }
   });

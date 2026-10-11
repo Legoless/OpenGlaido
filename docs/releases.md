@@ -36,8 +36,11 @@ unrecognized-publisher/SmartScreen warning. Tauri updater signatures are still m
 ## Build and upload
 
 Set the same stable version in `package.json`, `src-tauri/Cargo.toml`, and
-`src-tauri/tauri.conf.json`, and update `src-tauri/Cargo.lock` with Cargo. Commit and push the
-reviewed source first. The tools never commit, push, or switch branches for you.
+`src-tauri/tauri.conf.json`, and update `src-tauri/Cargo.lock` with Cargo. Move the
+Unreleased bullets in `changelog.json` into an entry for that version, set its
+publication date, and clear the draft list. Run `bun run check:changelog --release`.
+Commit and push the reviewed source first. The tools never commit, push, or switch
+branches for you. See [Changelog](changelog.md) for the data and authoring rules.
 
 ```sh
 bun run release:check
@@ -71,8 +74,11 @@ supported, and local models stay macOS-only.
 
 ## Publish when ready
 
-Upload creates one **unpublished draft release**. Test the packages and edit its release notes,
-including a real upgrade from an older installed version with dictation/commands in progress.
+Upload creates one **unpublished draft release**. Its user-facing notes and the updater
+manifest notes come from the version's `changelog.json` entry. Review the generated
+notes and test the packages, including a real upgrade from an older installed version
+with dictation/commands in progress. Author note changes in the changelog before
+building so the bundled viewer, updater, and GitHub notes stay aligned.
 When release is authorized, publish the draft as a stable release and mark it as the latest.
 That is the point at which installed clients can receive it automatically.
 

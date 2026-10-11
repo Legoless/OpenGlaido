@@ -1,0 +1,87 @@
+<!doctype html>
+<!-- Run `bun run dev`, open /scripts/changelog-check.html, then await runChangelogChecks(). -->
+<html lang="en"><head><meta charset="UTF-8"><title>Changelog regression check</title></head><body>
+<div id="root"></div>
+<script type="module">
+import React, { useState } from "react";
+import { createRoot } from "react-dom/client";
+import { Modal } from "/src/ui.tsx";
+import { ChangelogModal, ChangelogSettings } from "/src/changelog-settings.tsx";
+import { changelog } from "/src/changelog.ts";
+import { setLocale } from "/src/i18n.ts";
+import "/src/index.css";
+const e = React.createElement;
+const long = {
+  unreleased: [],
+  releases: [{ version: "2.1.0", date: "2026-10-07", changes: Array.from({ length: 30 }, (_, i) =>
+    `Change ${i + 1}: Preserve opening speech and keep long release notes readable. ${"word".repeat(90)}`) }],
+};
+function Fixture() {
+  const [open, setOpen] = useState(false);
+  const [longOpen, setLongOpen] = useState(false);
+  return e(React.Fragment, null,
+    e("button", { id: "general", onClick: () => setOpen(true) }, "Open General settings"),
+    e("button", { id: "long", onClick: () => setLongOpen(true) }, "Open long notes"),
+    e("button", { id: "de", onClick: () => { setLocale("de"); setLongOpen(true); } }, "Open German notes"),
+    open && e(Modal, { onClose: () => setOpen(false), width: "w-[760px] max-w-[92vw] p-6" },
+      e("h2", null, "General"), e(ChangelogSettings, { currentVersion: "2.1.0" })),
+    longOpen && e(ChangelogModal, { currentVersion: "2.1.0", data: long, onClose: () => setLongOpen(false) }));
+}
+createRoot(document.getElementById("root")).render(e(React.StrictMode, null, e(Fixture)));
+const tick = () => new Promise(resolve => setTimeout(resolve, 40));
+const assert = (condition, message) => { if (!condition) throw Error(message); };
+const focus = node => {
+  node.focus();
+  if (!document.hasFocus()) node.dispatchEvent(new FocusEvent("focusin", { bubbles: true }));
+};
+const click = async node => { focus(node); node.click(); await tick(); };
+const escape = async () => {
+  window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+  await tick();
+};
+const current = () => [...document.querySelectorAll("dialog[open]")].at(-1);
+const checkLayout = dialog => {
+  const card = dialog.firstElementChild;
+  const bounds = card.getBoundingClientRect();
+  assert(bounds.left >= -1 && bounds.right <= innerWidth + 1 && bounds.top >= -1 && bounds.bottom <= innerHeight + 1,
+    "Changelog must fit the viewport");
+  const region = dialog.querySelector('[role="region"]');
+  assert(region.scrollWidth <= region.clientWidth + 1, "Long notes must wrap without horizontal scrolling");
+  assert(getComputedStyle(region).overflowY === "auto", "The notes area must scroll independently");
+  return region;
+};
+window.runChangelogChecks = async () => {
+  await click(document.getElementById("general"));
+  const parent = current();
+  const trigger = [...parent.querySelectorAll("button")].find(button => button.textContent === "View changelog");
+  await click(trigger);
+  const dialog = current();
+  assert(document.querySelectorAll("dialog[open]").length === 2, "Changelog must open above Settings");
+  assert(dialog.getAttribute("aria-modal") === "true", "Changelog must have modal semantics");
+  assert(document.getElementById(dialog.getAttribute("aria-labelledby"))?.textContent === "Changelog", "Dialog must have its visible title as its accessible name");
+  assert(dialog.contains(document.activeElement), "Focus must enter the changelog");
+  assert(dialog.querySelectorAll("li").length === changelog.releases.reduce((n, release) => n + release.changes.length, 0), "Only released notes must be visible in the history");
+  assert(!dialog.textContent.includes("Unreleased") && changelog.unreleased.every(change => !dialog.textContent.includes(change)), "Draft changes must never appear in the app");
+  assert(dialog.textContent.includes("Current version"), "Installed version must be marked");
+  const region = checkLayout(dialog);
+  focus(region);
+  await escape();
+  assert(parent.open && document.querySelectorAll("dialog[open]").length === 1, "Escape must close only Changelog");
+  assert(document.activeElement === trigger, "Closing Changelog must restore its Settings trigger");
+  await click(trigger);
+  await click(current().querySelector('button[title="Close"]'));
+  assert(parent.open && document.activeElement === trigger, "Close button must preserve Settings and restore focus");
+  await escape();
+  assert(!document.querySelector("dialog[open]") && document.activeElement.id === "general", "Closing Settings must restore root focus");
+  await click(document.getElementById("long"));
+  const longDialog = current();
+  const longRegion = checkLayout(longDialog);
+  assert(longRegion.scrollHeight > longRegion.clientHeight, "Long history must remain scrollable");
+  longRegion.scrollTop = longRegion.scrollHeight;
+  await tick();
+  assert(longRegion.scrollTop > 0, "History must scroll to older entries");
+  await escape();
+  assert(!document.querySelector("dialog[open]"), "Long history must close normally");
+  return "Passed: published notes only, no draft content, current-version label, nested modal, accessible name, focus restoration, close/Escape, viewport fit, long-note wrapping and scrolling.";
+};
+</script></body></html>

@@ -507,5 +507,9 @@
  "Provider {number}": "제공업체 {number}",
  "Add provider": "제공업체 추가",
  "Remove provider {number}": "제공업체 {number} 제거",
- "{count} of {max} providers": "제공업체 {count}/{max}개"
+ "{count} of {max} providers": "제공업체 {count}/{max}개",
+ "Changelog": "변경 기록",
+ "See what’s new in OpenGlaido": "OpenGlaido의 새로운 기능 확인",
+ "View changelog": "변경 기록 보기",
+ "Current version": "현재 버전"
 }

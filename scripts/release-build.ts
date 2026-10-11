@@ -3,6 +3,7 @@ import { copyFileSync, existsSync, lstatSync, mkdirSync, readFileSync, realpathS
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { releaseVersion, verifySignatures } from "./release";
+import { changelog, requireVersionEntry } from "../src/changelog";
 
 export function buildPlan(platform: string, architecture: string, version: string) {
   releaseVersion(version, version, version);
@@ -84,10 +85,11 @@ Existing output directories are never overwritten. Nothing is uploaded.`);
     }
   };
   assertSource();
-  capture(["git", "ls-files", "--error-unmatch", "package.json", "bun.lock", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/tauri.conf.json", "src-tauri/tauri.release.conf.json", "scripts/release-build.ts", "scripts/release.ts"]);
+  capture(["git", "ls-files", "--error-unmatch", "package.json", "changelog.json", "bun.lock", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/tauri.conf.json", "src-tauri/tauri.release.conf.json", "scripts/release-build.ts", "scripts/release.ts"]);
   const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
   const cargo = Bun.TOML.parse(readFileSync("src-tauri/Cargo.toml", "utf8")) as { package: { version: string } };
   const version = releaseVersion(config.version, cargo.package.version, JSON.parse(readFileSync("package.json", "utf8")).version);
+  requireVersionEntry(changelog, version, true);
   const plan = buildPlan(process.platform, process.arch, version);
   const host = capture(["rustc", "-vV"]).match(/^host: (.+)$/m)?.[1].trim();
   if (host !== plan.target) throw new Error(`Use a native Rust toolchain for ${plan.target}; cross-compilation is not supported`);

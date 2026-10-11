@@ -507,5 +507,9 @@
  "Provider {number}": "服务商 {number}",
  "Add provider": "添加服务商",
  "Remove provider {number}": "移除服务商 {number}",
- "{count} of {max} providers": "{count} / {max} 个服务商"
+ "{count} of {max} providers": "{count} / {max} 个服务商",
+ "Changelog": "更新日志",
+ "See what’s new in OpenGlaido": "了解 OpenGlaido 的新功能",
+ "View changelog": "查看更新日志",
+ "Current version": "当前版本"
 }

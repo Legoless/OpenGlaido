@@ -28,6 +28,7 @@ import {
   X,
 } from "lucide-react";
 import { CommandsHotkeySection } from "./commands-hotkeys";
+import { ChangelogSettings } from "./changelog-settings";
 import { LOCALES, locale, t } from "./i18n";
 import { ModelSettings } from "./model-settings";
 import { UpdateSettings, useAppUpdates } from "./update-settings";
@@ -705,6 +706,7 @@ export function SettingsModal({
               </SettingsRow>
               <SettingsSection label={t("System")} />
               <UpdateSettings {...updates} />
+              <ChangelogSettings currentVersion={updates.status?.current_version} />
               <SettingsRow
                 icon={Power}
                 title={t("Launch app at login")}

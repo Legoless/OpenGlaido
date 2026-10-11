@@ -507,5 +507,9 @@
  "Provider {number}": "Furnizorul {number}",
  "Add provider": "Adaugă un furnizor",
  "Remove provider {number}": "Elimină furnizorul {number}",
- "{count} of {max} providers": "{count} din {max} furnizori"
+ "{count} of {max} providers": "{count} din {max} furnizori",
+ "Changelog": "Jurnal de modificări",
+ "See what’s new in OpenGlaido": "Vezi noutățile din OpenGlaido",
+ "View changelog": "Vezi jurnalul de modificări",
+ "Current version": "Versiunea curentă"
 }

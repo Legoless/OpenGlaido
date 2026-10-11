@@ -2,6 +2,7 @@ import { copyFileSync, lstatSync, mkdtempSync, readFileSync, rmSync, writeFileSy
 import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
+import { changelog, formatReleaseNotes, requireVersionEntry, type ChangelogRelease } from "../src/changelog";
 
 const REPOSITORY = "Legoless/OpenGlaido";
 
@@ -27,7 +28,7 @@ export function assertDraft(release: Release, version: string, sha: string) {
   }
 }
 
-export function releaseManifest(files: string[], repository: string, version: string) {
+function releasePlatforms(files: string[], repository: string, version: string) {
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) throw new Error("Invalid repository");
   const byName = new Map(files.map((file) => [basename(file), file]));
   if (byName.size !== files.length) throw new Error("Duplicate release asset names");
@@ -50,7 +51,16 @@ export function releaseManifest(files: string[], repository: string, version: st
     }
   }
   if (!accepted.size || files.some((file) => !accepted.has(basename(file)))) throw new Error("Unexpected or unsupported release assets");
-  return { version, notes: `OpenGlaido ${version}`, pub_date: new Date().toISOString(), platforms };
+  return platforms;
+}
+
+export function releaseManifest(files: string[], repository: string, version: string, entry: ChangelogRelease) {
+  if (entry.version !== version) throw new Error("Release notes must match the package version");
+  return { version, notes: formatReleaseNotes(entry), pub_date: new Date().toISOString(), platforms: releasePlatforms(files, repository, version) };
+}
+
+export function releaseDraftNotes(entry: ChangelogRelease, commit: string, platforms: string[]) {
+  return `${formatReleaseNotes(entry)}\n\n---\n\nLocally built from ${commit}.\n\nIncluded platforms: ${platforms.join(", ")}. Test these packages before publishing. macOS packages are Developer ID signed and notarized; Windows packages, when included, have updater signatures but no Authenticode certificate configured. Linux packages, when included, are an x64 AppImage and deb with updater signatures.`;
 }
 
 export type BuildReceipt = {
@@ -99,8 +109,8 @@ export function readBuilds(directory: string, version: string) {
       assets.set(name, { path: file, hash });
       platformFiles.push(file);
     }
-    const manifest = releaseManifest(platformFiles, REPOSITORY, version);
-    if (!(receipt.platform in manifest.platforms) || Object.keys(manifest.platforms).some((key) => !key.startsWith(receipt.platform))) {
+    const packagePlatforms = releasePlatforms(platformFiles, REPOSITORY, version);
+    if (!(receipt.platform in packagePlatforms) || Object.keys(packagePlatforms).some((key) => !key.startsWith(receipt.platform))) {
       throw new Error("Receipt does not match its platform packages");
     }
   }
@@ -184,6 +194,7 @@ async function main() {
   const config = JSON.parse(readFileSync("src-tauri/tauri.conf.json", "utf8"));
   const cargo = Bun.TOML.parse(readFileSync("src-tauri/Cargo.toml", "utf8")) as { package: { version: string } };
   const version = releaseVersion(config.version, cargo.package.version, JSON.parse(readFileSync("package.json", "utf8")).version);
+  const entry = requireVersionEntry(changelog, version, action !== "verify");
   if (action === "check") {
     const sha = sourcePreflight();
     assertUnusedVersion(version);
@@ -201,7 +212,7 @@ async function main() {
       if (assetHash(copy) !== asset.hash) throw new Error(`Artifact changed while preparing upload: ${name}`);
       files.push(copy);
     }
-    const manifest = releaseManifest(files, REPOSITORY, version);
+    const manifest = releaseManifest(files, REPOSITORY, version, entry);
     verifySignatures(files, config.plugins.updater.pubkey, version);
     if (action === "verify") {
       console.log(`Verified v${version}, ${build.commit}, platforms: ${build.platforms.join(", ")}`);
@@ -213,7 +224,7 @@ async function main() {
     writeFileSync(manifestPath, JSON.stringify(manifest, null, 2) + "\n");
     const release: Release = github("releases", "POST", {
       tag_name: `v${version}`, target_commitish: sha, name: `OpenGlaido ${version}`,
-      body: `Locally built from ${sha}.\n\nIncluded platforms: ${build.platforms.join(", ")}. Test these packages before publishing. macOS packages are Developer ID signed and notarized; Windows packages, when included, have updater signatures but no Authenticode certificate configured. Linux packages, when included, are an x64 AppImage and deb with updater signatures.`,
+      body: releaseDraftNotes(entry, sha, build.platforms),
       draft: true, prerelease: false, make_latest: "false",
     });
     for (const file of [...files, manifestPath]) {

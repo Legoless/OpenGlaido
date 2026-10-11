@@ -1,0 +1,42 @@
+{
+  "unreleased": [
+    "See release history in Settings, showing only the installed and earlier versions.",
+    "Reduce dictation startup delay and preserve speech at the beginning of recordings.",
+    "Improve dictation paste reliability on macOS.",
+    "Prevent duplicate app instances when OpenGlaido is launched again."
+  ],
+  "releases": [
+    {
+      "version": "2.1.0",
+      "date": "2026-10-07",
+      "changes": [
+        "Add up to four backup providers for live transcription, with saved settings for each.",
+        "Support transcription backups for History Retry and local streaming models.",
+        "Retry live transcription startup timeouts while preserving queued audio, and show clearer provider errors.",
+        "Improve the getting-started guide and download instructions."
+      ]
+    },
+    {
+      "version": "0.2.0",
+      "date": "2026-10-07",
+      "changes": [
+        "Introduce Windows 11 and Linux x64 builds alongside macOS.",
+        "Add native Windows shortcuts that preserve AltGr typing and work while OpenGlaido has focus.",
+        "Add Linux X11 shortcuts, clipboard paste, and secure API-key storage.",
+        "Show warnings for shortcuts already owned by another app without disabling other hotkeys.",
+        "License OpenGlaido under MIT."
+      ]
+    },
+    {
+      "version": "0.1.0",
+      "date": "2026-10-06",
+      "changes": [
+        "First public release for macOS on Apple Silicon.",
+        "Add hold-to-talk and hands-free dictation, a floating recording bar, and local or cloud transcription.",
+        "Add formatting rules, voice commands, and custom MCP tools.",
+        "Add snippets, a dictionary, and searchable history with audio playback and retry.",
+        "Support 14 interface languages, themes, and signed automatic updates."
+      ]
+    }
+  ]
+}
